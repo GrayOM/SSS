@@ -1,4 +1,5 @@
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from zipfile import ZipFile
@@ -12,10 +13,27 @@ class ZipSecurityError(Exception):
 
 def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
     base_path = extract_to.resolve()
+    total_uncompressed = 0
+
+    members = zip_file.infolist()
+    if len(members) > settings.MAX_ZIP_MEMBERS:
+        raise ZipSecurityError(f'Too many zip members: {len(members)}')
+
+    max_uncompressed = settings.MAX_UNCOMPRESSED_SIZE_MB * 1024 * 1024
+
+    for member in members:
+        mode = (member.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(mode):
+            raise ZipSecurityError(f'Symlink entry is not allowed: {member.filename}')
+
     for member in zip_file.infolist():
         member_path = (extract_to / member.filename).resolve()
         if not str(member_path).startswith(str(base_path)):
             raise ZipSecurityError(f'ZIP Slip detected: {member.filename}')
+
+        total_uncompressed += member.file_size
+        if total_uncompressed > max_uncompressed:
+            raise ZipSecurityError('Uncompressed size limit exceeded')
 
         if member.is_dir():
             member_path.mkdir(parents=True, exist_ok=True)
