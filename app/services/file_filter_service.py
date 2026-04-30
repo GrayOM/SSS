@@ -3,6 +3,14 @@ from pathlib import Path
 from app.core.config import settings
 from app.models.schemas import InclusionDecision
 
+INCLUDE_EXTENSIONS = {
+    '.js', '.html', '.json', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.vue', '.ejs', '.hbs', '.pug'
+}
+INCLUDE_FILENAMES = {'package.json', 'dockerfile', 'docker-compose.yml', 'docker-compose.yaml'}
+ALLOWED_ENV_FILENAMES = {'.env.example', '.env.sample'}
+CONFIG_KEYWORDS = {'config'}
+EXCLUDED_DIR_NAMES = {'node_modules', 'vendor', 'dist', 'build', 'coverage', '.git', '__pycache__', 'libs', 'cdn'}
+EXCLUDED_FILE_PATTERNS = ('.min.js', '.bundle.js', '.chunk.js', 'bundle.js', 'webpack')
 INCLUDE_EXTENSIONS = {'.js', '.html', '.json', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.vue', '.ejs', '.hbs', '.pug'}
 INCLUDE_FILENAMES = {'package.json', 'dockerfile', 'docker-compose.yml', 'docker-compose.yaml'}
 CONFIG_KEYWORDS = {'config', '.env.example', '.env.sample'}
@@ -19,10 +27,10 @@ CONFIG_KEYWORDS = {'config', '.env.example', '.env.sample'}
 EXCLUDED_DIR_NAMES = {'node_modules', 'vendor', 'dist', 'build', '.git', '__pycache__'}
 EXCLUDED_FILE_PATTERNS = {'jquery', 'bootstrap', '.min.js', 'bundle.js'}
 
-
 def _is_binary(file_path: Path) -> bool:
     try:
         with file_path.open('rb') as f:
+            return b'\x00' in f.read(4096)
             chunk = f.read(4096)
 
             chunk = f.read(1024)
@@ -32,6 +40,10 @@ def _is_binary(file_path: Path) -> bool:
 
 
 def should_include_file(file_path: Path) -> InclusionDecision:
+    normalized_parts = {part.lower() for part in file_path.parts}
+    file_name = file_path.name.lower()
+
+    if normalized_parts.intersection(EXCLUDED_DIR_NAMES):
     normalized_parts = [part.lower() for part in file_path.parts]
     file_name = file_path.name.lower()
 
@@ -50,6 +62,12 @@ def should_include_file(file_path: Path) -> InclusionDecision:
 
     if any(pattern in file_name for pattern in EXCLUDED_FILE_PATTERNS):
         return _decision(False, 'excluded minified/build output', 'EXCLUDED_MINIFIED', 80)
+
+    if file_name in ALLOWED_ENV_FILENAMES:
+        return _decision(True, 'included allowed env sample file', 'INCLUDED_CONFIG', 70)
+
+    if file_name.endswith('.env'):
+        return _decision(False, 'real env files are excluded', 'EXCLUDED_EXTENSION', 20)
 
     extension = file_path.suffix.lower()
     if extension in INCLUDE_EXTENSIONS:

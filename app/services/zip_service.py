@@ -1,3 +1,4 @@
+import os
 import shutil
 import stat
 import tempfile
@@ -11,6 +12,21 @@ class ZipSecurityError(Exception):
     pass
 
 
+def _ensure_within_base(member_path: Path, base_path: Path, member_name: str) -> None:
+    if hasattr(member_path, 'is_relative_to'):
+        if not member_path.is_relative_to(base_path):
+            raise ZipSecurityError(f'ZIP Slip detected: {member_name}')
+        return
+
+    base_prefix = str(base_path) + os.sep
+    if str(member_path) != str(base_path) and not str(member_path).startswith(base_prefix):
+        raise ZipSecurityError(f'ZIP Slip detected: {member_name}')
+
+
+def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
+    base_path = extract_to.resolve()
+    members = zip_file.infolist()
+
 def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
     base_path = extract_to.resolve()
     total_uncompressed = 0
@@ -20,6 +36,7 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
         raise ZipSecurityError(f'Too many zip members: {len(members)}')
 
     max_uncompressed = settings.MAX_UNCOMPRESSED_SIZE_MB * 1024 * 1024
+    total_uncompressed = 0
 
     for member in members:
         mode = (member.external_attr >> 16) & 0xFFFF
@@ -35,12 +52,15 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
         if total_uncompressed > max_uncompressed:
             raise ZipSecurityError('Uncompressed size limit exceeded')
 
+        member_path = (extract_to / member.filename).resolve()
+        _ensure_within_base(member_path, base_path, member.filename)
+
         if member.is_dir():
             member_path.mkdir(parents=True, exist_ok=True)
             continue
 
         member_path.parent.mkdir(parents=True, exist_ok=True)
-        with zip_file.open(member) as source, open(member_path, 'wb') as target:
+        with zip_file.open(member) as source, member_path.open('wb') as target:
             shutil.copyfileobj(source, target)
 
 

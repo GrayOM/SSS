@@ -10,6 +10,8 @@ COPY . .
 RUN mkdir -p /tmp/ai_code_analyzer && chown -R appuser:appuser /app /tmp/ai_code_analyzer
 USER appuser
 
+
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
