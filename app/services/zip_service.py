@@ -26,6 +26,7 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
         if stat.S_ISLNK(mode):
             raise ZipSecurityError(f'Symlink entry is not allowed: {member.filename}')
 
+    for member in zip_file.infolist():
         member_path = (extract_to / member.filename).resolve()
         if not str(member_path).startswith(str(base_path)):
             raise ZipSecurityError(f'ZIP Slip detected: {member.filename}')
