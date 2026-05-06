@@ -15,6 +15,7 @@ class FileAnalysisResult(BaseModel):
     reason: str
     reason_code: str
     priority: int
+    content_hash: str | None = None
 
 
 class UploadAnalysisResponse(BaseModel):

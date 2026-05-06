@@ -28,6 +28,7 @@ def scan_extracted_directory(extracted_dir: Path) -> UploadAnalysisResponse:
                 reason=decision.reason,
                 reason_code=decision.reason_code,
                 priority=decision.priority,
+                content_hash=None,
             )
         )
 

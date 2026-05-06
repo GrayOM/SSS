@@ -13,6 +13,7 @@ class ZipSecurityError(Exception):
 
 
 def _ensure_within_base(member_path: Path, base_path: Path, member_name: str) -> None:
+    # Path.is_relative_to is available from Python 3.9+.
     if hasattr(member_path, 'is_relative_to'):
         if not member_path.is_relative_to(base_path):
             raise ZipSecurityError(f'ZIP Slip detected: {member_name}')
