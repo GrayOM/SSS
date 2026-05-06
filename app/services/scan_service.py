@@ -15,6 +15,7 @@ def scan_extracted_directory(extracted_dir: Path) -> UploadAnalysisResponse:
             continue
         scanned += 1
         decision = should_include_file(path)
+
         if decision.include:
             included_count += 1
         else:
