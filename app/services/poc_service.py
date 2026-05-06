@@ -1,5 +1,6 @@
+from app.core.config import settings
 from app.models.schemas import VulnerabilityFinding
-from app.services.ai_clients import GeminiClientProtocol
+from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 
 
 class GeminiPocGenerator:
@@ -33,3 +34,12 @@ Finding:
 class MockPocGenerator:
     def generate_safe_poc(self, finding: VulnerabilityFinding) -> str | None:
         return finding.safe_poc or 'Safe PoC not generated'
+
+
+def get_poc_generator():
+    backend = settings.POC_BACKEND.lower()
+    if backend == 'mock':
+        return MockPocGenerator()
+    if backend == 'gemini':
+        return GeminiPocGenerator(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
+    raise ValueError(f'Unknown POC backend: {settings.POC_BACKEND}')

@@ -18,7 +18,11 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn('el.innerHTML = location.hash;', prompt)
         self.assertIn('Evidence', prompt)
         self.assertIn('destructive exploit', prompt)
-        self.assertIn('JSON', prompt)
+        self.assertIn('{"findings": []}', prompt)
+        self.assertIn('markdown code fence를 사용하지 마라', prompt)
+        self.assertIn('JSON 외 설명 문장을 출력하지 마라', prompt)
+        self.assertIn('severity는 low, medium, high, critical', prompt)
+        self.assertIn('confidence는 low, medium, high', prompt)
 
 
 if __name__ == '__main__':

@@ -11,6 +11,13 @@ Rules:
 - 코드 근거가 없으면 finding을 생성하지 마라.
 - safe PoC만 허용한다.
 - destructive exploit, 데이터 삭제/변조, 권한 상승, 외부 연결은 금지한다.
+- findings가 없으면 반드시 {{"findings": []}} 를 반환하라.
+- markdown code fence를 사용하지 마라.
+- JSON 외 설명 문장을 출력하지 마라.
+- severity는 low, medium, high, critical 중 하나만 사용하라.
+- confidence는 low, medium, high 중 하나만 사용하라.
+- snippet은 제공된 코드에서 직접 인용한 짧은 부분만 사용하라.
+- 코드 근거 없는 추정은 금지한다.
 - 응답은 반드시 JSON 객체만 반환하라.
 
 Chunk metadata:

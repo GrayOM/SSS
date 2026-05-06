@@ -1,7 +1,7 @@
 import unittest
 
 from app.models.schemas import CodeChunk
-from app.services.analysis_service import analyze_chunks
+from app.services.analysis_service import MockAnalyzer, analyze_chunks
 
 
 def _chunk(content: str, idx: int = 0) -> CodeChunk:
@@ -18,6 +18,12 @@ def _chunk(content: str, idx: int = 0) -> CodeChunk:
         content=content,
     )
 
+
+
+
+class FakeAnalyzer:
+    def analyze_chunk(self, chunk: CodeChunk):
+        return []
 
 class AnalysisServiceTests(unittest.TestCase):
     def test_empty_chunks_returns_valid_result(self):
@@ -84,6 +90,42 @@ class AnalysisServiceTests(unittest.TestCase):
     def test_safe_code_generates_no_finding(self):
         result = analyze_chunks([_chunk('const x = 1;')])
         self.assertEqual(result.finding_count, 0)
+
+    def test_analyze_chunks_uses_injected_analyzer(self):
+        class CountingAnalyzer:
+            def __init__(self):
+                self.called = 0
+
+            def analyze_chunk(self, chunk: CodeChunk):
+                self.called += 1
+                return []
+
+        analyzer = CountingAnalyzer()
+        analyze_chunks([_chunk('const a = 1;')], analyzer=analyzer)
+        self.assertEqual(analyzer.called, 1)
+
+    def test_analyze_chunks_uses_get_analyzer_when_none(self):
+        from app.services import analysis_service
+
+        original = analysis_service.get_analyzer
+        try:
+            analysis_service.get_analyzer = lambda: FakeAnalyzer()
+            result = analyze_chunks([_chunk('const a = 1;')])
+            self.assertEqual(result.finding_count, 0)
+        finally:
+            analysis_service.get_analyzer = original
+
+    def test_analyze_chunks_with_mock_backend_setting(self):
+        from app.services import analysis_service
+
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            result = analyze_chunks([_chunk('eval(userInput)')])
+            self.assertEqual(result.finding_count, 1)
+            self.assertEqual(result.findings[0].vulnerability_type, 'Unsafe eval')
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
 
 
 if __name__ == '__main__':

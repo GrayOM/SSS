@@ -45,6 +45,21 @@ class GeminiAnalyzerTests(unittest.TestCase):
         analyzer = GeminiAnalyzer(FakeGeminiClient('{"findings":[{"severity":"high"}]}'))
         self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
 
+    def test_fenced_json_is_parsed(self):
+        payload = '```json\n{"findings": []}\n```'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
+    def test_wrapped_json_with_explanations_is_parsed(self):
+        payload = 'Here is result. {"findings": []} End.'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
+    def test_non_list_findings_returns_empty(self):
+        payload = '{"findings": {"a": 1}}'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
 
 if __name__ == '__main__':
     unittest.main()

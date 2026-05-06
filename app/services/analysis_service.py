@@ -89,6 +89,41 @@ class MockAnalyzer(Analyzer):
         return findings
 
 
+
+
+def _extract_json_payload(raw: str) -> dict | None:
+    text = raw.strip()
+
+    try:
+        payload = json.loads(text)
+        return payload if isinstance(payload, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    if text.startswith('```'):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == '```':
+            fence_header = lines[0].strip().lower()
+            if fence_header in ('```', '```json'):
+                body = '\n'.join(lines[1:-1]).strip()
+                try:
+                    payload = json.loads(body)
+                    return payload if isinstance(payload, dict) else None
+                except json.JSONDecodeError:
+                    pass
+
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            payload = json.loads(candidate)
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    return None
+
 class GeminiAnalyzer(Analyzer):
     def __init__(self, client: GeminiClientProtocol):
         self.client = client
@@ -97,9 +132,8 @@ class GeminiAnalyzer(Analyzer):
         prompt = build_analysis_prompt(chunk)
         raw = self.client.analyze(prompt)
 
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
+        payload = _extract_json_payload(raw)
+        if payload is None:
             return []
 
         findings_data = payload.get('findings')
@@ -163,7 +197,7 @@ def _deterministic_id(chunk: CodeChunk, finding: VulnerabilityFinding, occurrenc
 
 
 def analyze_chunks(chunks: list[CodeChunk], analyzer: Analyzer | None = None) -> AnalysisResult:
-    analyzer = analyzer or MockAnalyzer()
+    analyzer = analyzer or get_analyzer()
     findings: list[VulnerabilityFinding] = []
     skipped_chunks: list[CodeChunk] = []
     analyzed_chunks = 0

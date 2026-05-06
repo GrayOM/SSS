@@ -1,7 +1,8 @@
 import unittest
 
 from app.models.schemas import AnalysisEvidence, VulnerabilityFinding
-from app.services.poc_service import GeminiPocGenerator, MockPocGenerator
+from app.services import poc_service
+from app.services.poc_service import GeminiPocGenerator, MockPocGenerator, get_poc_generator
 
 
 class FakeGeminiClient:
@@ -44,6 +45,23 @@ class PocServiceTests(unittest.TestCase):
     def test_mock_poc_generator_returns_default_when_missing(self):
         svc = MockPocGenerator()
         self.assertEqual(svc.generate_safe_poc(_finding(None)), 'Safe PoC not generated')
+
+    def test_get_poc_generator_returns_mock(self):
+        original = poc_service.settings.POC_BACKEND
+        try:
+            poc_service.settings.POC_BACKEND = 'mock'
+            self.assertIsInstance(get_poc_generator(), MockPocGenerator)
+        finally:
+            poc_service.settings.POC_BACKEND = original
+
+    def test_get_poc_generator_unknown_backend_raises(self):
+        original = poc_service.settings.POC_BACKEND
+        try:
+            poc_service.settings.POC_BACKEND = 'unknown'
+            with self.assertRaises(ValueError):
+                get_poc_generator()
+        finally:
+            poc_service.settings.POC_BACKEND = original
 
 
 if __name__ == '__main__':
