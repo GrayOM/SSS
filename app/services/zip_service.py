@@ -31,11 +31,10 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
         raise ZipSecurityError(f'Too many zip members: {len(members)}')
 
     max_uncompressed = settings.MAX_UNCOMPRESSED_SIZE_MB * 1024 * 1024
-    meta_total_uncompressed = sum(m.file_size for m in members)
-    if meta_total_uncompressed > max_uncompressed:
+    total_uncompressed = sum(m.file_size for m in members)
+    if total_uncompressed > max_uncompressed:
         raise ZipSecurityError('Uncompressed size limit exceeded')
 
-    written_bytes = 0
     for member in members:
         if stat.S_ISLNK((member.external_attr >> 16) & 0xFFFF):
             raise ZipSecurityError(f'Symlink not allowed: {member.filename}')
@@ -49,14 +48,7 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
 
         member_path.parent.mkdir(parents=True, exist_ok=True)
         with zip_file.open(member) as src, member_path.open('wb') as dst:
-            while True:
-                chunk = src.read(64 * 1024)
-                if not chunk:
-                    break
-                written_bytes += len(chunk)
-                if written_bytes > max_uncompressed:
-                    raise ZipSecurityError('Uncompressed size limit exceeded during extraction')
-                dst.write(chunk)
+            shutil.copyfileobj(src, dst)
 
 
 def prepare_workspace() -> str:

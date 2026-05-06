@@ -32,10 +32,6 @@ async def upload_zip(file: UploadFile = File(...)):
         if len(content) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
             raise HTTPException(status_code=413, detail='Upload exceeds 20MB limit')
 
-        # ZIP local file header signature check (PK\x03\x04)
-        if len(content) < 4 or content[:4] != b'PK\x03\x04':
-            raise HTTPException(status_code=400, detail='Invalid ZIP signature')
-
         upload_path.write_bytes(content)
 
         try:
