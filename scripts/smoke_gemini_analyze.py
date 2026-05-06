@@ -46,7 +46,6 @@ def main() -> int:
         print('Gemini smoke test failed')
         print(f'Error type: {type(exc).__name__}')
         print('Check GEMINI_API_KEY, GEMINI_MODEL, quota, and network connectivity.')
-        print(f'Error message: {str(exc)}')
         return 1
 
 
