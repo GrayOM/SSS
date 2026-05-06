@@ -28,6 +28,11 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
     base_path = extract_to.resolve()
     members = zip_file.infolist()
 
+def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
+    base_path = extract_to.resolve()
+    total_uncompressed = 0
+
+    members = zip_file.infolist()
     if len(members) > settings.MAX_ZIP_MEMBERS:
         raise ZipSecurityError(f'Too many zip members: {len(members)}')
 
@@ -39,6 +44,21 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
     for member in members:
         if stat.S_ISLNK((member.external_attr >> 16) & 0xFFFF):
             raise ZipSecurityError(f'Symlink not allowed: {member.filename}')
+    total_uncompressed = 0
+
+    for member in members:
+        mode = (member.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(mode):
+            raise ZipSecurityError(f'Symlink entry is not allowed: {member.filename}')
+
+    for member in zip_file.infolist():
+        member_path = (extract_to / member.filename).resolve()
+        if not str(member_path).startswith(str(base_path)):
+            raise ZipSecurityError(f'ZIP Slip detected: {member.filename}')
+
+        total_uncompressed += member.file_size
+        if total_uncompressed > max_uncompressed:
+            raise ZipSecurityError('Uncompressed size limit exceeded')
 
         member_path = (extract_to / member.filename).resolve()
         _ensure_within_base(member_path, base_path, member.filename)
@@ -50,6 +70,8 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
         member_path.parent.mkdir(parents=True, exist_ok=True)
         with zip_file.open(member) as src, member_path.open('wb') as dst:
             shutil.copyfileobj(src, dst)
+        with zip_file.open(member) as source, member_path.open('wb') as target:
+            shutil.copyfileobj(source, target)
 
 
 def prepare_workspace() -> str:

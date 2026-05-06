@@ -9,6 +9,7 @@ except ModuleNotFoundError:  # fallback for limited test environments
 
     class SettingsConfigDict(dict):
         pass
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
