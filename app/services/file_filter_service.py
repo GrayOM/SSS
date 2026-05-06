@@ -13,15 +13,7 @@ TEMPLATE_EXTENSIONS = {'.html', '.ejs', '.hbs', '.pug'}
 CONFIG_EXTENSIONS = {'.json'}
 INCLUDE_FILENAMES = {'package.json', 'dockerfile', 'docker-compose.yml', 'docker-compose.yaml'}
 ALLOWED_ENV_FILES = {'.env.example', '.env.sample'}
-CONFIG_ALLOWLIST = {
-    'config.js',
-    'config.json',
-    'app.config.js',
-    'vite.config.js',
-    'webpack.config.js',
-    'next.config.js',
-    'nuxt.config.js',
-}
+CONFIG_KEYWORDS = {'config'}
 EXCLUDED_DIRS = {'node_modules', 'vendor', 'dist', 'build', 'coverage', '.git', '__pycache__', 'libs', 'cdn'}
 EXCLUDED_PATTERNS = ('.min.js', '.bundle.js', '.chunk.js', 'bundle.js', 'webpack')
 
@@ -67,7 +59,7 @@ def should_include_file(file_path: Path) -> InclusionDecision:
         return _decision(True, 'data/config file', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
     if name in INCLUDE_FILENAMES:
         return _decision(True, 'key filename', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
-    if name in CONFIG_ALLOWLIST:
-        return _decision(True, 'config allowlist', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if any(k in name for k in CONFIG_KEYWORDS):
+        return _decision(True, 'config keyword', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
 
     return _decision(False, 'extension not allowed', 'EXCLUDED_EXTENSION', 100)
