@@ -11,6 +11,16 @@ class Settings(BaseSettings):
     MAX_CHUNK_LINES: int = 200
     CHUNK_OVERLAP_LINES: int = 20
 
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = 'gemini-2.5-flash-lite'
+    ANALYZER_BACKEND: str = 'mock'
+    POC_BACKEND: str = 'mock'
+
+    OPENAI_API_KEY: str | None = None
+    ANTHROPIC_API_KEY: str | None = None
+    OPENAI_MODEL: str = 'gpt-4.1-mini'
+    CLAUDE_MODEL: str = 'claude-3-5-sonnet-latest'
+
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
 
 
