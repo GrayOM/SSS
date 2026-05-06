@@ -48,8 +48,10 @@ class ChunkServiceTests(unittest.TestCase):
                 path='x.js', extension='.js', size=len(content), priority=1,
                 reason_code='INCLUDED_SOURCE', content_hash='h', content=content
             )])
+            self.assertEqual(result.total_chunks, 3)
             self.assertEqual((result.chunks[0].start_line, result.chunks[0].end_line), (1, 5))
             self.assertEqual((result.chunks[1].start_line, result.chunks[1].end_line), (4, 8))
+            self.assertEqual((result.chunks[2].start_line, result.chunks[2].end_line), (7, 9))
         finally:
             settings.MAX_CHUNK_LINES = original_max
             settings.CHUNK_OVERLAP_LINES = original_overlap
@@ -84,6 +86,30 @@ class ChunkServiceTests(unittest.TestCase):
         original_overlap = settings.CHUNK_OVERLAP_LINES
         settings.MAX_CHUNK_LINES = 10
         settings.CHUNK_OVERLAP_LINES = 10
+        try:
+            with self.assertRaises(ValueError):
+                build_chunks([])
+        finally:
+            settings.MAX_CHUNK_LINES = original_max
+            settings.CHUNK_OVERLAP_LINES = original_overlap
+
+    def test_max_chunk_lines_zero_raises(self):
+        original_max = settings.MAX_CHUNK_LINES
+        original_overlap = settings.CHUNK_OVERLAP_LINES
+        settings.MAX_CHUNK_LINES = 0
+        settings.CHUNK_OVERLAP_LINES = 0
+        try:
+            with self.assertRaises(ValueError):
+                build_chunks([])
+        finally:
+            settings.MAX_CHUNK_LINES = original_max
+            settings.CHUNK_OVERLAP_LINES = original_overlap
+
+    def test_negative_overlap_raises(self):
+        original_max = settings.MAX_CHUNK_LINES
+        original_overlap = settings.CHUNK_OVERLAP_LINES
+        settings.MAX_CHUNK_LINES = 10
+        settings.CHUNK_OVERLAP_LINES = -1
         try:
             with self.assertRaises(ValueError):
                 build_chunks([])

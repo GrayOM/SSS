@@ -8,6 +8,10 @@ def build_chunks(file_contents: list[FileContent]) -> ChunkBuildResult:
     max_lines = settings.MAX_CHUNK_LINES
     overlap = settings.CHUNK_OVERLAP_LINES
 
+    if max_lines <= 0:
+        raise ValueError('MAX_CHUNK_LINES must be greater than 0')
+    if overlap < 0:
+        raise ValueError('CHUNK_OVERLAP_LINES must be greater than or equal to 0')
     if overlap >= max_lines:
         raise ValueError('CHUNK_OVERLAP_LINES must be smaller than MAX_CHUNK_LINES')
 
@@ -20,6 +24,7 @@ def build_chunks(file_contents: list[FileContent]) -> ChunkBuildResult:
             skipped.append(file_content)
             continue
 
+        # Split by logical lines via splitlines(); trailing newline preservation is out of scope here.
         lines = file_content.content.splitlines()
         if not lines:
             skipped.append(file_content)
