@@ -1,3 +1,4 @@
+<<<<<<< codex/design-project-folder-structure-rcjbnn
 from pathlib import Path
 import sys
 
@@ -5,6 +6,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+=======
+>>>>>>> main
 from app.core.config import settings
 from app.models.schemas import CodeChunk
 from app.services.ai_clients import GeminiClient
@@ -45,7 +48,11 @@ def main() -> int:
     except Exception as exc:
         print('Gemini smoke test failed')
         print(f'Error type: {type(exc).__name__}')
+<<<<<<< codex/design-project-folder-structure-rcjbnn
         print('Check GEMINI_API_KEY, GEMINI_MODEL, quota, and network connectivity.')
+=======
+        print(f'Error message: {str(exc)}')
+>>>>>>> main
         return 1
 
 
