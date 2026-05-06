@@ -3,6 +3,16 @@ from abc import ABC, abstractmethod
 
 from app.models.schemas import AnalysisEvidence, AnalysisResult, CodeChunk, VulnerabilityFinding
 
+DOM_XSS_SINK = 'innerHTML'
+DOM_XSS_SOURCES = ('location', 'document.URL', 'document.location', 'input.value')
+EVAL_PATTERN = 'eval('
+COMMAND_EXEC_PATTERNS = (
+    'child_process.exec',
+    'child_process.execSync',
+    'require("child_process").exec',
+    "require('child_process').exec",
+)
+
 
 class Analyzer(ABC):
     @abstractmethod
@@ -47,7 +57,7 @@ class MockAnalyzer(Analyzer):
         findings: list[VulnerabilityFinding] = []
         content = chunk.content
 
-        if 'innerHTML' in content and any(x in content for x in ('location', 'document.URL', 'document.location', 'input.value')):
+        if DOM_XSS_SINK in content and any(x in content for x in DOM_XSS_SOURCES):
             findings.append(self._make_finding(
                 chunk,
                 'DOM XSS',
@@ -66,7 +76,7 @@ class MockAnalyzer(Analyzer):
                 ['CWE-79'],
             ))
 
-        if 'eval(' in content:
+        if EVAL_PATTERN in content:
             findings.append(self._make_finding(
                 chunk,
                 'Unsafe eval',
@@ -81,7 +91,7 @@ class MockAnalyzer(Analyzer):
                 ['CWE-95'],
             ))
 
-        if 'child_process.exec' in content or 'exec(' in content:
+        if any(p in content for p in COMMAND_EXEC_PATTERNS):
             findings.append(self._make_finding(
                 chunk,
                 'Command Injection',
@@ -99,8 +109,20 @@ class MockAnalyzer(Analyzer):
         return findings
 
 
-def _deterministic_id(chunk: CodeChunk, vulnerability_type: str) -> str:
-    base = f'{chunk.source_path}:{chunk.chunk_index}:{vulnerability_type}'
+def _deterministic_id(chunk: CodeChunk, finding: VulnerabilityFinding, occurrence_index: int) -> str:
+    evidence_reason = finding.evidence[0].reason if finding.evidence else ''
+    evidence_snippet = finding.evidence[0].snippet[:50] if finding.evidence else ''
+    base = '|'.join([
+        chunk.source_path,
+        str(chunk.chunk_index),
+        finding.vulnerability_type,
+        str(finding.start_line),
+        str(finding.end_line),
+        evidence_reason,
+        evidence_snippet,
+        str(occurrence_index),
+        chunk.chunk_hash,
+    ])
     return hashlib.sha256(base.encode('utf-8')).hexdigest()[:12]
 
 
@@ -117,8 +139,8 @@ def analyze_chunks(chunks: list[CodeChunk], analyzer: Analyzer | None = None) ->
 
         analyzed_chunks += 1
         chunk_findings = analyzer.analyze_chunk(chunk)
-        for finding in chunk_findings:
-            findings.append(finding.model_copy(update={'id': _deterministic_id(chunk, finding.vulnerability_type)}))
+        for occurrence_index, finding in enumerate(chunk_findings):
+            findings.append(finding.model_copy(update={'id': _deterministic_id(chunk, finding, occurrence_index)}))
 
     return AnalysisResult(
         total_chunks=len(chunks),

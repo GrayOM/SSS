@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class InclusionDecision(BaseModel):
@@ -88,7 +88,7 @@ class VulnerabilityFinding(BaseModel):
     impact: str
     root_cause: str
     remediation: str
-    related_cwe: list[str] = []
+    related_cwe: list[str] = Field(default_factory=list)
 
 
 class AnalysisResult(BaseModel):
@@ -96,4 +96,4 @@ class AnalysisResult(BaseModel):
     analyzed_chunks: int
     finding_count: int
     findings: list[VulnerabilityFinding]
-    skipped_chunks: list[CodeChunk] = []
+    skipped_chunks: list[CodeChunk] = Field(default_factory=list)
