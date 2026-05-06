@@ -14,10 +14,12 @@ class ZipSecurityError(Exception):
 
 def _ensure_within_base(member_path: Path, base_path: Path, member_name: str) -> None:
     # Path.is_relative_to는 Python 3.9+ 전용
+    # Path.is_relative_to is available from Python 3.9+.
     if hasattr(member_path, 'is_relative_to'):
         if not member_path.is_relative_to(base_path):
             raise ZipSecurityError(f'ZIP Slip detected: {member_name}')
         return
+
     base_prefix = str(base_path) + os.sep
     if str(member_path) != str(base_path) and not str(member_path).startswith(base_prefix):
         raise ZipSecurityError(f'ZIP Slip detected: {member_name}')
@@ -27,17 +29,38 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
     base_path = extract_to.resolve()
     members = zip_file.infolist()
 
+def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
+    base_path = extract_to.resolve()
+    total_uncompressed = 0
+
+    members = zip_file.infolist()
     if len(members) > settings.MAX_ZIP_MEMBERS:
         raise ZipSecurityError(f'Too many zip members: {len(members)}')
 
     max_uncompressed = settings.MAX_UNCOMPRESSED_SIZE_MB * 1024 * 1024
     total_uncompressed = sum(m.file_size for m in members)
+    total_uncompressed = sum(member.file_size for member in members)
     if total_uncompressed > max_uncompressed:
         raise ZipSecurityError('Uncompressed size limit exceeded')
 
     for member in members:
         if stat.S_ISLNK((member.external_attr >> 16) & 0xFFFF):
             raise ZipSecurityError(f'Symlink not allowed: {member.filename}')
+    total_uncompressed = 0
+
+    for member in members:
+        mode = (member.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(mode):
+            raise ZipSecurityError(f'Symlink entry is not allowed: {member.filename}')
+
+    for member in zip_file.infolist():
+        member_path = (extract_to / member.filename).resolve()
+        if not str(member_path).startswith(str(base_path)):
+            raise ZipSecurityError(f'ZIP Slip detected: {member.filename}')
+
+        total_uncompressed += member.file_size
+        if total_uncompressed > max_uncompressed:
+            raise ZipSecurityError('Uncompressed size limit exceeded')
 
         member_path = (extract_to / member.filename).resolve()
         _ensure_within_base(member_path, base_path, member.filename)
@@ -49,6 +72,8 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
         member_path.parent.mkdir(parents=True, exist_ok=True)
         with zip_file.open(member) as src, member_path.open('wb') as dst:
             shutil.copyfileobj(src, dst)
+        with zip_file.open(member) as source, member_path.open('wb') as target:
+            shutil.copyfileobj(source, target)
 
 
 def prepare_workspace() -> str:
