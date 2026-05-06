@@ -23,6 +23,14 @@ class FilterPolicyTests(unittest.TestCase):
             self.assertFalse(d.include)
             self.assertEqual(d.reason_code, 'EXCLUDED_MINIFIED')
 
+    def test_template_reason_code(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'page.html'
+            path.write_text('<h1>x</h1>')
+            d = should_include_file(path)
+            self.assertTrue(d.include)
+            self.assertEqual(d.reason_code, 'INCLUDED_TEMPLATE')
+
     def test_ts_tsx_vue_ejs_are_included(self):
         with tempfile.TemporaryDirectory() as td:
             for ext in ('.ts', '.tsx', '.vue', '.ejs'):

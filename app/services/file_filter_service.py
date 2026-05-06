@@ -11,6 +11,9 @@ PRIORITY_SOURCE = 1
 PRIORITY_CONFIG = 2
 PRIORITY_TEMPLATE = 3
 
+SOURCE_EXTENSIONS = {'.js', '.ts', '.jsx', '.tsx', '.vue', '.mjs', '.cjs'}
+TEMPLATE_EXTENSIONS = {'.html', '.ejs', '.hbs', '.pug'}
+CONFIG_EXTENSIONS = {'.json'}
 INCLUDE_EXTENSIONS = {
     '.js', '.html', '.json', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.vue', '.ejs', '.hbs', '.pug'
 }
@@ -58,6 +61,33 @@ def should_include_file(file_path: Path) -> InclusionDecision:
 
     if normalized_parts.intersection(EXCLUDED_DIR_NAMES):
         return _decision(False, 'excluded directory', 'EXCLUDED_DIR', 100)
+    if not file_path.is_file():
+        return _decision(False, 'not a regular file', 'EXCLUDED_EXTENSION', 100)
+    if file_path.stat().st_size > settings.MAX_FILE_SIZE_BYTES:
+        return _decision(False, 'file too large', 'EXCLUDED_TOO_LARGE', 100)
+    if _is_binary(file_path):
+        return _decision(False, 'binary file', 'EXCLUDED_BINARY', 100)
+    if any(pattern in file_name for pattern in EXCLUDED_FILE_PATTERNS):
+        return _decision(False, 'minified/build artifact', 'EXCLUDED_MINIFIED', 100)
+
+    if file_name in ALLOWED_ENV_FILENAMES:
+        return _decision(True, 'allowed env sample', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if file_name.endswith('.env'):
+        return _decision(False, 'real env excluded', 'EXCLUDED_EXTENSION', 100)
+
+    ext = file_path.suffix.lower()
+    if ext in SOURCE_EXTENSIONS:
+        return _decision(True, 'source file', 'INCLUDED_SOURCE', PRIORITY_SOURCE)
+    if ext in TEMPLATE_EXTENSIONS:
+        return _decision(True, 'template file', 'INCLUDED_TEMPLATE', PRIORITY_TEMPLATE)
+    if ext in CONFIG_EXTENSIONS:
+        return _decision(True, 'data/config file', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if file_name in INCLUDE_FILENAMES:
+        return _decision(True, 'key filename', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if any(keyword in file_name for keyword in CONFIG_KEYWORDS):
+        return _decision(True, 'config keyword', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+
+    return _decision(False, 'extension not allowed', 'EXCLUDED_EXTENSION', 100)
 
     if not file_path.is_file():
         return _decision(False, 'not a regular file', 'EXCLUDED_EXTENSION', 100)
