@@ -23,7 +23,7 @@ CONFIG_FILENAMES = {
     'nuxt.config.js',
 }
 EXCLUDED_DIRS = {'node_modules', 'vendor', 'dist', 'build', 'coverage', '.git', '__pycache__', 'libs', 'cdn'}
-EXCLUDED_PATTERNS = ('.min.js', '.bundle.js', '.chunk.js', 'bundle.js', 'webpack')
+EXCLUDED_PATTERNS = ('.min.js', '.bundle.js', '.chunk.js', 'bundle.js')
 
 
 def _decision(include: bool, reason: str, reason_code: str, priority: int) -> InclusionDecision:
@@ -59,15 +59,15 @@ def should_include_file(file_path: Path) -> InclusionDecision:
         return _decision(False, 'real env excluded', 'EXCLUDED_EXTENSION', 100)
 
     ext = file_path.suffix.lower()
-    if ext in SOURCE_EXTENSIONS:
-        return _decision(True, 'source file', 'INCLUDED_SOURCE', PRIORITY_SOURCE)
-    if ext in TEMPLATE_EXTENSIONS:
-        return _decision(True, 'template file', 'INCLUDED_TEMPLATE', PRIORITY_TEMPLATE)
-    if ext in CONFIG_EXTENSIONS:
-        return _decision(True, 'data/config file', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
     if name in INCLUDE_FILENAMES:
         return _decision(True, 'key filename', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
     if name in CONFIG_FILENAMES:
         return _decision(True, 'config allowlist', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if ext in CONFIG_EXTENSIONS:
+        return _decision(True, 'data/config file', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if ext in SOURCE_EXTENSIONS:
+        return _decision(True, 'source file', 'INCLUDED_SOURCE', PRIORITY_SOURCE)
+    if ext in TEMPLATE_EXTENSIONS:
+        return _decision(True, 'template file', 'INCLUDED_TEMPLATE', PRIORITY_TEMPLATE)
 
     return _decision(False, 'extension not allowed', 'EXCLUDED_EXTENSION', 100)

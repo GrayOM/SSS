@@ -73,6 +73,37 @@ class FilterPolicyTests(unittest.TestCase):
             self.assertFalse(should_include_file(backup).include)
 
 
+
+    def test_webpack_config_included_as_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            file_path = Path(td) / 'webpack.config.js'
+            file_path.write_text('module.exports = {}')
+            decision = should_include_file(file_path)
+            self.assertTrue(decision.include)
+            self.assertEqual(decision.reason_code, 'INCLUDED_CONFIG')
+
+    def test_bundle_patterns_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name in ('webpack.bundle.js', 'app.bundle.js'):
+                file_path = Path(td) / name
+                file_path.write_text('bundle')
+                decision = should_include_file(file_path)
+                self.assertFalse(decision.include)
+                self.assertEqual(decision.reason_code, 'EXCLUDED_MINIFIED')
+
+    def test_config_js_included_and_old_backup_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            config_file = Path(td) / 'config.js'
+            config_file.write_text('export default {}')
+            config_decision = should_include_file(config_file)
+            self.assertTrue(config_decision.include)
+            self.assertEqual(config_decision.reason_code, 'INCLUDED_CONFIG')
+
+            backup = Path(td) / 'old-config-backup.txt'
+            backup.write_text('legacy')
+            self.assertFalse(should_include_file(backup).include)
+
+
 class ZipSecurityTests(unittest.TestCase):
     def test_zip_slip_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:

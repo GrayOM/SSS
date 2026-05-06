@@ -1,5 +1,4 @@
 import os
-import shutil
 import stat
 import tempfile
 from pathlib import Path
