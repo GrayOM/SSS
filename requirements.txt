@@ -5,3 +5,4 @@ jinja2
 pydantic-settings
 pytest
 google-genai
+httpx

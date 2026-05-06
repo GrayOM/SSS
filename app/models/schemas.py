@@ -97,3 +97,10 @@ class AnalysisResult(BaseModel):
     finding_count: int
     findings: list[VulnerabilityFinding]
     skipped_chunks: list[CodeChunk] = Field(default_factory=list)
+
+
+class FullAnalysisResponse(BaseModel):
+    upload: UploadAnalysisResponse
+    content_load: FileContentLoadResult
+    chunks: ChunkBuildResult
+    analysis: AnalysisResult
