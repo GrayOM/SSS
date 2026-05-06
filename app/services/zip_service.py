@@ -13,6 +13,7 @@ class ZipSecurityError(Exception):
 
 
 def _ensure_within_base(member_path: Path, base_path: Path, member_name: str) -> None:
+    # Path.is_relative_to는 Python 3.9+ 전용
     # Path.is_relative_to is available from Python 3.9+.
     if hasattr(member_path, 'is_relative_to'):
         if not member_path.is_relative_to(base_path):
@@ -37,6 +38,7 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
         raise ZipSecurityError(f'Too many zip members: {len(members)}')
 
     max_uncompressed = settings.MAX_UNCOMPRESSED_SIZE_MB * 1024 * 1024
+    total_uncompressed = sum(m.file_size for m in members)
     total_uncompressed = sum(member.file_size for member in members)
     if total_uncompressed > max_uncompressed:
         raise ZipSecurityError('Uncompressed size limit exceeded')
