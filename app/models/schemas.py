@@ -12,6 +12,7 @@ class FileAnalysisResult(BaseModel):
     path: str
     extension: str
     size: int
+    include: bool
     reason: str
     reason_code: str
     priority: int

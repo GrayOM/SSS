@@ -26,6 +26,7 @@ def scan_extracted_directory(extracted_dir: Path) -> UploadAnalysisResponse:
                 path=str(path.relative_to(extracted_dir)),
                 extension=path.suffix.lower(),
                 size=path.stat().st_size,
+                include=decision.include,
                 reason=decision.reason,
                 reason_code=decision.reason_code,
                 priority=decision.priority,
