@@ -5,7 +5,14 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.models.schemas import FileAnalysisResult, UploadAnalysisResponse
-from app.services.file_content_loader import load_file_contents
+from app.services.file_content_loader import (
+    SKIPPED_DECODE_ERROR,
+    SKIPPED_NOT_FOUND,
+    SKIPPED_NOT_INCLUDED,
+    SKIPPED_PATH_TRAVERSAL,
+    SKIPPED_TOO_LARGE,
+    load_file_contents,
+)
 
 
 def _scan_result(files: list[FileAnalysisResult]) -> UploadAnalysisResponse:
@@ -45,7 +52,7 @@ class FileContentLoaderTests(unittest.TestCase):
             ]))
             self.assertEqual(result.loaded_count, 0)
             self.assertEqual(result.skipped_count, 1)
-            self.assertEqual(result.skipped[0].reason_code, 'SKIPPED_NOT_INCLUDED')
+            self.assertEqual(result.skipped[0].reason_code, SKIPPED_NOT_INCLUDED)
 
     def test_decode_fail_goes_to_skipped(self):
         with tempfile.TemporaryDirectory() as td:
@@ -57,7 +64,7 @@ class FileContentLoaderTests(unittest.TestCase):
                 FileAnalysisResult(path='bad.js', extension='.js', size=3, include=True,
                                    reason='source', reason_code='INCLUDED_SOURCE', priority=1)
             ]))
-            self.assertEqual(result.skipped[0].reason_code, 'SKIPPED_DECODE_ERROR')
+            self.assertEqual(result.skipped[0].reason_code, SKIPPED_DECODE_ERROR)
 
     def test_missing_file_goes_to_skipped(self):
         with tempfile.TemporaryDirectory() as td:
@@ -66,22 +73,21 @@ class FileContentLoaderTests(unittest.TestCase):
                 FileAnalysisResult(path='missing.js', extension='.js', size=1, include=True,
                                    reason='source', reason_code='INCLUDED_SOURCE', priority=1)
             ]))
-            self.assertEqual(result.skipped[0].reason_code, 'SKIPPED_NOT_FOUND')
+            self.assertEqual(result.skipped[0].reason_code, SKIPPED_NOT_FOUND)
 
     def test_path_traversal_goes_to_skipped(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            outside = base.parent / 'outside.js'
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            base = root_path / 'base'
+            base.mkdir()
+            outside = root_path / 'outside.js'
             outside.write_text('x', encoding='utf-8')
-            try:
-                result = load_file_contents(base, _scan_result([
-                    FileAnalysisResult(path='../outside.js', extension='.js', size=1, include=True,
-                                       reason='source', reason_code='INCLUDED_SOURCE', priority=1)
-                ]))
-                self.assertEqual(result.skipped[0].reason_code, 'SKIPPED_PATH_TRAVERSAL')
-            finally:
-                if outside.exists():
-                    outside.unlink()
+
+            result = load_file_contents(base, _scan_result([
+                FileAnalysisResult(path='../outside.js', extension='.js', size=1, include=True,
+                                   reason='source', reason_code='INCLUDED_SOURCE', priority=1)
+            ]))
+            self.assertEqual(result.skipped[0].reason_code, SKIPPED_PATH_TRAVERSAL)
 
     def test_too_large_goes_to_skipped(self):
         with tempfile.TemporaryDirectory() as td:
@@ -96,7 +102,7 @@ class FileContentLoaderTests(unittest.TestCase):
                     FileAnalysisResult(path='big.js', extension='.js', size=5, include=True,
                                        reason='source', reason_code='INCLUDED_SOURCE', priority=1)
                 ]))
-                self.assertEqual(result.skipped[0].reason_code, 'SKIPPED_TOO_LARGE')
+                self.assertEqual(result.skipped[0].reason_code, SKIPPED_TOO_LARGE)
             finally:
                 settings.MAX_FILE_SIZE_BYTES = original
 
