@@ -15,6 +15,17 @@ PRIORITY_SOURCE = 1
 PRIORITY_CONFIG = 2
 PRIORITY_TEMPLATE = 3
 
+SOURCE_EXTENSIONS = {'.js', '.ts', '.jsx', '.tsx', '.vue', '.mjs', '.cjs'}
+TEMPLATE_EXTENSIONS = {'.html', '.ejs', '.hbs', '.pug'}
+CONFIG_EXTENSIONS = {'.json'}
+INCLUDE_FILENAMES = {'package.json', 'dockerfile', 'docker-compose.yml', 'docker-compose.yaml'}
+ALLOWED_ENV_FILES = {'.env.example', '.env.sample'}
+CONFIG_KEYWORDS = {'config'}
+EXCLUDED_DIRS = {
+    'node_modules', 'vendor', 'dist', 'build', 'coverage',
+    '.git', '__pycache__', 'libs', 'cdn'
+}
+EXCLUDED_PATTERNS = ('.min.js', '.bundle.js', '.chunk.js', 'bundle.js', 'webpack')
 SOURCE_EXTENSIONS   = {'.js', '.ts', '.jsx', '.tsx', '.vue', '.mjs', '.cjs'}
 TEMPLATE_EXTENSIONS = {'.html', '.ejs', '.hbs', '.pug'}
 CONFIG_EXTENSIONS   = {'.json'}
@@ -79,6 +90,9 @@ def _is_binary(file_path: Path) -> bool:
 
 def should_include_file(file_path: Path) -> InclusionDecision:
     parts = {p.lower() for p in file_path.parts}
+    name = file_path.name.lower()
+
+    if parts & EXCLUDED_DIRS:
     name  = file_path.name.lower()
 
     if parts & EXCLUDED_DIRS:
