@@ -42,3 +42,25 @@ class FileContentLoadResult(BaseModel):
     skipped_count: int
     files: list[FileContent]
     skipped: list[FileAnalysisResult]
+
+
+class CodeChunk(BaseModel):
+    source_path: str
+    extension: str
+    priority: int
+    source_content_hash: str
+    chunk_index: int
+    total_chunks: int
+    start_line: int
+    end_line: int
+    chunk_hash: str
+    content: str
+
+
+class ChunkBuildResult(BaseModel):
+    total_files: int
+    total_chunks: int
+    files_chunked: int
+    files_skipped: int
+    chunks: list[CodeChunk]
+    skipped: list[FileContent]
