@@ -7,9 +7,14 @@ from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 from app.api.routes_analyze import analyze_zip
+from app.main import app
 from app.api.routes_upload import upload_zip
 from app.services import analysis_service
 
+try:
+    from fastapi.testclient import TestClient
+except Exception:  # pragma: no cover
+    TestClient = None
 
 class RoutesAnalyzeTests(unittest.TestCase):
     @staticmethod
@@ -78,6 +83,39 @@ class RoutesAnalyzeTests(unittest.TestCase):
         body = result.model_dump()
         self.assertIn('total_files_scanned', body)
         self.assertIn('files', body)
+
+
+@unittest.skipIf(TestClient is None, 'httpx is not installed')
+class RoutesAnalyzeHttpTests(unittest.TestCase):
+    @staticmethod
+    def _zip_bytes(files: dict[str, str | bytes]) -> bytes:
+        bio = io.BytesIO()
+        with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for name, content in files.items():
+                zf.writestr(name, content)
+        return bio.getvalue()
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_http_analyze_success_returns_200_and_keys(self):
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            data = self._zip_bytes({'src/app.js': 'const x = 1;'})
+            resp = self.client.post('/api/analyze', files={'file': ('ok.zip', data, 'application/zip')})
+            self.assertEqual(resp.status_code, 200)
+            body = resp.json()
+            self.assertIn('upload', body)
+            self.assertIn('content_load', body)
+            self.assertIn('chunks', body)
+            self.assertIn('analysis', body)
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_http_analyze_invalid_signature_returns_400(self):
+        resp = self.client.post('/api/analyze', files={'file': ('bad.zip', b'NOTZIP', 'application/zip')})
+        self.assertEqual(resp.status_code, 400)
 
 
 if __name__ == '__main__':
