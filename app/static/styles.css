@@ -1,0 +1,4 @@
+body { font-family: Arial, sans-serif; background: #f7f7f8; margin: 0; }
+.container { max-width: 900px; margin: 40px auto; background: #fff; padding: 24px; border-radius: 8px; }
+pre { background: #10131a; color: #d8e0ff; padding: 16px; overflow: auto; border-radius: 6px; min-height: 300px; }
+button { margin-left: 8px; }
