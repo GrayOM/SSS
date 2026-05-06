@@ -64,3 +64,36 @@ class ChunkBuildResult(BaseModel):
     files_skipped: int
     chunks: list[CodeChunk]
     skipped: list[FileContent]
+
+
+class AnalysisEvidence(BaseModel):
+    source_path: str
+    start_line: int
+    end_line: int
+    snippet: str
+    reason: str
+
+
+class VulnerabilityFinding(BaseModel):
+    id: str
+    vulnerability_type: str
+    severity: str
+    confidence: str
+    source_path: str
+    start_line: int
+    end_line: int
+    evidence: list[AnalysisEvidence]
+    attack_scenario: list[str]
+    safe_poc: str | None = None
+    impact: str
+    root_cause: str
+    remediation: str
+    related_cwe: list[str] = []
+
+
+class AnalysisResult(BaseModel):
+    total_chunks: int
+    analyzed_chunks: int
+    finding_count: int
+    findings: list[VulnerabilityFinding]
+    skipped_chunks: list[CodeChunk] = []
