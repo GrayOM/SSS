@@ -17,6 +17,9 @@ COMMAND_EXEC_PATTERNS = (
     "require('child_process').exec",
 )
 
+ALLOWED_SEVERITIES = {'low', 'medium', 'high', 'critical'}
+ALLOWED_CONFIDENCES = {'low', 'medium', 'high'}
+
 
 class Analyzer(ABC):
     @abstractmethod
@@ -89,8 +92,6 @@ class MockAnalyzer(Analyzer):
         return findings
 
 
-
-
 def _extract_json_payload(raw: str) -> dict | None:
     text = raw.strip()
 
@@ -124,6 +125,7 @@ def _extract_json_payload(raw: str) -> dict | None:
 
     return None
 
+
 class GeminiAnalyzer(Analyzer):
     def __init__(self, client: GeminiClientProtocol):
         self.client = client
@@ -146,8 +148,19 @@ class GeminiAnalyzer(Analyzer):
             if not isinstance(item, dict) or any(k not in item for k in required):
                 continue
 
+            if item['severity'] not in ALLOWED_SEVERITIES:
+                continue
+            if item['confidence'] not in ALLOWED_CONFIDENCES:
+                continue
+            if not isinstance(item['evidence'], list) or not item['evidence']:
+                continue
+            if not isinstance(item['attack_scenario'], list) or not item['attack_scenario']:
+                continue
+
             try:
                 evidence = [AnalysisEvidence(**ev) for ev in item['evidence'] if isinstance(ev, dict)]
+                if not evidence:
+                    continue
                 findings.append(VulnerabilityFinding(
                     id='',
                     vulnerability_type=item['vulnerability_type'],

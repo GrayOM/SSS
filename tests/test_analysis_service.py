@@ -1,7 +1,7 @@
 import unittest
 
 from app.models.schemas import CodeChunk
-from app.services.analysis_service import MockAnalyzer, analyze_chunks
+from app.services.analysis_service import MockAnalyzer, analyze_chunks, get_analyzer
 
 
 def _chunk(content: str, idx: int = 0) -> CodeChunk:
@@ -19,11 +19,10 @@ def _chunk(content: str, idx: int = 0) -> CodeChunk:
     )
 
 
-
-
 class FakeAnalyzer:
     def analyze_chunk(self, chunk: CodeChunk):
         return []
+
 
 class AnalysisServiceTests(unittest.TestCase):
     def test_empty_chunks_returns_valid_result(self):
@@ -124,6 +123,28 @@ class AnalysisServiceTests(unittest.TestCase):
             result = analyze_chunks([_chunk('eval(userInput)')])
             self.assertEqual(result.finding_count, 1)
             self.assertEqual(result.findings[0].vulnerability_type, 'Unsafe eval')
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_get_analyzer_returns_mock_for_mock_backend(self):
+        from app.services import analysis_service
+
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            analyzer = get_analyzer()
+            self.assertIsInstance(analyzer, MockAnalyzer)
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_get_analyzer_raises_for_unknown_backend(self):
+        from app.services import analysis_service
+
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'unknown'
+            with self.assertRaises(ValueError):
+                get_analyzer()
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 

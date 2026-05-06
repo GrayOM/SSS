@@ -60,6 +60,36 @@ class GeminiAnalyzerTests(unittest.TestCase):
         analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
         self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
 
+    def test_empty_evidence_list_is_skipped(self):
+        payload = '{"findings":[{"vulnerability_type":"DOM XSS","severity":"high","confidence":"medium","source_path":"src/app.js","start_line":1,"end_line":10,"evidence":[],"attack_scenario":["a"],"impact":"i","root_cause":"r","remediation":"m"}]}'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
+    def test_non_list_evidence_is_skipped(self):
+        payload = '{"findings":[{"vulnerability_type":"DOM XSS","severity":"high","confidence":"medium","source_path":"src/app.js","start_line":1,"end_line":10,"evidence":"bad","attack_scenario":["a"],"impact":"i","root_cause":"r","remediation":"m"}]}'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
+    def test_empty_attack_scenario_is_skipped(self):
+        payload = '{"findings":[{"vulnerability_type":"DOM XSS","severity":"high","confidence":"medium","source_path":"src/app.js","start_line":1,"end_line":10,"evidence":[{"source_path":"src/app.js","start_line":1,"end_line":10,"snippet":"x","reason":"r"}],"attack_scenario":[],"impact":"i","root_cause":"r","remediation":"m"}]}'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
+    def test_non_list_attack_scenario_is_skipped(self):
+        payload = '{"findings":[{"vulnerability_type":"DOM XSS","severity":"high","confidence":"medium","source_path":"src/app.js","start_line":1,"end_line":10,"evidence":[{"source_path":"src/app.js","start_line":1,"end_line":10,"snippet":"x","reason":"r"}],"attack_scenario":"bad","impact":"i","root_cause":"r","remediation":"m"}]}'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
+    def test_invalid_severity_is_skipped(self):
+        payload = '{"findings":[{"vulnerability_type":"DOM XSS","severity":"urgent","confidence":"medium","source_path":"src/app.js","start_line":1,"end_line":10,"evidence":[{"source_path":"src/app.js","start_line":1,"end_line":10,"snippet":"x","reason":"r"}],"attack_scenario":["a"],"impact":"i","root_cause":"r","remediation":"m"}]}'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
+    def test_invalid_confidence_is_skipped(self):
+        payload = '{"findings":[{"vulnerability_type":"DOM XSS","severity":"high","confidence":"certain","source_path":"src/app.js","start_line":1,"end_line":10,"evidence":[{"source_path":"src/app.js","start_line":1,"end_line":10,"snippet":"x","reason":"r"}],"attack_scenario":["a"],"impact":"i","root_cause":"r","remediation":"m"}]}'
+        analyzer = GeminiAnalyzer(FakeGeminiClient(payload))
+        self.assertEqual(analyzer.analyze_chunk(_chunk()), [])
+
 
 if __name__ == '__main__':
     unittest.main()
