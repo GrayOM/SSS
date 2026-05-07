@@ -10,6 +10,11 @@ from app.api.routes_analyze import analyze_zip
 from app.api.routes_upload import upload_zip
 from app.services import analysis_service
 
+try:
+    from fastapi.testclient import TestClient
+except Exception:
+    TestClient = None
+
 
 class RoutesAnalyzeTests(unittest.TestCase):
     @staticmethod
@@ -92,3 +97,21 @@ class RoutesAnalyzeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipIf(TestClient is None, 'httpx is not installed')
+class RoutesAnalyzeHttpTests(unittest.TestCase):
+    def test_http_analyze_success(self):
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        client = TestClient(__import__('app.main', fromlist=['app']).app)
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            import io, zipfile
+            bio = io.BytesIO()
+            with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('src/x.js', 'const x=location.hash; el.innerHTML=x;')
+            res = client.post('/api/analyze', files={'file': ('a.zip', bio.getvalue(), 'application/zip')})
+            self.assertEqual(res.status_code, 200)
+            self.assertIn('readable_analysis', res.json())
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
