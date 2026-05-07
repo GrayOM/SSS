@@ -62,3 +62,26 @@ Return schema example:
   ]
 }}
 """.strip()
+
+
+from app.models.schemas import FileContent
+
+
+def build_console_poc_analysis_prompt(files: list[FileContent]) -> str:
+    sections = []
+    for f in files[:20]:
+        excerpt = f.content[:1200]
+        sections.append(f"[FILE] {f.path}\n{excerpt}")
+
+    return (
+        "You are a security analysis assistant. Return JSON only.\n"
+        "Find console-verifiable vulnerability flows in JS/HTML.\n"
+        "Focus on source -> state/storage/API/DOM sink data flow.\n"
+        "Do not create findings without code evidence.\n"
+        "If none, return {\"findings\": []}.\n"
+        "Do not use markdown code fences. No explanation outside JSON.\n"
+        "Console PoC must be non-destructive verification only.\n"
+        "Ban data deletion, payment actions, privilege change, external exfiltration, command execution.\n"
+        "JSON schema example: {\"findings\":[{\"id\":\"x\",\"title\":\"...\",\"vulnerability_type\":\"...\",\"severity\":\"low|medium|high|critical\",\"confidence\":\"low|medium|high\",\"affected_files\":[\"...\"],\"summary\":\"...\",\"evidence\":[{\"source_path\":\"...\",\"start_line\":1,\"end_line\":2,\"snippet\":\"...\",\"reason\":\"...\",\"data_flow\":[\"source->sink\"]}],\"console_poc\":{\"poc_type\":\"browser_console\",\"description\":\"...\",\"preconditions\":[\"...\"],\"steps\":[\"...\"],\"code\":\"...\",\"expected_result\":\"...\",\"safety\":\"...\"},\"attack_scenario\":[\"...\"],\"impact\":\"...\",\"root_cause\":\"...\",\"remediation\":\"...\",\"verification_notes\":[\"...\"],\"related_cwe\":[\"CWE-79\"]}]}.\n\n"
+        + "\n\n".join(sections)
+    )

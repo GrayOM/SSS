@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,13 +8,16 @@
 </head>
 <body>
   <main class="container">
-    <h1>AI 기반 소스코드 취약점 분석 준비 도구</h1>
-    <p>ZIP 파일을 업로드하면 분석 대상 파일 목록을 반환합니다.</p>
-    <form id="upload-form">
+    <h1>ZIP 소스코드 취약점 분석</h1>
+    <form id="analyze-form">
       <input id="zip-file" type="file" accept=".zip" required />
-      <button type="submit">업로드 및 분석</button>
+      <button type="submit">분석 시작</button>
+      <button type="button" id="download-json">JSON 다운로드</button>
     </form>
-    <pre id="result"></pre>
+    <p id="status"></p>
+    <section id="summary"></section>
+    <section id="findings"></section>
+    <pre id="result" class="hidden"></pre>
   </main>
   <script src="/static/app.js"></script>
 </body>

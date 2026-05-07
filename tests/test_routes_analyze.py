@@ -40,6 +40,8 @@ class RoutesAnalyzeTests(unittest.TestCase):
             self.assertIn('content_load', body)
             self.assertIn('chunks', body)
             self.assertIn('analysis', body)
+            self.assertIn('readable_analysis', body)
+            self.assertIn('finding_count', body['readable_analysis'])
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 
@@ -77,6 +79,32 @@ class RoutesAnalyzeTests(unittest.TestCase):
         finally:
             analysis_service.settings.MAX_UPLOAD_SIZE_MB = original_size
 
+    def test_analyze_response_hides_raw_content_fields(self):
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            data = self._zip_bytes({'src/vuln.js': 'const x=location.hash; el.innerHTML=x;'})
+            result = asyncio.run(analyze_zip(self._upload('x.zip', data)))
+            body = result.model_dump()
+            if body['content_load']['files']:
+                self.assertNotIn('content', body['content_load']['files'][0])
+            if body['chunks']['chunks']:
+                self.assertNotIn('content', body['chunks']['chunks'][0])
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_readable_auth_bypass_finding_present(self):
+        data = self._zip_bytes({'src/auth.js': "if(userType==='ADMIN'){navigate('/admin')}"})
+        result = asyncio.run(analyze_zip(self._upload('auth.zip', data)))
+        types = [f.vulnerability_type for f in result.readable_analysis.findings]
+        self.assertIn('Client-side Authorization Bypass', types)
+
+    def test_readable_dom_xss_finding_present(self):
+        data = self._zip_bytes({'src/x.js': 'const x=location.hash; el.innerHTML=x;'})
+        result = asyncio.run(analyze_zip(self._upload('xss.zip', data)))
+        types = [f.vulnerability_type for f in result.readable_analysis.findings]
+        self.assertIn('DOM XSS', types)
+
     def test_existing_upload_endpoint_still_works(self):
         data = self._zip_bytes({'src/a.js': 'const a = 1;'})
         result = asyncio.run(upload_zip(self._upload('sample.zip', data)))
@@ -110,6 +138,8 @@ class RoutesAnalyzeHttpTests(unittest.TestCase):
             self.assertIn('content_load', body)
             self.assertIn('chunks', body)
             self.assertIn('analysis', body)
+            self.assertIn('readable_analysis', body)
+            self.assertIn('finding_count', body['readable_analysis'])
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 

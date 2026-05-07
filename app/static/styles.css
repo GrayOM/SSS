@@ -1,4 +1,7 @@
 body { font-family: Arial, sans-serif; background: #f7f7f8; margin: 0; }
-.container { max-width: 900px; margin: 40px auto; background: #fff; padding: 24px; border-radius: 8px; }
-pre { background: #10131a; color: #d8e0ff; padding: 16px; overflow: auto; border-radius: 6px; min-height: 300px; }
+.container { max-width: 1100px; margin: 24px auto; background: #fff; padding: 24px; border-radius: 8px; }
 button { margin-left: 8px; }
+#status { font-weight: bold; color: #183153; }
+.card { background: #f2f6ff; border: 1px solid #d5def0; border-radius: 8px; padding: 12px; margin: 10px 0; }
+pre { background: #10131a; color: #d8e0ff; padding: 16px; overflow: auto; border-radius: 6px; min-height: 120px; }
+.hidden { display: none; }
