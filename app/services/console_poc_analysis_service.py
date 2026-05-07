@@ -50,7 +50,7 @@ def select_console_relevant_files(files: list[FileContent]) -> list[FileContent]
     scored = []
     for f in files:
         fname = f.path.lower()
-        score = sum(2 for k in KEYWORDS if k.lower() in fname) + sum(1 for k in KEYWORDS if k in f.content)
+        score = sum(2 for k in KEYWORDS if k.lower() in fname) + sum(1 for k in KEYWORDS if k.lower() in f.content.lower())
         if score > 0:
             scored.append((score, f))
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -107,6 +107,9 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
                 code=(poc.get('code') or '').lower()
                 if any(x in code for x in DANGEROUS_POC_PATTERNS):
                     poc['code']=None
+                    notes = item.get('verification_notes') or []
+                    notes.append('위험 요청 가능성이 있어 Console PoC code를 제거했습니다.')
+                    item['verification_notes'] = notes
             try:
                 out.append(ReadableFinding(**item))
             except Exception:

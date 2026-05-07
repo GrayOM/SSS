@@ -28,41 +28,83 @@ Chunk metadata:
 
 Chunk content:
 {chunk.content}
+
+Return schema example:
+{{
+  "findings": [
+    {{
+      "vulnerability_type": "DOM XSS",
+      "severity": "high",
+      "confidence": "medium",
+      "source_path": "src/app.js",
+      "start_line": 1,
+      "end_line": 20,
+      "evidence": [
+        {{
+          "source_path": "src/app.js",
+          "start_line": 1,
+          "end_line": 20,
+          "snippet": "...",
+          "reason": "외부 입력이 검증 없이 innerHTML에 전달됨"
+        }}
+      ],
+      "attack_scenario": ["공격자가 입력값을 조작한다", "조작된 값이 DOM sink에 전달된다"],
+      "safe_poc": "<img src=x onerror=alert(1)>",
+      "impact": "사용자 브라우저에서 임의 스크립트 실행 가능",
+      "root_cause": "외부 입력이 검증/인코딩 없이 위험 sink에 전달됨",
+      "remediation": "textContent 사용 또는 sanitizer 적용",
+      "related_cwe": ["CWE-79"]
+    }}
+  ]
+}}
 """.strip()
 
 
 CONSOLE_KEYS = [
-    'userType','role','isAdmin','ADMIN','localStorage','sessionStorage','cookie','innerHTML','outerHTML','insertAdjacentHTML',
-    'document.write','eval','Function','location','document.URL','postMessage','input.value','price','amount','status',
-    'productId','userId','payment','order','auction','axios','fetch','FormData'
+    'userType', 'role', 'isAdmin', 'ADMIN', 'localStorage', 'sessionStorage', 'cookie', 'innerHTML', 'outerHTML',
+    'insertAdjacentHTML', 'document.write', 'eval', 'Function', 'location', 'document.URL', 'postMessage',
+    'input.value', 'price', 'amount', 'status', 'productId', 'userId', 'payment', 'order', 'auction', 'axios',
+    'fetch', 'FormData'
 ]
 
 
-def _keyword_snippets(content: str, max_snippets: int = 5, window: int = 300) -> list[str]:
-    snippets: list[str] = []
-    lowered = content.lower()
+def _keyword_snippets(content: str, max_snippets: int = 5, context_lines: int = 6) -> list[dict]:
+    lines = content.splitlines() or ['']
+    snippets: list[dict] = []
+    used = set()
+    lowered = [line.lower() for line in lines]
+
     for key in CONSOLE_KEYS:
-        i = lowered.find(key.lower())
-        if i == -1:
-            continue
-        start = max(0, i - window)
-        end = min(len(content), i + window)
-        snippet = content[start:end]
-        if snippet not in snippets:
-            snippets.append(snippet)
-        if len(snippets) >= max_snippets:
-            break
+        key_l = key.lower()
+        for idx, line in enumerate(lowered):
+            if key_l not in line:
+                continue
+            start = max(0, idx - context_lines)
+            end = min(len(lines) - 1, idx + context_lines)
+            if (start, end) in used:
+                continue
+            used.add((start, end))
+            snippets.append({
+                'start_line': start + 1,
+                'end_line': end + 1,
+                'snippet': '\n'.join(lines[start:end + 1]),
+            })
+            if len(snippets) >= max_snippets:
+                return snippets
+
     if not snippets:
-        snippets.append(content[:600])
+        end = min(len(lines), 20)
+        snippets.append({'start_line': 1, 'end_line': end, 'snippet': '\n'.join(lines[:end])})
     return snippets
 
 
 def build_console_poc_analysis_prompt(files: list[FileContent]) -> str:
     sections = []
     for f in files[:20]:
-        snippets = _keyword_snippets(f.content)
-        for idx, s in enumerate(snippets, 1):
-            sections.append(f"[FILE] {f.path} [SNIPPET {idx}]\n{s}")
+        for idx, snip in enumerate(_keyword_snippets(f.content), 1):
+            sections.append(
+                f"[FILE] {f.path} [SNIPPET {idx}] [LINES {snip['start_line']}-{snip['end_line']}]\n{snip['snippet']}"
+            )
 
     return (
         'You are a security analysis assistant. Return JSON only.\n'

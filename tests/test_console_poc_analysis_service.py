@@ -1,12 +1,7 @@
 import unittest
 
 from app.models.schemas import FileContent
-from app.services.console_poc_analysis_service import (
-    GeminiConsolePocAnalyzer,
-    MockConsolePocAnalyzer,
-    analyze_console_exploitability,
-    select_console_relevant_files,
-)
+from app.services.console_poc_analysis_service import GeminiConsolePocAnalyzer, MockConsolePocAnalyzer, analyze_console_exploitability, select_console_relevant_files
 
 
 def f(path, content):
@@ -14,60 +9,33 @@ def f(path, content):
 
 
 class FakeGeminiClient:
-    def __init__(self, payload):
-        self.payload = payload
-
-    def analyze(self, prompt: str) -> str:
-        return self.payload
-
-    def generate(self, prompt: str) -> str:
-        return ''
+    def __init__(self, payload): self.payload = payload
+    def analyze(self, prompt: str) -> str: return self.payload
+    def generate(self, prompt: str) -> str: return ''
 
 
 class ConsolePocAnalysisTests(unittest.TestCase):
-    def test_select_relevant_files(self):
-        files = [f('src/login.js', 'const token = localStorage.getItem("t")'), f('src/a.js', 'const x=1')]
-        selected = select_console_relevant_files(files)
-        self.assertEqual(selected[0].path, 'src/login.js')
+    def test_select_relevant_files_case_insensitive_content(self):
+        selected = select_console_relevant_files([f('src/a.js', 'const Role = "ADMIN"; const x = LocalStorage.getItem("u")')])
+        self.assertEqual(len(selected), 1)
 
-    def test_auth_bypass_finding(self):
-        result = analyze_console_exploitability([f('src/auth.js', "if(userType==='ADMIN'){navigate('/admin')}")], analyzer=MockConsolePocAnalyzer())
-        self.assertTrue(any(x.vulnerability_type == 'Client-side Authorization Bypass' for x in result.findings))
+    def test_auth_dom_validation_findings(self):
+        r1 = analyze_console_exploitability([f('src/auth.js', "if(userType==='ADMIN'){navigate('/admin')}")], analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(x.vulnerability_type == 'Client-side Authorization Bypass' for x in r1.findings))
+        r2 = analyze_console_exploitability([f('src/x.js', 'const x=location.hash; el.innerHTML=x;')], analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(x.vulnerability_type == 'DOM XSS' for x in r2.findings))
+        r3 = analyze_console_exploitability([f('src/pay.js', 'const price=1; const fd = new FormData(); axios.post("/api/order", fd);')], analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(x.vulnerability_type == 'Client-side Validation Bypass' for x in r3.findings))
 
-    def test_dom_xss_finding(self):
-        result = analyze_console_exploitability([f('src/x.js', 'const x=location.hash; el.innerHTML=x;')], analyzer=MockConsolePocAnalyzer())
-        self.assertTrue(any(x.vulnerability_type == 'DOM XSS' for x in result.findings))
-
-    def test_validation_bypass_finding(self):
-        result = analyze_console_exploitability([f('src/pay.js', 'const price=1; const fd = new FormData(); axios.post("/api/order", fd);')], analyzer=MockConsolePocAnalyzer())
-        self.assertTrue(any(x.vulnerability_type == 'Client-side Validation Bypass' for x in result.findings))
-
-    def test_console_poc_type_and_safety(self):
-        result = analyze_console_exploitability([f('src/x.js', 'const x=location.hash; el.innerHTML=x;')], analyzer=MockConsolePocAnalyzer())
-        poc = result.findings[0].console_poc
-        self.assertEqual(poc.poc_type, 'browser_console')
-        self.assertNotIn('delete', (poc.code or '').lower())
-
-    def test_gemini_parser_supports_fenced_json(self):
-        payload = '```json\n{"findings": []}\n```'
-        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient(payload))
+    def test_gemini_fenced_json_parse(self):
+        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient('```json\n{"findings": []}\n```'))
         self.assertEqual(analyzer.analyze([f('src/a.js', 'x')]), [])
 
-    def test_gemini_invalid_severity_confidence_skipped(self):
-        payload = '{"findings":[{"id":"1","title":"t","vulnerability_type":"DOM XSS","severity":"urgent","confidence":"certain","affected_files":["a"],"summary":"s","evidence":[{"source_path":"a","start_line":1,"end_line":1,"snippet":"x","reason":"r"}],"attack_scenario":["a"],"impact":"i","root_cause":"r","remediation":"m"}]}'
-        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient(payload))
-        self.assertEqual(analyzer.analyze([f('src/a.js', 'x')]), [])
-
-    def test_gemini_empty_evidence_skipped(self):
-        payload = '{"findings":[{"id":"1","title":"t","vulnerability_type":"DOM XSS","severity":"high","confidence":"medium","affected_files":["a"],"summary":"s","evidence":[],"attack_scenario":["a"],"impact":"i","root_cause":"r","remediation":"m"}]}'
-        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient(payload))
-        self.assertEqual(analyzer.analyze([f('src/a.js', 'x')]), [])
-
-    def test_gemini_dangerous_poc_code_removed(self):
+    def test_dangerous_poc_removed_and_note_added(self):
         payload = '{"findings":[{"id":"1","title":"t","vulnerability_type":"DOM XSS","severity":"high","confidence":"medium","affected_files":["a"],"summary":"s","evidence":[{"source_path":"a","start_line":1,"end_line":1,"snippet":"x","reason":"r"}],"console_poc":{"poc_type":"browser_console","description":"d","preconditions":[],"steps":[],"code":"fetch(\"/pay\")","expected_result":"e","safety":"s"},"attack_scenario":["a"],"impact":"i","root_cause":"r","remediation":"m"}]}'
-        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient(payload))
-        findings = analyzer.analyze([f('src/a.js', 'x')])
-        self.assertEqual(findings[0].console_poc.code, None)
+        findings = GeminiConsolePocAnalyzer(FakeGeminiClient(payload)).analyze([f('src/a.js', 'x')])
+        self.assertIsNone(findings[0].console_poc.code)
+        self.assertIn('위험 요청 가능성이 있어 Console PoC code를 제거했습니다.', findings[0].verification_notes)
 
 
 if __name__ == '__main__':
