@@ -1,4 +1,4 @@
-from app.models.schemas import CodeChunk
+from app.models.schemas import CodeChunk, FileContent
 
 
 def build_analysis_prompt(chunk: CodeChunk) -> str:
@@ -28,60 +28,51 @@ Chunk metadata:
 
 Chunk content:
 {chunk.content}
-
-Return schema example:
-{{
-  "findings": [
-    {{
-      "vulnerability_type": "DOM XSS",
-      "severity": "high",
-      "confidence": "medium",
-      "source_path": "src/app.js",
-      "start_line": 1,
-      "end_line": 20,
-      "evidence": [
-        {{
-          "source_path": "src/app.js",
-          "start_line": 1,
-          "end_line": 20,
-          "snippet": "...",
-          "reason": "외부 입력이 검증 없이 innerHTML에 전달됨"
-        }}
-      ],
-      "attack_scenario": [
-        "공격자가 입력값을 조작한다",
-        "조작된 값이 DOM sink에 전달된다",
-        "브라우저에서 스크립트가 실행될 수 있다"
-      ],
-      "safe_poc": "<img src=x onerror=alert(1)>",
-      "impact": "사용자 브라우저에서 임의 스크립트 실행 가능",
-      "root_cause": "외부 입력이 검증/인코딩 없이 위험 sink에 전달됨",
-      "remediation": "textContent 사용 또는 DOMPurify 등 sanitizer 적용",
-      "related_cwe": ["CWE-79"]
-    }}
-  ]
-}}
 """.strip()
 
 
-from app.models.schemas import FileContent
+CONSOLE_KEYS = [
+    'userType','role','isAdmin','ADMIN','localStorage','sessionStorage','cookie','innerHTML','outerHTML','insertAdjacentHTML',
+    'document.write','eval','Function','location','document.URL','postMessage','input.value','price','amount','status',
+    'productId','userId','payment','order','auction','axios','fetch','FormData'
+]
+
+
+def _keyword_snippets(content: str, max_snippets: int = 5, window: int = 300) -> list[str]:
+    snippets: list[str] = []
+    lowered = content.lower()
+    for key in CONSOLE_KEYS:
+        i = lowered.find(key.lower())
+        if i == -1:
+            continue
+        start = max(0, i - window)
+        end = min(len(content), i + window)
+        snippet = content[start:end]
+        if snippet not in snippets:
+            snippets.append(snippet)
+        if len(snippets) >= max_snippets:
+            break
+    if not snippets:
+        snippets.append(content[:600])
+    return snippets
 
 
 def build_console_poc_analysis_prompt(files: list[FileContent]) -> str:
     sections = []
     for f in files[:20]:
-        excerpt = f.content[:1200]
-        sections.append(f"[FILE] {f.path}\n{excerpt}")
+        snippets = _keyword_snippets(f.content)
+        for idx, s in enumerate(snippets, 1):
+            sections.append(f"[FILE] {f.path} [SNIPPET {idx}]\n{s}")
 
     return (
-        "You are a security analysis assistant. Return JSON only.\n"
-        "Find console-verifiable vulnerability flows in JS/HTML.\n"
-        "Focus on source -> state/storage/API/DOM sink data flow.\n"
-        "Do not create findings without code evidence.\n"
-        "If none, return {\"findings\": []}.\n"
-        "Do not use markdown code fences. No explanation outside JSON.\n"
-        "Console PoC must be non-destructive verification only.\n"
-        "Ban data deletion, payment actions, privilege change, external exfiltration, command execution.\n"
-        "JSON schema example: {\"findings\":[{\"id\":\"x\",\"title\":\"...\",\"vulnerability_type\":\"...\",\"severity\":\"low|medium|high|critical\",\"confidence\":\"low|medium|high\",\"affected_files\":[\"...\"],\"summary\":\"...\",\"evidence\":[{\"source_path\":\"...\",\"start_line\":1,\"end_line\":2,\"snippet\":\"...\",\"reason\":\"...\",\"data_flow\":[\"source->sink\"]}],\"console_poc\":{\"poc_type\":\"browser_console\",\"description\":\"...\",\"preconditions\":[\"...\"],\"steps\":[\"...\"],\"code\":\"...\",\"expected_result\":\"...\",\"safety\":\"...\"},\"attack_scenario\":[\"...\"],\"impact\":\"...\",\"root_cause\":\"...\",\"remediation\":\"...\",\"verification_notes\":[\"...\"],\"related_cwe\":[\"CWE-79\"]}]}.\n\n"
-        + "\n\n".join(sections)
+        'You are a security analysis assistant. Return JSON only.\n'
+        'Find console-verifiable vulnerability flows in JS/HTML.\n'
+        'Focus on source -> state/storage/API/DOM sink data flow.\n'
+        'Do not create findings without code evidence.\n'
+        'If none, return {"findings": []}.\n'
+        'Do not use markdown code fences. No explanation outside JSON.\n'
+        'Console PoC must be non-destructive verification only.\n'
+        'Ban data deletion, payment actions, privilege change, external exfiltration, command execution.\n'
+        'Respond with JSON object containing findings array and readable finding fields.\n\n'
+        + '\n\n'.join(sections)
     )

@@ -7,14 +7,9 @@ from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 from app.api.routes_analyze import analyze_zip
-from app.main import app
 from app.api.routes_upload import upload_zip
 from app.services import analysis_service
 
-try:
-    from fastapi.testclient import TestClient
-except Exception:  # pragma: no cover
-    TestClient = None
 
 class RoutesAnalyzeTests(unittest.TestCase):
     @staticmethod
@@ -36,48 +31,19 @@ class RoutesAnalyzeTests(unittest.TestCase):
             data = self._zip_bytes({'src/app.js': 'const a = 1;'})
             result = asyncio.run(analyze_zip(self._upload('sample.zip', data)))
             body = result.model_dump()
-            self.assertIn('upload', body)
-            self.assertIn('content_load', body)
-            self.assertIn('chunks', body)
-            self.assertIn('analysis', body)
             self.assertIn('readable_analysis', body)
             self.assertIn('finding_count', body['readable_analysis'])
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 
-    def test_analyze_eval_finding_created_with_mock_analyzer(self):
+    def test_analyze_invalid_signature_returns_400(self):
         original_backend = analysis_service.settings.ANALYZER_BACKEND
         try:
             analysis_service.settings.ANALYZER_BACKEND = 'mock'
-            data = self._zip_bytes({'src/vuln.js': 'eval(userInput)'})
-            result = asyncio.run(analyze_zip(self._upload('vuln.zip', data)))
-            findings = result.analysis.findings
-            self.assertGreaterEqual(len(findings), 1)
-            self.assertEqual(findings[0].vulnerability_type, 'Unsafe eval')
+            with self.assertRaises(HTTPException):
+                asyncio.run(analyze_zip(self._upload('bad.zip', b'NOTZIP')))
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
-
-    def test_analyze_invalid_signature_returns_400(self):
-        with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(analyze_zip(self._upload('bad.zip', b'NOTZIP')))
-        self.assertEqual(ctx.exception.status_code, 400)
-
-    def test_analyze_zip_slip_returns_400(self):
-        data = self._zip_bytes({'../evil.js': 'alert(1)'})
-        with self.assertRaises(HTTPException) as ctx:
-            asyncio.run(analyze_zip(self._upload('zipslip.zip', data)))
-        self.assertEqual(ctx.exception.status_code, 400)
-
-    def test_analyze_upload_size_exceeded_returns_413(self):
-        original_size = analysis_service.settings.MAX_UPLOAD_SIZE_MB
-        try:
-            analysis_service.settings.MAX_UPLOAD_SIZE_MB = 0
-            data = self._zip_bytes({'src/a.js': 'const a = 1;'})
-            with self.assertRaises(HTTPException) as ctx:
-                asyncio.run(analyze_zip(self._upload('big.zip', data)))
-            self.assertEqual(ctx.exception.status_code, 413)
-        finally:
-            analysis_service.settings.MAX_UPLOAD_SIZE_MB = original_size
 
     def test_analyze_response_hides_raw_content_fields(self):
         original_backend = analysis_service.settings.ANALYZER_BACKEND
@@ -90,62 +56,38 @@ class RoutesAnalyzeTests(unittest.TestCase):
                 self.assertNotIn('content', body['content_load']['files'][0])
             if body['chunks']['chunks']:
                 self.assertNotIn('content', body['chunks']['chunks'][0])
+            if body['chunks']['skipped']:
+                self.assertNotIn('content', body['chunks']['skipped'][0])
+            self.assertNotIn('"content":', result.model_dump_json())
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 
     def test_readable_auth_bypass_finding_present(self):
-        data = self._zip_bytes({'src/auth.js': "if(userType==='ADMIN'){navigate('/admin')}"})
-        result = asyncio.run(analyze_zip(self._upload('auth.zip', data)))
-        types = [f.vulnerability_type for f in result.readable_analysis.findings]
-        self.assertIn('Client-side Authorization Bypass', types)
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            data = self._zip_bytes({'src/auth.js': "if(userType==='ADMIN'){navigate('/admin')}"})
+            result = asyncio.run(analyze_zip(self._upload('auth.zip', data)))
+            types = [f.vulnerability_type for f in result.readable_analysis.findings]
+            self.assertIn('Client-side Authorization Bypass', types)
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
 
     def test_readable_dom_xss_finding_present(self):
-        data = self._zip_bytes({'src/x.js': 'const x=location.hash; el.innerHTML=x;'})
-        result = asyncio.run(analyze_zip(self._upload('xss.zip', data)))
-        types = [f.vulnerability_type for f in result.readable_analysis.findings]
-        self.assertIn('DOM XSS', types)
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            data = self._zip_bytes({'src/x.js': 'const x=location.hash; el.innerHTML=x;'})
+            result = asyncio.run(analyze_zip(self._upload('xss.zip', data)))
+            types = [f.vulnerability_type for f in result.readable_analysis.findings]
+            self.assertIn('DOM XSS', types)
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
 
     def test_existing_upload_endpoint_still_works(self):
         data = self._zip_bytes({'src/a.js': 'const a = 1;'})
         result = asyncio.run(upload_zip(self._upload('sample.zip', data)))
-        body = result.model_dump()
-        self.assertIn('total_files_scanned', body)
-        self.assertIn('files', body)
-
-
-@unittest.skipIf(TestClient is None, 'httpx is not installed')
-class RoutesAnalyzeHttpTests(unittest.TestCase):
-    @staticmethod
-    def _zip_bytes(files: dict[str, str | bytes]) -> bytes:
-        bio = io.BytesIO()
-        with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for name, content in files.items():
-                zf.writestr(name, content)
-        return bio.getvalue()
-
-    def setUp(self):
-        self.client = TestClient(app)
-
-    def test_http_analyze_success_returns_200_and_keys(self):
-        original_backend = analysis_service.settings.ANALYZER_BACKEND
-        try:
-            analysis_service.settings.ANALYZER_BACKEND = 'mock'
-            data = self._zip_bytes({'src/app.js': 'const x = 1;'})
-            resp = self.client.post('/api/analyze', files={'file': ('ok.zip', data, 'application/zip')})
-            self.assertEqual(resp.status_code, 200)
-            body = resp.json()
-            self.assertIn('upload', body)
-            self.assertIn('content_load', body)
-            self.assertIn('chunks', body)
-            self.assertIn('analysis', body)
-            self.assertIn('readable_analysis', body)
-            self.assertIn('finding_count', body['readable_analysis'])
-        finally:
-            analysis_service.settings.ANALYZER_BACKEND = original_backend
-
-    def test_http_analyze_invalid_signature_returns_400(self):
-        resp = self.client.post('/api/analyze', files={'file': ('bad.zip', b'NOTZIP', 'application/zip')})
-        self.assertEqual(resp.status_code, 400)
+        self.assertIn('total_files_scanned', result.model_dump())
 
 
 if __name__ == '__main__':

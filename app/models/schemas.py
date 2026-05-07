@@ -99,14 +99,6 @@ class AnalysisResult(BaseModel):
     skipped_chunks: list[CodeChunk] = Field(default_factory=list)
 
 
-class FullAnalysisResponse(BaseModel):
-    upload: UploadAnalysisResponse
-    content_load: FileContentSummaryResult
-    chunks: ChunkSummaryResult
-    analysis: AnalysisResult
-    readable_analysis: ReadableAnalysisResult | None = None
-
-
 class ConsoleSafePoc(BaseModel):
     poc_type: str
     description: str
@@ -185,4 +177,12 @@ class ChunkSummaryResult(BaseModel):
     files_chunked: int
     files_skipped: int
     chunks: list[CodeChunkSummary]
-    skipped: list[FileContent]
+    skipped: list[FileContentSummary]
+
+
+class FullAnalysisResponse(BaseModel):
+    upload: UploadAnalysisResponse
+    content_load: FileContentSummaryResult
+    chunks: ChunkSummaryResult
+    analysis: AnalysisResult
+    readable_analysis: ReadableAnalysisResult | None = None

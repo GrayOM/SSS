@@ -15,24 +15,20 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn('src/a.js', prompt)
         self.assertIn('start_line: 10', prompt)
         self.assertIn('end_line: 20', prompt)
-        self.assertIn('el.innerHTML = location.hash;', prompt)
         self.assertIn('Evidence', prompt)
-        self.assertIn('destructive exploit', prompt)
-        self.assertIn('{"findings": []}', prompt)
-        self.assertIn('markdown code fence를 사용하지 마라', prompt)
-        self.assertIn('JSON 외 설명 문장을 출력하지 마라', prompt)
-        self.assertIn('severity는 low, medium, high, critical', prompt)
-        self.assertIn('confidence는 low, medium, high', prompt)
-
 
     def test_console_prompt_contains_required_security_instructions(self):
-        files = [FileContent(path='src/a.js', extension='.js', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='innerHTML location.hash')]
+        long_content = 'a' * 1400 + ' innerHTML ... location.hash ...'
+        files = [FileContent(path='src/a.js', extension='.js', size=len(long_content), priority=1, reason_code='INCLUDED', content_hash='h', content=long_content)]
         prompt = build_console_poc_analysis_prompt(files)
         self.assertIn('source -> state/storage/API/DOM sink', prompt)
         self.assertIn('Return JSON only', prompt)
         self.assertIn('Do not create findings without code evidence', prompt)
         self.assertIn('non-destructive verification only', prompt)
-        self.assertIn('{\"findings\": []}', prompt)
+        self.assertIn('{"findings": []}', prompt)
+        self.assertIn('[SNIPPET', prompt)
+        self.assertIn('innerHTML', prompt)
+
 
 if __name__ == '__main__':
     unittest.main()

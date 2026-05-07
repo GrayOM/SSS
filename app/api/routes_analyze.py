@@ -27,7 +27,7 @@ async def analyze_zip(file: UploadFile = File(...)):
             upload=upload_result,
             content_load=to_safe_content_load_result(content_result),
             chunks=to_safe_chunk_result(chunk_result),
-            analysis=analysis_result,
+            analysis=analysis_result.model_copy(update={'skipped_chunks': []}),
             readable_analysis=readable_result,
         )
     finally:
