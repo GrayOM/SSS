@@ -140,6 +140,8 @@ axios.post("/api/pay", fd);
         content = "axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, { amount })"
         cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
         self.assertNotIn('sessionData', cand.parameters)
+        self.assertNotIn('expr', cand.parameters)
+        self.assertIn('amount', cand.parameters)
 
     def test_payload_variable_marked_for_manual_review(self):
         content = "request({ method: 'POST', url: endpoint, data: payload })"

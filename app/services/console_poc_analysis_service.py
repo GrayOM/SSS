@@ -3,7 +3,7 @@ import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
-from app.models.schemas import ConsoleSafePoc, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
+from app.models.schemas import ApiCallCandidate, ConsoleSafePoc, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.api_candidate_extractor import extract_api_call_candidates
 from app.services.json_utils import extract_json_payload
@@ -154,7 +154,9 @@ class ConsolePocAnalyzer(ABC):
 
 class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     """Pattern-based fallback for tests and offline validation only.
-    Production-quality reasoning should use GeminiConsolePocAnalyzer with structured API candidates.
+
+    Production-quality reasoning should use GeminiConsolePocAnalyzer with
+    structured API candidates.
     """
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
         findings: list[ReadableFinding] = []
@@ -173,7 +175,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             if any(x in c_lower for x in ('axios.', 'fetch(', 'apiclient.', 'request.', 'httpclient.', 'client.', '$.ajax', 'jquery.ajax', 'formdata')):
                 for cand in extract_api_call_candidates([f]).candidates:
                     if cand.sink.startswith(('axios', 'fetch', '$.ajax', 'apiClient', 'request', 'httpClient', 'client')):
-                        findings.append(self._mk_validation_bypass(f, endpoint=cand.endpoint, method=cand.method, parameters=cand.parameters, sink=cand.sink))
+                        findings.append(self._mk_validation_bypass(f, candidate=cand))
         return _dedup_findings(findings)
 
     def _id(self, seed: str) -> str:
@@ -260,34 +262,102 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation='안전한 DOM API 사용',
         )
 
-    def _mk_validation_bypass(self, f: FileContent, endpoint: str | None = None, method: str | None = None, parameters: list[str] | None = None, sink: str | None = None) -> ReadableFinding:
-        endpoint = endpoint or _extract_endpoint(f.content)
-        parameters = parameters or _extract_validation_parameters(f.content)
-        method = method or 'UNKNOWN'
-        sink = sink or ('axios.post' if 'axios.post' in f.content.lower() else ('axios.put' if 'axios.put' in f.content.lower() else ('fetch' if 'fetch(' in f.content.lower() else 'formdata')))
+    def _classify_api_candidate(self, candidate: ApiCallCandidate) -> dict[str, str]:
+        endpoint_l = (candidate.endpoint or '').lower()
+        method = (candidate.method or 'UNKNOWN').upper()
+        params_l = [p.lower() for p in (candidate.parameters or [])]
+        sink_l = (candidate.sink or '').lower()
+
+        payment_keys = {'wallet', 'charge', 'point', 'payment', 'pay', 'iamport', 'stripe', 'amount', 'totalamount', 'usepoints', 'merchant_uid', 'imp_uid'}
+        idor_keys = {'userid', 'memberid', 'accountid', 'orderid', 'productid', 'itemid'}
+        state_keys = {'status', 'role', 'usertype', 'isadmin', 'authlevel'}
+        recovery_keys = {'password', 'reset', 'verify', 'verification', 'code'}
+
+        endpoint_tokens = set(re.findall(r'[a-zA-Z_]+', endpoint_l))
+        if (method in {'POST', 'PUT', 'PATCH', 'DELETE'}) and (payment_keys & (endpoint_tokens | set(params_l))):
+            return {
+                'vulnerability_type': 'Payment/Point Manipulation Candidate',
+                'title': '결제/포인트 요청 파라미터 조작 가능성',
+                'impact': '결제/포인트 관련 비즈니스 로직 오남용 가능성',
+                'root_cause': '클라이언트 파라미터 기반 요청 제어',
+                'remediation': '서버측 금액/포인트/결제 파라미터 검증 강화',
+                'severity': 'high' if method in {'POST', 'PUT', 'PATCH', 'DELETE'} else 'medium',
+            }
+        if method == 'GET' and (idor_keys & (endpoint_tokens | set(params_l))):
+            return {
+                'vulnerability_type': 'IDOR / Unauthorized Data Access Candidate',
+                'title': '식별자 기반 조회 요청의 접근 제어 확인 필요',
+                'impact': '타 사용자 데이터 조회 가능성',
+                'root_cause': '식별자 기반 조회 요청의 권한 검증 불확실',
+                'remediation': '서버측 객체 단위 권한 검증 적용',
+                'severity': 'medium',
+            }
+        if method in {'POST', 'PUT', 'PATCH', 'DELETE'} and (state_keys & (endpoint_tokens | set(params_l))):
+            return {
+                'vulnerability_type': 'State/Status Manipulation Candidate',
+                'title': '상태/권한 변경 요청 조작 가능성',
+                'impact': '권한/상태 값 위변조 가능성',
+                'root_cause': '클라이언트 제어 값에 대한 서버 검증 불확실',
+                'remediation': '상태/권한 변경 API 서버 검증 및 감사 로깅 강화',
+                'severity': 'high',
+            }
+        if recovery_keys & endpoint_tokens:
+            return {
+                'vulnerability_type': 'Account Recovery Flow Abuse Candidate',
+                'title': '계정 복구/인증 코드 흐름 검증 필요',
+                'impact': '계정 복구 흐름 악용 가능성',
+                'root_cause': '복구/인증 코드 요청 흐름의 서버 검증 불확실',
+                'remediation': '복구/코드 검증 API에 rate-limit/토큰 검증 강화',
+                'severity': 'medium',
+            }
+        if method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+            return {
+                'vulnerability_type': 'Client-side Validation Bypass',
+                'title': '클라이언트 검증값 조작을 통한 요청 변조 가능성',
+                'impact': '비즈니스 로직 오남용',
+                'root_cause': '클라이언트 검증 의존',
+                'remediation': '서버 검증 강제',
+                'severity': 'medium',
+            }
+        return {
+            'vulnerability_type': 'Generic API Review Candidate',
+            'title': 'API 요청 후보 수동 검토 필요',
+            'impact': '요청 흐름 오남용 가능성',
+            'root_cause': '프론트 소스만으로 서버 검증 여부 판단 불가',
+            'remediation': '백엔드 권한/유효성 검증 정책 교차 검토',
+            'severity': 'low',
+        }
+
+    def _mk_validation_bypass(self, f: FileContent, candidate: ApiCallCandidate) -> ReadableFinding:
+        endpoint = candidate.endpoint or 'UNKNOWN'
+        parameters = candidate.parameters or _extract_validation_parameters(f.content)
+        method = (candidate.method or 'UNKNOWN').upper()
+        sink = candidate.sink or 'UNKNOWN'
         flow = ['source -> state/storage -> sink']
         flow.append(f'method: {method}')
-        flow.append(f"endpoint: {endpoint or 'UNKNOWN'}")
+        flow.append(f'endpoint: {endpoint}')
         for k in parameters:
             flow.append(f'parameter: {k}')
         flow.append(f'sink: {sink}')
-        start_line, end_line, snippet = _extract_relevant_snippet(f.content, VALIDATION_SNIPPET_KEYS)
-        ev = [ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='검증값+요청 API 조합', data_flow=flow)]
+        ev = [ReadableEvidence(source_path=f.path, start_line=candidate.start_line, end_line=candidate.end_line, snippet=candidate.snippet, reason='검증값+요청 API 조합', data_flow=flow)]
         notes = []
         conf = 'low'
         poc_type = 'manual_check'
         poc_code = None
         if endpoint == 'UNKNOWN':
             notes.append('endpoint variable requires manual review')
+        if method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+            notes.append('state-changing request requires manual verification; do not execute in browser console')
         if method == 'GET' and endpoint and endpoint != 'UNKNOWN':
             poc_type = 'browser_console'
-            poc_code = f"fetch('{endpoint}', {{ method: 'GET' }}).then(r => r.status)"
+            poc_code = f"fetch('{endpoint}', {{ method: 'GET', credentials: 'include' }}).then(r => r.status)"
             conf = 'medium'
+        classification = self._classify_api_candidate(candidate)
         return ReadableFinding(
             id=self._id(f.path + 'v'),
-            title='클라이언트 검증값 조작을 통한 요청 변조 가능성',
-            vulnerability_type='Client-side Validation Bypass',
-            severity='medium',
+            title=classification['title'],
+            vulnerability_type=classification['vulnerability_type'],
+            severity=classification['severity'],
             confidence=conf,
             affected_files=[f.path],
             summary='요청 전송 전 값 조작 가능성 정황입니다.',
@@ -302,9 +372,9 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 safety='실제 변경 요청을 수행하지 않는다.',
             ),
             attack_scenario=['파라미터 조작'],
-            impact='비즈니스 로직 오남용',
-            root_cause='클라이언트 검증 의존',
-            remediation='서버 검증 강제',
+            impact=classification['impact'],
+            root_cause=classification['root_cause'],
+            remediation=classification['remediation'],
             verification_notes=notes,
         )
 

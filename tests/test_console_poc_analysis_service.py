@@ -63,7 +63,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
     def test_validation_bypass_has_endpoint_parameter_data_flow(self):
         files = [f('src/pay.js', "const payload={amount:100,status:'P'}; axios.post('/api/order', payload)")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        finding = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass'][0]
+        finding = [x for x in result.findings if x.vulnerability_type in {'Client-side Validation Bypass', 'State/Status Manipulation Candidate', 'Payment/Point Manipulation Candidate'}][0]
         flow = finding.evidence[0].data_flow
         self.assertTrue(any(x.startswith('parameter: amount') for x in flow))
         self.assertTrue(any(x.startswith('endpoint: /api/order') for x in flow))
@@ -75,8 +75,10 @@ class ConsolePocAnalysisTests(unittest.TestCase):
     def test_validation_finds_template_literal_endpoint_in_data_flow(self):
         files = [f('src/wallet.js', "const payload={amount,userId}; axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, payload)")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        finding = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass'][0]
+        finding = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
         self.assertIn('endpoint: /api/user/{sessionData.userId}/wallet/charge', finding.evidence[0].data_flow)
+        self.assertIn('axios.post', finding.evidence[0].snippet)
+        self.assertNotIn('import React', finding.evidence[0].snippet)
 
     def test_validation_endpoints_are_not_deduped_together(self):
         content = (
@@ -86,7 +88,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         )
         files = [f('src/pay.js', content)]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        findings = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass']
+        findings = [
+            x for x in result.findings if x.vulnerability_type in {
+                'Client-side Validation Bypass',
+                'Payment/Point Manipulation Candidate',
+                'Generic API Review Candidate',
+                'State/Status Manipulation Candidate',
+            }
+        ]
         endpoints = sorted([
             next((flow.replace('endpoint: ', '') for flow in finding.evidence[0].data_flow if flow.startswith('endpoint: ')), '')
             for finding in findings
@@ -98,14 +107,15 @@ class ConsolePocAnalysisTests(unittest.TestCase):
     def test_get_endpoint_allows_safe_console_poc(self):
         files = [f('src/get.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        finding = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass'][0]
+        finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
         self.assertEqual(finding.console_poc.poc_type, 'browser_console')
         self.assertIn("method: 'GET'", finding.console_poc.code or '')
+        self.assertIn("credentials: 'include'", finding.console_poc.code or '')
 
     def test_unknown_endpoint_is_low_with_verification_note(self):
         files = [f('src/x.js', "const endpoint = API_ENDPOINTS.CHARGE_POINT; apiClient.post(endpoint, payload); const amount=1;")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        finding = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass'][0]
+        finding = [x for x in result.findings if x.vulnerability_type in {'Client-side Validation Bypass', 'Payment/Point Manipulation Candidate'}][0]
         self.assertEqual(finding.confidence, 'low')
         self.assertIn('endpoint variable requires manual review', finding.verification_notes)
 
@@ -114,6 +124,26 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         types = [x.vulnerability_type for x in result.findings]
         self.assertNotIn('Client-side Validation Bypass', types)
+        self.assertNotIn('Generic API Review Candidate', types)
+
+    def test_idor_candidate_classification(self):
+        files = [f('src/order.js', "fetch('/api/order/by-product/${productId}/user/${userId}')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'IDOR / Unauthorized Data Access Candidate'][0]
+        self.assertIn('식별자 기반 조회 요청의 접근 제어 확인 필요', finding.title)
+
+    def test_account_recovery_candidate_classification(self):
+        files = [f('src/reset.js', "axios.post('/api/user/reset-password', { email, verificationCode })")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        finding = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
+        self.assertIsNone(finding.console_poc.code)
+
+    def test_post_request_console_poc_is_manual_check(self):
+        files = [f('src/post.js', "axios.post('/api/pay', { amount, orderId })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
+        self.assertIsNone(finding.console_poc.code)
+        self.assertEqual(finding.console_poc.poc_type, 'manual_check')
 
     def test_dedup_merges_affected_files(self):
         files = [

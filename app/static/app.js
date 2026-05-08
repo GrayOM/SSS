@@ -49,10 +49,15 @@ function renderFindings(body) {
       <p><b>근거 snippet:</b> ${esc(ev.snippet || '')}</p>
       <p><b>근거 사유:</b> ${esc(ev.reason || '')}</p>
       ${structuredFlow
-        ? `<p><b>Method:</b> ${esc((method || '').replace('method: ', 'UNKNOWN'))}</p>
-           <p><b>Endpoint:</b> ${esc((endpoint || '').replace('endpoint: ', 'UNKNOWN'))}</p>
+        ? (() => {
+            const methodValue = method ? method.replace('method: ', '') : 'UNKNOWN';
+            const endpointValue = endpoint ? endpoint.replace('endpoint: ', '') : 'UNKNOWN';
+            const sinkValue = sink ? sink.replace('sink: ', '') : 'UNKNOWN';
+            return `<p><b>Method:</b> ${esc(methodValue)}</p>
+           <p><b>Endpoint:</b> ${esc(endpointValue)}</p>
            <p><b>Parameters:</b> ${params.map(esc).join(', ') || 'N/A'}</p>
-           <p><b>Sink:</b> ${esc((sink || '').replace('sink: ', 'UNKNOWN'))}</p>`
+           <p><b>Sink:</b> ${esc(sinkValue)}</p>`;
+          })()
         : `<p><b>데이터 흐름:</b> ${((ev.data_flow || []).map(esc).join(' → '))}</p>`}
       <p><b>공격 시나리오:</b> ${(f.attack_scenario || []).map(esc).join(' → ')}</p>
       <p><b>PoC 설명:</b> ${esc(poc.description || '')}</p>

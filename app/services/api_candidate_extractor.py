@@ -3,7 +3,7 @@ import re
 from app.models.schemas import ApiCallCandidate, CandidateExtractionResult, FileContent
 
 _METHODS = ['get', 'post', 'put', 'delete', 'patch']
-_META_KEYS = {'method', 'url', 'data', 'body', 'headers', 'credentials', 'withCredentials', 'mode', 'cache'}
+_META_KEYS = {'method', 'url', 'data', 'body', 'headers', 'credentials', 'withCredentials', 'mode', 'cache', 'expr'}
 
 
 def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
@@ -67,7 +67,7 @@ def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
     for m in re.finditer(r'URLSearchParams\(\s*\{([^}]*)\}', snippet):
         for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*:', m.group(1)):
             params.add(km.group(1))
-    out = sorted(k for k in params if k not in _META_KEYS)
+    out = sorted(k for k in params if k not in _META_KEYS and k.lower() not in {'expr', 'sessiondata'})
     if len(out) > 20:
         notes.append('parameter list truncated')
         out = out[:20]
@@ -143,7 +143,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     if sink_name in ('$.ajax', 'jQuery.ajax'):
                         mm = re.search(r'(?:type|method)\s*:\s*["\']([A-Za-z]+)["\']', snip)
                         method = mm.group(1).upper() if mm else 'UNKNOWN'
-                    if sink in {'request', 'apiClient.request'}:
+                    if sink == 'apiClient.request' or sink == 'request':
                         method, endpoint = _extract_object_style_request(snip, sink)
                         if endpoint == 'UNKNOWN':
                             notes.append('endpoint variable requires manual review')
@@ -151,14 +151,14 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     params, pnotes = _extract_parameters(snip)
                     for key in ('data', 'body', 'params'):
                         pv = re.search(rf'{key}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)', snip)
-                        if pv and pv.group(1).lower() not in {'undefined', 'null'}:
+                        if pv and pv.group(1).lower() not in {'undefined', 'null', 'expr'}:
                             params.append(pv.group(1))
                             notes.append('payload object requires manual review')
                     near_start = max(0, i - 10)
                     near = '\n'.join(lines[near_start:i + 1])
                     for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
                         params.append(mfd.group(1))
-                    params = sorted(set(params))
+                    params = sorted({p for p in params if p.lower() not in {'expr', 'sessiondata'}})
                     notes.extend(pnotes)
                     if method == 'UNKNOWN':
                         notes.append('method could not be determined')
