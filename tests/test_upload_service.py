@@ -31,6 +31,21 @@ class UploadServiceCleanupTests(unittest.TestCase):
         finally:
             settings.TMP_DIR = original_tmp
 
+    def test_cleanup_on_size_limit_exceeded_streaming(self):
+        original_tmp = settings.TMP_DIR
+        original_limit = settings.MAX_UPLOAD_SIZE_MB
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                settings.TMP_DIR = td
+                settings.MAX_UPLOAD_SIZE_MB = 0
+                with self.assertRaises(HTTPException) as ctx:
+                    asyncio.run(upload_service.prepare_uploaded_zip(self._upload('big.zip', b'PK' + b'a' * 100)))
+                self.assertEqual(ctx.exception.status_code, 413)
+                self.assertEqual(self._leftover_upload_dirs(td), [])
+        finally:
+            settings.MAX_UPLOAD_SIZE_MB = original_limit
+            settings.TMP_DIR = original_tmp
+
     def test_cleanup_on_zip_security_error(self):
         original_tmp = settings.TMP_DIR
         original_extract = upload_service.extract_zip

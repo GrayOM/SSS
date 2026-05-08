@@ -125,6 +125,16 @@ class FilterPolicyTests(unittest.TestCase):
             self.assertTrue(should_include_file(webpack_cfg).include)
 
 class ZipSecurityTests(unittest.TestCase):
+    def test_absolute_path_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            upload = Path(td) / 'abs.zip'
+            workspace = Path(td) / 'ws'
+            workspace.mkdir()
+            with ZipFile(upload, 'w') as zf:
+                zf.writestr('/absolute/path.js', 'oops')
+            with self.assertRaises(ZipSecurityError):
+                extract_zip(upload, workspace)
+
     def test_zip_slip_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             upload = Path(td) / 'bad.zip'
@@ -135,6 +145,17 @@ class ZipSecurityTests(unittest.TestCase):
 
             with self.assertRaises(ZipSecurityError):
                 extract_zip(upload, workspace)
+
+    def test_normal_directory_allowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            upload = Path(td) / 'ok.zip'
+            workspace = Path(td) / 'ws'
+            workspace.mkdir()
+            with ZipFile(upload, 'w') as zf:
+                zf.writestr('src/', '')
+                zf.writestr('src/app.js', 'ok')
+            extracted = extract_zip(upload, workspace)
+            self.assertTrue((extracted / 'src' / 'app.js').exists())
 
     def test_symlink_entry_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:

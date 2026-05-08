@@ -1,10 +1,10 @@
 import hashlib
-import json
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
 from app.models.schemas import AnalysisEvidence, AnalysisResult, CodeChunk, VulnerabilityFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
+from app.services.json_utils import extract_json_payload
 from app.services.prompt_builder import build_analysis_prompt
 
 DOM_XSS_SINK = 'innerHTML'
@@ -92,40 +92,6 @@ class MockAnalyzer(Analyzer):
         return findings
 
 
-def _extract_json_payload(raw: str) -> dict | None:
-    text = raw.strip()
-
-    try:
-        payload = json.loads(text)
-        return payload if isinstance(payload, dict) else None
-    except json.JSONDecodeError:
-        pass
-
-    if text.startswith('```'):
-        lines = text.splitlines()
-        if len(lines) >= 3 and lines[-1].strip() == '```':
-            fence_header = lines[0].strip().lower()
-            if fence_header in ('```', '```json'):
-                body = '\n'.join(lines[1:-1]).strip()
-                try:
-                    payload = json.loads(body)
-                    return payload if isinstance(payload, dict) else None
-                except json.JSONDecodeError:
-                    pass
-
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start:end + 1]
-        try:
-            payload = json.loads(candidate)
-            return payload if isinstance(payload, dict) else None
-        except json.JSONDecodeError:
-            return None
-
-    return None
-
-
 class GeminiAnalyzer(Analyzer):
     def __init__(self, client: GeminiClientProtocol):
         self.client = client
@@ -134,7 +100,7 @@ class GeminiAnalyzer(Analyzer):
         prompt = build_analysis_prompt(chunk)
         raw = self.client.analyze(prompt)
 
-        payload = _extract_json_payload(raw)
+        payload = extract_json_payload(raw)
         if payload is None:
             return []
 

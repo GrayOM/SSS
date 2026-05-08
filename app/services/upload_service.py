@@ -19,14 +19,23 @@ async def prepare_uploaded_zip(file: UploadFile) -> tuple[Path, Path]:
         workspace = Path(prepare_workspace())
         upload_path = workspace / safe_name
 
-        content = await file.read()
-        if len(content) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-            raise HTTPException(status_code=413, detail='Upload exceeds size limit')
+        max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        total = 0
+        first_bytes = b''
+        with upload_path.open('wb') as dst:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(status_code=413, detail='Upload exceeds size limit')
+                if len(first_bytes) < 4:
+                    first_bytes += chunk[: 4 - len(first_bytes)]
+                dst.write(chunk)
 
-        if len(content) < 2 or not content.startswith(b'PK'):
+        if len(first_bytes) < 2 or not first_bytes.startswith(b'PK'):
             raise HTTPException(status_code=400, detail='Invalid ZIP signature')
-
-        upload_path.write_bytes(content)
 
         try:
             extracted_dir = extract_zip(upload_path, workspace)
