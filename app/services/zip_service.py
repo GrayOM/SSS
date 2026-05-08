@@ -23,7 +23,7 @@ def _ensure_within_base(member_path: Path, base_path: Path, member_name: str) ->
 
 def _is_unix_symlink(member) -> bool:
     mode = (member.external_attr >> 16) & 0xFFFF
-    return stat.S_ISLNK(mode) or (member.create_system == 3 and stat.S_ISLNK(mode))
+    return stat.S_ISLNK(mode)
 
 
 def _is_special_file_mode(mode: int) -> bool:
@@ -43,9 +43,10 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
 
     written_total = 0
     for member in members:
-        name = member.filename
-        if PurePosixPath(name).is_absolute() or PureWindowsPath(name).is_absolute():
-            raise ZipSecurityError(f'Absolute path not allowed: {name}')
+        raw_name = member.filename
+        name = raw_name.replace('\\', '/')
+        if PurePosixPath(name).is_absolute() or PureWindowsPath(raw_name).is_absolute():
+            raise ZipSecurityError(f'Absolute path not allowed: {raw_name}')
 
         target_path = (extract_to / name).resolve()
         _ensure_within_base(target_path, base_path, name)

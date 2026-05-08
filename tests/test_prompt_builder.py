@@ -27,6 +27,40 @@ class PromptBuilderTests(unittest.TestCase):
         prompt = build_console_poc_analysis_prompt(files)
         self.assertIn('path="src/a&quot;b.js"', prompt)
 
+    def test_analysis_prompt_escapes_metadata(self):
+        chunk = CodeChunk(
+            source_path='src/"<tag>".js',
+            extension='.<x>',
+            priority=1,
+            source_content_hash='h',
+            chunk_index=0,
+            total_chunks=1,
+            start_line=1,
+            end_line=1,
+            chunk_hash='c',
+            content='const x = 1;',
+        )
+        prompt = build_analysis_prompt(chunk)
+        self.assertIn('- source_path: src/&quot;&lt;tag&gt;&quot;.js', prompt)
+        self.assertIn('- extension: .&lt;x&gt;', prompt)
+
+    def test_analysis_prompt_keeps_source_code_raw(self):
+        raw = 'if (x < 1) { console.log("ok>"); }'
+        chunk = CodeChunk(
+            source_path='a.js',
+            extension='.js',
+            priority=1,
+            source_content_hash='h',
+            chunk_index=0,
+            total_chunks=1,
+            start_line=1,
+            end_line=1,
+            chunk_hash='c',
+            content=raw,
+        )
+        prompt = build_analysis_prompt(chunk)
+        self.assertIn(raw, prompt)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str | None = None
-    OPENAI_MODEL: str = 'gpt-4.1-mini'
+    OPENAI_MODEL: str = 'gpt-5-mini'
     CLAUDE_MODEL: str = 'claude-3-5-sonnet-latest'
 
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')

@@ -143,8 +143,10 @@ class AnalysisServiceTests(unittest.TestCase):
         original_backend = analysis_service.settings.ANALYZER_BACKEND
         try:
             analysis_service.settings.ANALYZER_BACKEND = 'unknown'
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ValueError) as cm:
                 get_analyzer()
+            self.assertIn('Supported backends: mock, gemini.', str(cm.exception))
+            self.assertIn('OpenAI/Claude backends are not implemented yet.', str(cm.exception))
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 

@@ -145,6 +145,26 @@ class ZipSecurityTests(unittest.TestCase):
             with self.assertRaises(ZipSecurityError):
                 extract_zip(upload, workspace)
 
+    def test_backslash_path_normalized_and_extracted(self):
+        with tempfile.TemporaryDirectory() as td:
+            upload = Path(td) / 'backslash-ok.zip'
+            workspace = Path(td) / 'ws'
+            workspace.mkdir()
+            with ZipFile(upload, 'w') as zf:
+                zf.writestr('foo\\bar.js', 'ok')
+            extracted = extract_zip(upload, workspace)
+            self.assertTrue((extracted / 'foo' / 'bar.js').exists())
+
+    def test_backslash_traversal_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            upload = Path(td) / 'backslash-slip.zip'
+            workspace = Path(td) / 'ws'
+            workspace.mkdir()
+            with ZipFile(upload, 'w') as zf:
+                zf.writestr('..\\evil.js', 'oops')
+            with self.assertRaises(ZipSecurityError):
+                extract_zip(upload, workspace)
+
     def test_windows_unc_absolute_path_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             upload = Path(td) / 'uncabs.zip'
