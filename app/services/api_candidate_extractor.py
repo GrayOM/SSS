@@ -3,6 +3,7 @@ import re
 from app.models.schemas import ApiCallCandidate, CandidateExtractionResult, FileContent
 
 _METHODS = ['get', 'post', 'put', 'delete', 'patch']
+_META_KEYS = {'method', 'url', 'data', 'body', 'headers', 'credentials', 'withCredentials', 'mode', 'cache'}
 
 
 def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
@@ -27,6 +28,23 @@ def _snippet(lines: list[str], line_idx: int, context: int = 6) -> tuple[int, in
     return start + 1, end + 1, '\n'.join(lines[start:end + 1])
 
 
+def _collect_call_block(lines: list[str], start_idx: int, max_lines: int = 40) -> tuple[int, int, str]:
+    start = start_idx
+    depth = 0
+    end = start_idx
+    saw_open = False
+    for idx in range(start_idx, min(len(lines), start_idx + max_lines)):
+        line = lines[idx]
+        depth += line.count('(')
+        if line.count('(') > 0:
+            saw_open = True
+        depth -= line.count(')')
+        end = idx
+        if saw_open and depth <= 0:
+            break
+    return start + 1, end + 1, '\n'.join(lines[start:end + 1])
+
+
 def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
     params = set()
     notes = []
@@ -48,7 +66,7 @@ def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
     for m in re.finditer(r'URLSearchParams\(\s*\{([^}]*)\}', snippet):
         for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*:', m.group(1)):
             params.add(km.group(1))
-    out = sorted(params)
+    out = sorted(k for k in params if k not in _META_KEYS)
     if len(out) > 20:
         notes.append('parameter list truncated')
         out = out[:20]
@@ -80,57 +98,66 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
         lines = file.content.splitlines() or ['']
         for i, line in enumerate(lines):
             stripped = line.strip()
+            line_has_api_candidate = False
             for pat, sink_tpl in patterns:
-                m = re.search(pat, stripped)
-                if not m:
+                matches = list(re.finditer(pat, stripped))
+                if not matches:
                     continue
-                sink_name = m.group(1)
-                method = (m.group(2).upper() if len(m.groups()) > 1 and m.group(2) else 'UNKNOWN')
-                sink = sink_tpl.format(sink=sink_name, method=m.group(2) if len(m.groups()) > 1 and m.group(2) else '').replace('..', '.')
-                start_line, end_line, snip = _snippet(lines, i, context=0)
-                notes = ['server-side authorization cannot be confirmed from frontend source only']
+                for m in matches:
+                    sink_name = m.group(1)
+                    method = (m.group(2).upper() if len(m.groups()) > 1 and m.group(2) else 'UNKNOWN')
+                    sink = sink_tpl.format(sink=sink_name, method=m.group(2) if len(m.groups()) > 1 and m.group(2) else '').replace('..', '.')
+                    start_line, end_line, snip = _collect_call_block(lines, i)
+                    notes = ['server-side authorization cannot be confirmed from frontend source only']
 
-                endpoint = 'UNKNOWN'
-                tail = stripped[m.start():]
-                epm = re.search(r'\(\s*(["\'`])(.+?)\1', tail)
-                if epm:
-                    endpoint, epnotes = _normalize_endpoint(epm.group(2))
-                    notes.extend(epnotes)
-                elif 'url:' in snip:
-                    um = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip)
-                    if um:
-                        endpoint, epnotes = _normalize_endpoint(um.group(2))
+                    endpoint = 'UNKNOWN'
+                    tail = snip[m.start():]
+                    epm = re.search(r'\(\s*(["\'`])(.+?)\1', tail, re.DOTALL)
+                    if epm:
+                        endpoint, epnotes = _normalize_endpoint(epm.group(2))
                         notes.extend(epnotes)
+                    elif 'url:' in snip:
+                        um = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip)
+                        if um:
+                            endpoint, epnotes = _normalize_endpoint(um.group(2))
+                            notes.extend(epnotes)
+                        else:
+                            notes.append('endpoint variable requires manual review')
                     else:
                         notes.append('endpoint variable requires manual review')
-                else:
-                    notes.append('endpoint variable requires manual review')
 
-                if sink_name == 'fetch':
-                    mm = re.search(r'method\s*:\s*["\']([A-Za-z]+)["\']', snip)
-                    method = mm.group(1).upper() if mm else 'GET'
-                if sink_name in ('$.ajax', 'jQuery.ajax'):
-                    mm = re.search(r'(?:type|method)\s*:\s*["\']([A-Za-z]+)["\']', snip)
-                    method = mm.group(1).upper() if mm else 'UNKNOWN'
-                if sink_name == 'request' or 'request(' in stripped:
-                    method, endpoint = _extract_object_style_request(snip, sink)
-                    if endpoint == 'UNKNOWN':
-                        notes.append('endpoint variable requires manual review')
+                    if sink_name == 'fetch':
+                        mm = re.search(r'method\s*:\s*["\']([A-Za-z]+)["\']', snip)
+                        method = mm.group(1).upper() if mm else 'GET'
+                    if sink_name in ('$.ajax', 'jQuery.ajax'):
+                        mm = re.search(r'(?:type|method)\s*:\s*["\']([A-Za-z]+)["\']', snip)
+                        method = mm.group(1).upper() if mm else 'UNKNOWN'
+                    if sink_name == 'request' or 'request(' in stripped:
+                        method, endpoint = _extract_object_style_request(snip, sink)
+                        if endpoint == 'UNKNOWN':
+                            notes.append('endpoint variable requires manual review')
 
-                params, pnotes = _extract_parameters(snip)
-                notes.extend(pnotes)
-                if method == 'UNKNOWN':
-                    notes.append('method could not be determined')
-                confidence = 'high' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' and params else ('medium' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' else 'low')
-
-                candidates.append(ApiCallCandidate(source_path=file.path, method=method, endpoint=endpoint, parameters=params, start_line=start_line, end_line=end_line, snippet=snip, sink=sink, confidence=confidence, notes=sorted(set(notes))))
+                    params, pnotes = _extract_parameters(snip)
+                    near_start = max(0, i - 10)
+                    near = '\n'.join(lines[near_start:i + 1])
+                    for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
+                        params.append(mfd.group(1))
+                    params = sorted(set(params))
+                    notes.extend(pnotes)
+                    if method == 'UNKNOWN':
+                        notes.append('method could not be determined')
+                    confidence = 'high' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' and params else ('medium' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' else 'low')
+                    candidates.append(ApiCallCandidate(source_path=file.path, method=method, endpoint=endpoint, parameters=params, start_line=start_line, end_line=end_line, snippet=snip, sink=sink, confidence=confidence, notes=sorted(set(notes))))
+                    line_has_api_candidate = True
 
             fn = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)', stripped)
             sensitive_verbs = ('update', 'charge', 'complete', 'pay', 'save', 'submit', 'create', 'modify', 'change', 'approve', 'cancel', 'refund', 'register', 'remove', 'delete', 'bid', 'order', 'payment', 'point', 'role', 'status')
             sensitive_tokens = ('amount', 'userid', 'orderid', 'status', 'role', 'price', 'payment', 'point', 'payload', 'data', 'form')
             fn_name = fn.group(1) if fn else ''
             token_sensitive = any(x in stripped.lower() for x in sensitive_tokens)
-            if fn and fn_name not in {'if', 'for', 'while', 'switch', 'fetch'} and (
+            excluded_fn = {'if', 'for', 'while', 'switch', 'fetch', 'get', 'post', 'put', 'delete', 'patch', 'request', 'ajax'}
+            before_char = stripped[fn.start(1) - 1] if fn and fn.start(1) > 0 else ''
+            if fn and fn_name not in excluded_fn and before_char != '.' and not line_has_api_candidate and (
                 any(x in fn_name.lower() for x in sensitive_verbs) or (token_sensitive and not fn_name.lower().startswith('calculate'))
             ):
                 start_line, end_line, snip = _snippet(lines, i, context=0)

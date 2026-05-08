@@ -69,6 +69,56 @@ new URLSearchParams({ orderId: orderId, status: status })
         self.assertTrue(any(c.sink == 'function_call' and 'saveOrder' in c.snippet for c in result.candidates))
         self.assertFalse(any(c.sink == 'function_call' and 'calculateTotal' in c.snippet for c in result.candidates))
 
+    def test_multiline_axios_post_extracts_endpoint_and_amount(self):
+        content = """
+axios.post(
+  `${apiBase}/api/user/${sessionData.userId}/wallet/charge`,
+  {
+    amount: totalPoints
+  },
+  { withCredentials: true }
+);
+"""
+        result = extract_api_call_candidates([fc(content)])
+        cand = [c for c in result.candidates if c.sink == 'axios.post'][0]
+        self.assertEqual(cand.endpoint, '/api/user/{sessionData.userId}/wallet/charge')
+        self.assertIn('amount', cand.parameters)
+
+    def test_multiline_object_request_extracts_method_url_data(self):
+        content = """
+apiClient.request({
+  method: "PUT",
+  url: "/api/order/status",
+  data: {
+    orderId,
+    status
+  }
+});
+"""
+        cand = extract_api_call_candidates([fc(content)]).candidates[0]
+        self.assertEqual(cand.method, 'PUT')
+        self.assertEqual(cand.endpoint, '/api/order/status')
+        self.assertIn('orderId', cand.parameters)
+        self.assertIn('status', cand.parameters)
+
+    def test_no_function_call_dup_for_member_call_and_meta_keys_removed(self):
+        content = "axios.post('/api/test', { amount, userId }, { headers: {a:1} })"
+        result = extract_api_call_candidates([fc(content)])
+        self.assertFalse(any(c.sink == 'function_call' for c in result.candidates))
+        cand = [c for c in result.candidates if c.sink == 'axios.post'][0]
+        self.assertNotIn('headers', cand.parameters)
+        self.assertNotIn('method', cand.parameters)
+        self.assertNotIn('url', cand.parameters)
+
+    def test_formdata_append_parameter_attached_to_post(self):
+        content = """
+const fd = new FormData();
+fd.append("amount", amount);
+axios.post("/api/pay", fd);
+"""
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
+        self.assertIn('amount', cand.parameters)
+
 
 if __name__ == '__main__':
     unittest.main()
