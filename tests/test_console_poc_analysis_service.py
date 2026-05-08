@@ -33,18 +33,29 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIsNone(auth.console_poc.code)
         self.assertIn('requireAuth/checkSession 구현 파일 확인이 필요합니다.', auth.verification_notes)
+        self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
+        self.assertEqual(auth.confidence, 'low')
+        self.assertIn('추가 확인 필요', auth.summary)
+
+    def test_requireauth_userinfo_admin_without_dependency_file_has_no_poc_code(self):
+        files = [f('src/AdminPage.js', "const userInfo = requireAuth(); if (userInfo.userType === 'ADMIN') { navigate('/admin') } import { requireAuth } from '../utils/sessionUtils';")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertIsNone(auth.console_poc.code)
+        self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
 
     def test_storage_evidence_generates_poc_code(self):
-        files = [f('src/AdminMypage.js', "const u = sessionStorage.getItem('user'); if (u && role==='ADMIN') { navigate('/admin') }")]
+        files = [f('src/AdminMypage.js', "const user = JSON.parse(sessionStorage.getItem('user')); if (user?.userType === 'ADMIN') { navigate('/admin') }")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIsNotNone(auth.console_poc.code)
 
-    def test_header_like_routing_only_not_high(self):
+    def test_header_like_routing_only_not_high_confidence(self):
         files = [f('src/Header.js', "if (userType==='ADMIN'){navigate('/admin-mypage')}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertEqual(auth.severity, 'low')
+        self.assertNotEqual(auth.confidence, 'high')
 
     def test_validation_bypass_has_endpoint_parameter_data_flow(self):
         files = [f('src/pay.js', "const payload={amount:100,status:'P'}; axios.post('/api/order', payload)")]

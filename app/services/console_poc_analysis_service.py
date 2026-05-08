@@ -73,6 +73,23 @@ def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
     return list(grouped.values())
 
 
+def _has_storage_auth_evidence(files: list[FileContent], primary_file: FileContent) -> bool:
+    storage_read_re = re.compile(r'(sessionStorage|localStorage)\.getItem\s*\(|document\.cookie', re.IGNORECASE)
+    auth_key_re = re.compile(r'(userType|role|isAdmin)', re.IGNORECASE)
+    admin_branch_re = re.compile(r'(ADMIN|NAFAL)', re.IGNORECASE)
+
+    related_files = [primary_file]
+    base = primary_file.path.rsplit('/', 1)[0] if '/' in primary_file.path else ''
+    for file in files:
+        if file.path == primary_file.path:
+            continue
+        if base and file.path.startswith(base):
+            related_files.append(file)
+
+    combined = '\n'.join(file.content for file in related_files)
+    return bool(storage_read_re.search(combined) and auth_key_re.search(combined) and admin_branch_re.search(combined))
+
+
 class ConsolePocAnalyzer(ABC):
     @abstractmethod
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
@@ -91,7 +108,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 and 'admin' in c_lower
                 and any(x in c_lower for x in ('navigate', '관리자 권한', 'requireauth'))
             ):
-                findings.append(self._mk_auth_bypass(f, missing_deps))
+                findings.append(self._mk_auth_bypass(f, files, missing_deps))
             if 'innerhtml' in c_lower and any(x in c_lower for x in ('location', 'document.url', 'input.value', 'postmessage')):
                 findings.append(self._mk_dom_xss(f))
             if any(x in c_lower for x in ('price', 'amount', 'status')) and any(x in c_lower for x in ('formdata', 'axios.post', 'fetch(')):
@@ -113,22 +130,38 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             )
         ]
 
-    def _mk_auth_bypass(self, f: FileContent, missing_deps: list[str]) -> ReadableFinding:
+    def _mk_auth_bypass(self, f: FileContent, all_files: list[FileContent], missing_deps: list[str]) -> ReadableFinding:
+        has_storage_evidence = _has_storage_auth_evidence(all_files, f)
+        needs_manual_validation = bool(missing_deps) or not has_storage_evidence
+        poc_code = (
+            "sessionStorage.setItem('user', JSON.stringify({ userType: 'ADMIN' })); location.reload();"
+            if has_storage_evidence and not missing_deps
+            else None
+        )
+        verification_notes = []
+        if needs_manual_validation:
+            verification_notes.extend([
+                '권한값 저장/조회 위치가 확인되지 않아 Console PoC code는 생성하지 않았습니다.',
+                'requireAuth/checkSession 구현 파일 확인이 필요합니다.',
+                'sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.',
+            ])
+        verification_notes.extend([f'{d} 구현 파일이 ZIP에 없어 requireAuth 동작을 확정할 수 없습니다.' for d in missing_deps])
+
         return ReadableFinding(
             id=self._id(f.path + 'a'),
             title='클라이언트 권한 값 조작을 통한 접근 우회 가능성',
             vulnerability_type='Client-side Authorization Bypass',
             severity=_auth_bypass_severity(f.content),
-            confidence='medium',
+            confidence=('low' if needs_manual_validation else 'medium'),
             affected_files=[f.path],
-            summary='클라이언트 저장소 권한값 기반 분기 가능성이 보입니다.',
+            summary=('클라이언트 저장소 권한값 기반 분기 가능성이 보입니다.' if not needs_manual_validation else '클라이언트 권한 분기 우회 가능성은 있으나 추가 확인 필요'),
             evidence=self._ev(f, '권한 분기 정황'),
             console_poc=ConsoleSafePoc(
                 poc_type='browser_console',
                 description='세션 저장값 조작 확인',
                 preconditions=['로그인 세션'],
                 steps=['Console 실행', '코드 실행', '새로고침'],
-                code=("sessionStorage.setItem('user', JSON.stringify({ userType: 'ADMIN' })); location.reload();" if ('sessionstorage.getitem(\'user\')' in f.content.lower() or 'localstorage.getitem(\'user\')' in f.content.lower() or 'document.cookie' in f.content.lower() or 'window.' in f.content.lower()) else None),
+                code=poc_code,
                 expected_result='화면 분기 변화 확인',
                 safety='데이터 변경 없이 화면 접근 가능성만 확인한다.',
             ),
@@ -136,7 +169,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             impact='클라이언트 단 통제 우회 가능성',
             root_cause='클라이언트 상태 의존',
             remediation='서버 권한 검증 강제',
-            verification_notes=((['권한값 저장/조회 위치가 확인되지 않아 Console PoC code는 생성하지 않았습니다.', 'requireAuth/checkSession 구현 파일 확인이 필요합니다.'] if ('sessionstorage.getitem(\'user\')' not in f.content.lower() and 'localstorage.getitem(\'user\')' not in f.content.lower() and 'document.cookie' not in f.content.lower() and 'window.' not in f.content.lower()) else []) + [f'{d} 구현 파일이 ZIP에 없어 requireAuth 동작을 확정할 수 없습니다.' for d in missing_deps]),
+            verification_notes=verification_notes,
         )
 
     def _mk_dom_xss(self, f: FileContent) -> ReadableFinding:

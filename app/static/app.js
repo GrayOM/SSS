@@ -33,6 +33,8 @@ function renderFindings(body) {
   findingsBox.innerHTML = findings.map((f) => {
     const ev = (f.evidence || [])[0] || {};
     const poc = f.console_poc || {};
+    const hasPocCode = !!poc.code;
+    const verificationNotes = f.verification_notes || [];
     return `<div class="card">
       <h3>${esc(f.title)}</h3>
       <p><b>유형:</b> ${esc(f.vulnerability_type)} / <b>위험도:</b> ${esc(f.severity)} / <b>신뢰도:</b> ${esc(f.confidence)}</p>
@@ -45,10 +47,10 @@ function renderFindings(body) {
       <p><b>PoC 설명:</b> ${esc(poc.description || '')}</p>
       <p><b>사전조건:</b> ${(poc.preconditions || []).map(esc).join(', ')}</p>
       <p><b>단계:</b> ${(poc.steps || []).map(esc).join(' / ')}</p>
-      <pre><code>${esc(poc.code || 'N/A')}</code></pre>
+      <pre><code>${esc(hasPocCode ? poc.code : 'Console PoC code는 생성되지 않았습니다.')}</code></pre>
       <p><b>예상결과:</b> ${esc(poc.expected_result || '')}</p>
       <p><b>안전성:</b> ${esc(poc.safety || '')}</p>
-      <p><b>검증 노트:</b> ${(f.verification_notes || []).map(esc).join(', ')}</p>
+      <p><b>검증 노트:</b> <span style="color:#b91c1c;font-weight:700;">${verificationNotes.map(esc).join(' / ')}</span></p>
       <p><b>영향도:</b> ${esc(f.impact)}</p>
       <p><b>개선:</b> ${esc(f.remediation)}</p>
     </div>`;
