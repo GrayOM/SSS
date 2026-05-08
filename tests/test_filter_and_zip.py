@@ -104,6 +104,26 @@ class FilterPolicyTests(unittest.TestCase):
             self.assertFalse(should_include_file(backup).include)
 
 
+
+    def test_react_hash_artifacts_excluded_but_main_js_included(self):
+        with tempfile.TemporaryDirectory() as td:
+            hashed = Path(td) / 'main.3128be0a.js'
+            hashed.write_text('x')
+            self.assertFalse(should_include_file(hashed).include)
+
+            plain_main = Path(td) / 'main.js'
+            plain_main.write_text('const x=1')
+            self.assertTrue(should_include_file(plain_main).include)
+
+            static_js = Path(td) / 'static' / 'js' / 'main.3128be0a.js'
+            static_js.parent.mkdir(parents=True)
+            static_js.write_text('x')
+            self.assertFalse(should_include_file(static_js).include)
+
+            webpack_cfg = Path(td) / 'webpack.config.js'
+            webpack_cfg.write_text('module.exports = {}')
+            self.assertTrue(should_include_file(webpack_cfg).include)
+
 class ZipSecurityTests(unittest.TestCase):
     def test_zip_slip_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from app.core.config import settings
@@ -24,6 +25,15 @@ CONFIG_FILENAMES = {
 }
 EXCLUDED_DIRS = {'node_modules', 'vendor', 'dist', 'build', 'coverage', '.git', '__pycache__', 'libs', 'cdn'}
 EXCLUDED_PATTERNS = ('.min.js', '.bundle.js', '.chunk.js', 'bundle.js')
+
+BUILD_ARTIFACT_REGEXES = (
+    re.compile(r'^main\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^runtime-main\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^vendor\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^vendors\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^chunk-vendors\.[a-f0-9]{6,}\.js$'),
+)
+
 
 
 def _decision(include: bool, reason: str, reason_code: str, priority: int) -> InclusionDecision:
@@ -52,6 +62,13 @@ def should_include_file(file_path: Path) -> InclusionDecision:
         return _decision(False, 'binary file', 'EXCLUDED_BINARY', 100)
     if any(p in name for p in EXCLUDED_PATTERNS):
         return _decision(False, 'minified/build artifact', 'EXCLUDED_MINIFIED', 100)
+    if any(rx.match(name) for rx in BUILD_ARTIFACT_REGEXES):
+        return _decision(False, 'react build artifact', 'EXCLUDED_MINIFIED', 100)
+    rel = '/'.join(file_path.parts).lower()
+    if '/static/js/' in rel and name.endswith('.js'):
+        return _decision(False, 'react static build artifact', 'EXCLUDED_MINIFIED', 100)
+    if name.endswith('.license.txt') or name.endswith('.map'):
+        return _decision(False, 'build metadata artifact', 'EXCLUDED_MINIFIED', 100)
 
     if name in ALLOWED_ENV_FILES:
         return _decision(True, 'allowed env sample', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
