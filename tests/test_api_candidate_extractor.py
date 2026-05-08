@@ -119,6 +119,34 @@ axios.post("/api/pay", fd);
         cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
         self.assertIn('amount', cand.parameters)
 
+    def test_request_post_not_overwritten_by_object_style(self):
+        content = "request.post('/api/order/pay', { amount, orderId })"
+        cand = extract_api_call_candidates([fc(content)]).candidates[0]
+        self.assertEqual(cand.sink, 'request.post')
+        self.assertEqual(cand.method, 'POST')
+        self.assertEqual(cand.endpoint, '/api/order/pay')
+        self.assertIn('amount', cand.parameters)
+        self.assertIn('orderId', cand.parameters)
+        self.assertNotEqual(cand.endpoint, 'UNKNOWN')
+
+    def test_concat_endpoint_patterns(self):
+        content = "axios.post(apiBase + '/api/test', { amount }); axios.post(API_BASE + '/v1/order', { orderId }); fetch(API_BASE + '/api/user/session')"
+        endpoints = [c.endpoint for c in extract_api_call_candidates([fc(content)]).candidates]
+        self.assertIn('/api/test', endpoints)
+        self.assertIn('/v1/order', endpoints)
+        self.assertIn('/api/user/session', endpoints)
+
+    def test_template_expression_not_parameter_noise(self):
+        content = "axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, { amount })"
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
+        self.assertNotIn('sessionData', cand.parameters)
+
+    def test_payload_variable_marked_for_manual_review(self):
+        content = "request({ method: 'POST', url: endpoint, data: payload })"
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'request'][0]
+        self.assertIn('payload', cand.parameters)
+        self.assertIn('payload object requires manual review', cand.notes)
+
 
 if __name__ == '__main__':
     unittest.main()

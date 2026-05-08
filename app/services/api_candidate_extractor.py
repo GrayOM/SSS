@@ -46,6 +46,7 @@ def _collect_call_block(lines: list[str], start_idx: int, max_lines: int = 40) -
 
 
 def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
+    snippet = re.sub(r'\$\{[^}]+\}', '{expr}', snippet)
     params = set()
     notes = []
     for m in re.finditer(r'\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^,}]*)?(?:,|})', snippet):
@@ -83,6 +84,13 @@ def _extract_object_style_request(snip: str, sink: str) -> tuple[str, str]:
     return method, 'UNKNOWN'
 
 
+def _extract_concat_endpoint(snip: str) -> tuple[str, list[str]] | None:
+    m = re.search(r'\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*(["\'`])(.+?)\1', snip)
+    if not m:
+        return None
+    return _normalize_endpoint(m.group(2))
+
+
 def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtractionResult:
     candidates: list[ApiCallCandidate] = []
     patterns = [
@@ -116,6 +124,9 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     if epm:
                         endpoint, epnotes = _normalize_endpoint(epm.group(2))
                         notes.extend(epnotes)
+                    elif _extract_concat_endpoint(tail):
+                        endpoint, epnotes = _extract_concat_endpoint(tail)  # type: ignore
+                        notes.extend(epnotes)
                     elif 'url:' in snip:
                         um = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip)
                         if um:
@@ -132,12 +143,17 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     if sink_name in ('$.ajax', 'jQuery.ajax'):
                         mm = re.search(r'(?:type|method)\s*:\s*["\']([A-Za-z]+)["\']', snip)
                         method = mm.group(1).upper() if mm else 'UNKNOWN'
-                    if sink_name == 'request' or 'request(' in stripped:
+                    if sink in {'request', 'apiClient.request'}:
                         method, endpoint = _extract_object_style_request(snip, sink)
                         if endpoint == 'UNKNOWN':
                             notes.append('endpoint variable requires manual review')
 
                     params, pnotes = _extract_parameters(snip)
+                    for key in ('data', 'body', 'params'):
+                        pv = re.search(rf'{key}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)', snip)
+                        if pv and pv.group(1).lower() not in {'undefined', 'null'}:
+                            params.append(pv.group(1))
+                            notes.append('payload object requires manual review')
                     near_start = max(0, i - 10)
                     near = '\n'.join(lines[near_start:i + 1])
                     for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
