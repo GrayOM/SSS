@@ -23,6 +23,13 @@ DANGEROUS_POC_PATTERNS = (
 )
 
 
+def _auth_bypass_severity(content: str) -> str:
+    content_lower = content.lower()
+    if 'navigate' in content_lower and 'requireauth' not in content_lower and 'axios.' not in content_lower and 'fetch(' not in content_lower:
+        return 'low'
+    return 'high'
+
+
 def select_console_relevant_files(files: list[FileContent]) -> list[FileContent]:
     scored: list[tuple[int, FileContent]] = []
     for f in files:
@@ -111,7 +118,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             id=self._id(f.path + 'a'),
             title='클라이언트 권한 값 조작을 통한 접근 우회 가능성',
             vulnerability_type='Client-side Authorization Bypass',
-            severity=('low' if ('navigate' in f.content.lower() and 'requireauth' not in f.content.lower() and 'axios.' not in f.content.lower() and 'fetch(' not in f.content.lower()) else 'high'),
+            severity=_auth_bypass_severity(f.content),
             confidence='medium',
             affected_files=[f.path],
             summary='클라이언트 저장소 권한값 기반 분기 가능성이 보입니다.',

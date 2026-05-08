@@ -135,6 +135,26 @@ class ZipSecurityTests(unittest.TestCase):
             with self.assertRaises(ZipSecurityError):
                 extract_zip(upload, workspace)
 
+    def test_windows_drive_absolute_path_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            upload = Path(td) / 'winabs.zip'
+            workspace = Path(td) / 'ws'
+            workspace.mkdir()
+            with ZipFile(upload, 'w') as zf:
+                zf.writestr('C:\\evil.js', 'oops')
+            with self.assertRaises(ZipSecurityError):
+                extract_zip(upload, workspace)
+
+    def test_windows_unc_absolute_path_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            upload = Path(td) / 'uncabs.zip'
+            workspace = Path(td) / 'ws'
+            workspace.mkdir()
+            with ZipFile(upload, 'w') as zf:
+                zf.writestr('\\\\server\\share\\evil.js', 'oops')
+            with self.assertRaises(ZipSecurityError):
+                extract_zip(upload, workspace)
+
     def test_zip_slip_is_blocked(self):
         with tempfile.TemporaryDirectory() as td:
             upload = Path(td) / 'bad.zip'

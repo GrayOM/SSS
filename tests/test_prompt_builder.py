@@ -22,6 +22,11 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn('tail innerHTML location.hash', prompt)
         self.assertIn('Return JSON only', prompt)
 
+    def test_console_prompt_escapes_source_file_attributes(self):
+        files = [FileContent(path='src/a"b.js', extension='.js', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='innerHTML = location.hash;')]
+        prompt = build_console_poc_analysis_prompt(files)
+        self.assertIn('path="src/a&quot;b.js"', prompt)
+
 
 if __name__ == '__main__':
     unittest.main()

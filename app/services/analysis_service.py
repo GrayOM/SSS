@@ -155,7 +155,7 @@ def get_analyzer() -> Analyzer:
         return MockAnalyzer()
     if backend == 'gemini':
         return GeminiAnalyzer(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
-    raise ValueError(f'Unknown analyzer backend: {settings.ANALYZER_BACKEND}')
+    raise ValueError(f'Unknown analyzer backend: {settings.ANALYZER_BACKEND}. Supported backends: mock, gemini')
 
 
 def _deterministic_id(chunk: CodeChunk, finding: VulnerabilityFinding, occurrence_index: int) -> str:

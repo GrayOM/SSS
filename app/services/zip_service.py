@@ -1,7 +1,7 @@
 import os
 import stat
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from zipfile import ZipFile
 
 from app.core.config import settings
@@ -44,7 +44,7 @@ def _safe_extract(zip_file: ZipFile, extract_to: Path) -> None:
     written_total = 0
     for member in members:
         name = member.filename
-        if name.startswith('/'):
+        if PurePosixPath(name).is_absolute() or PureWindowsPath(name).is_absolute():
             raise ZipSecurityError(f'Absolute path not allowed: {name}')
 
         target_path = (extract_to / name).resolve()

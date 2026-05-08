@@ -1,7 +1,12 @@
 import unittest
 
 from app.models.schemas import FileContent
-from app.services.console_poc_analysis_service import MockConsolePocAnalyzer, analyze_console_exploitability, select_console_relevant_files
+from app.services.console_poc_analysis_service import (
+    MockConsolePocAnalyzer,
+    _auth_bypass_severity,
+    analyze_console_exploitability,
+    select_console_relevant_files,
+)
 
 
 def f(path, content):
@@ -9,6 +14,15 @@ def f(path, content):
 
 
 class ConsolePocAnalysisTests(unittest.TestCase):
+    def test_auth_bypass_severity_navigate_only_is_low(self):
+        self.assertEqual(_auth_bypass_severity("if (role==='ADMIN'){navigate('/admin')}"), 'low')
+
+    def test_auth_bypass_severity_requireauth_is_high(self):
+        self.assertEqual(_auth_bypass_severity("requireAuth(user); navigate('/admin')"), 'high')
+
+    def test_auth_bypass_severity_fetch_or_axios_is_high(self):
+        self.assertEqual(_auth_bypass_severity("navigate('/admin'); fetch('/api/me')"), 'high')
+        self.assertEqual(_auth_bypass_severity("navigate('/admin'); axios.post('/api/me')"), 'high')
     def test_select_relevant_files_case_insensitive_content(self):
         selected = select_console_relevant_files([f('src/a.js', 'const Role = "ADMIN"; const x = LocalStorage.getItem("u")')])
         self.assertEqual(len(selected), 1)

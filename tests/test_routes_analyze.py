@@ -94,6 +94,38 @@ class RoutesAnalyzeTests(unittest.TestCase):
         result = asyncio.run(upload_zip(self._upload('sample.zip', data)))
         self.assertIn('total_files_scanned', result.model_dump())
 
+    def test_analyze_scan_stage_error_returns_500(self):
+        from app.api import routes_analyze
+        original = routes_analyze.scan_extracted_directory
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            routes_analyze.scan_extracted_directory = lambda _: (_ for _ in ()).throw(RuntimeError('boom'))
+            data = self._zip_bytes({'src/a.js': 'const a = 1;'})
+            with self.assertRaises(HTTPException) as cm:
+                asyncio.run(analyze_zip(self._upload('sample.zip', data)))
+            self.assertEqual(cm.exception.status_code, 500)
+            self.assertEqual(cm.exception.detail, 'Scan stage failed')
+        finally:
+            routes_analyze.scan_extracted_directory = original
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_analyze_backend_stage_error_returns_502(self):
+        from app.api import routes_analyze
+        original = routes_analyze.analyze_chunks
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            routes_analyze.analyze_chunks = lambda _: (_ for _ in ()).throw(RuntimeError('backend down'))
+            data = self._zip_bytes({'src/a.js': 'const a = 1;'})
+            with self.assertRaises(HTTPException) as cm:
+                asyncio.run(analyze_zip(self._upload('sample.zip', data)))
+            self.assertEqual(cm.exception.status_code, 502)
+            self.assertEqual(cm.exception.detail, 'Analysis backend failed')
+        finally:
+            routes_analyze.analyze_chunks = original
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
 
 if __name__ == '__main__':
     unittest.main()

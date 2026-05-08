@@ -1,3 +1,5 @@
+import html
+
 from app.models.schemas import CodeChunk, FileContent
 
 
@@ -107,8 +109,11 @@ def build_console_poc_analysis_prompt(files: list[FileContent]) -> str:
     sections = []
     for f in files[:20]:
         for idx, snip in enumerate(_keyword_snippets(f.content), 1):
+            escaped_path = html.escape(f.path, quote=True)
+            escaped_snippet_idx = html.escape(str(idx), quote=True)
+            escaped_lines = html.escape(f"{snip['start_line']}-{snip['end_line']}", quote=True)
             sections.append(
-                f"<source_file path=\"{f.path}\" snippet=\"{idx}\" lines=\"{snip['start_line']}-{snip['end_line']}\">\n{snip['snippet']}\n</source_file>"
+                f"<source_file path=\"{escaped_path}\" snippet=\"{escaped_snippet_idx}\" lines=\"{escaped_lines}\">\n{snip['snippet']}\n</source_file>"
             )
 
     return (

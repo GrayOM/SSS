@@ -1,4 +1,5 @@
 from app.models.schemas import (
+    AnalysisResult,
     ChunkBuildResult,
     ChunkSummaryResult,
     CodeChunkSummary,
@@ -50,3 +51,7 @@ def to_safe_chunk_result(chunk_result: ChunkBuildResult) -> ChunkSummaryResult:
             for f in chunk_result.skipped
         ],
     )
+
+
+def to_safe_analysis_result(result: AnalysisResult) -> AnalysisResult:
+    return result.model_copy(update={'skipped_chunks': []})
