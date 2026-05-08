@@ -42,4 +42,7 @@ def get_poc_generator():
         return MockPocGenerator()
     if backend == 'gemini':
         return GeminiPocGenerator(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
-    raise ValueError(f'Unknown POC backend: {settings.POC_BACKEND}')
+    raise ValueError(
+        f'Unknown POC backend: {settings.POC_BACKEND}. '
+        'Supported backends: mock, gemini. OpenAI/Claude backends are not implemented yet.'
+    )

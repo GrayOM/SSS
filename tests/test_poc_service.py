@@ -58,8 +58,10 @@ class PocServiceTests(unittest.TestCase):
         original = poc_service.settings.POC_BACKEND
         try:
             poc_service.settings.POC_BACKEND = 'unknown'
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ValueError) as cm:
                 get_poc_generator()
+            self.assertIn('Supported backends: mock, gemini.', str(cm.exception))
+            self.assertIn('OpenAI/Claude backends are not implemented yet.', str(cm.exception))
         finally:
             poc_service.settings.POC_BACKEND = original
 

@@ -1,4 +1,5 @@
 import hashlib
+import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
@@ -55,7 +56,6 @@ def detect_missing_dependencies(files: list[FileContent]) -> list[str]:
 
 
 def _extract_endpoint(content: str) -> str | None:
-    import re
     m = re.search(r'(?:axios\.(?:post|put)|fetch)\(\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
     return m.group(1) if m else None
 
