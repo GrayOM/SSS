@@ -22,6 +22,10 @@ DANGEROUS_POC_PATTERNS = (
     'delete', 'remove', 'payment', 'pay(', '/pay', 'transfer', 'fetch(', 'axios.post', 'axios.delete',
     'xmlhttprequest', 'document.cookie=', 'child_process', 'exec', 'eval(',
 )
+AUTH_SNIPPET_KEYS = ['requireAuth', 'checkSession', 'userInfo.userType', 'userType', 'role', 'isAdmin', 'ADMIN', 'NAFAL', 'navigate']
+DOM_SNIPPET_KEYS = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'location', 'document.URL', 'postMessage', 'input.value']
+VALIDATION_SNIPPET_KEYS = ['axios.post', 'axios.put', 'fetch', 'FormData', 'amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints']
+VALIDATION_PARAMETERS = ['amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints', 'paymentMethod', 'merchant_uid', 'imp_uid']
 
 
 def _auth_bypass_severity(content: str) -> str:
@@ -56,14 +60,65 @@ def detect_missing_dependencies(files: list[FileContent]) -> list[str]:
 
 
 def _extract_endpoint(content: str) -> str | None:
-    m = re.search(r'(?:axios\.(?:post|put)|fetch)\(\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
-    return m.group(1) if m else None
+    m = re.search(r'(?:axios\.(?:post|put)|fetch)\(\s*([\'"`])(.+?)\1', content, re.IGNORECASE)
+    if not m:
+        return None
+    endpoint = re.sub(r'\$\{([^}]+)\}', r'{\1}', m.group(2))
+    endpoint = re.sub(r'^\{apiBase\}', '', endpoint, flags=re.IGNORECASE)
+    if '/api/' in endpoint:
+        endpoint = endpoint[endpoint.index('/api/'):]
+    return endpoint
+
+
+def _extract_endpoints(content: str) -> list[str]:
+    endpoints: list[str] = []
+    for m in re.finditer(r'(?:axios\.(?:post|put)|fetch)\(\s*([\'"`])(.+?)\1', content, re.IGNORECASE):
+        endpoint = re.sub(r'\$\{([^}]+)\}', r'{\1}', m.group(2))
+        endpoint = re.sub(r'^\{apiBase\}', '', endpoint, flags=re.IGNORECASE)
+        if '/api/' in endpoint:
+            endpoint = endpoint[endpoint.index('/api/'):]
+        endpoints.append(endpoint)
+    return sorted(set(endpoints))
+
+
+def _extract_relevant_snippet(content: str, keywords: list[str], context_lines: int = 4) -> tuple[int, int, str]:
+    lines = content.splitlines() or ['']
+    lowered = [line.lower() for line in lines]
+    keyword_l = [k.lower() for k in keywords]
+
+    hit_idx = None
+    for idx, line in enumerate(lowered):
+        if any(k in line for k in keyword_l):
+            hit_idx = idx
+            break
+
+    if hit_idx is None:
+        end = min(len(lines), 20)
+        return 1, end, '\n'.join(lines[:end])
+
+    start = max(0, hit_idx - context_lines)
+    end = min(len(lines) - 1, hit_idx + context_lines)
+    return start + 1, end + 1, '\n'.join(lines[start:end + 1])
+
+
+def _extract_validation_parameters(content: str) -> list[str]:
+    found: list[str] = []
+    lower = content.lower()
+    for key in VALIDATION_PARAMETERS:
+        if key.lower() in lower:
+            found.append(key)
+    return sorted(set(found), key=lambda x: x.lower())
 
 
 def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
-    grouped: dict[tuple[str, str, str], ReadableFinding] = {}
+    grouped: dict[tuple[str, str, tuple[str, ...], str], ReadableFinding] = {}
     for f in findings:
-        key = (f.vulnerability_type, f.root_cause, (f.console_poc.code if f.console_poc else ''))
+        endpoint = ''
+        parameters: tuple[str, ...] = tuple()
+        if f.vulnerability_type == 'Client-side Validation Bypass' and f.evidence:
+            endpoint = next((x.replace('endpoint: ', '') for x in f.evidence[0].data_flow if x.startswith('endpoint: ')), '')
+            parameters = tuple(sorted([x.replace('parameter: ', '') for x in f.evidence[0].data_flow if x.startswith('parameter: ')]))
+        key = (f.vulnerability_type, endpoint, parameters, f.root_cause)
         if key not in grouped:
             grouped[key] = f
             continue
@@ -112,19 +167,25 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             if 'innerhtml' in c_lower and any(x in c_lower for x in ('location', 'document.url', 'input.value', 'postmessage')):
                 findings.append(self._mk_dom_xss(f))
             if any(x in c_lower for x in ('price', 'amount', 'status')) and any(x in c_lower for x in ('formdata', 'axios.post', 'fetch(')):
-                findings.append(self._mk_validation_bypass(f))
+                endpoints = _extract_endpoints(c)
+                if endpoints:
+                    for endpoint in endpoints:
+                        findings.append(self._mk_validation_bypass(f, endpoint=endpoint))
+                else:
+                    findings.append(self._mk_validation_bypass(f))
         return _dedup_findings(findings)
 
     def _id(self, seed: str) -> str:
         return hashlib.sha256(seed.encode()).hexdigest()[:12]
 
     def _ev(self, f: FileContent, reason: str) -> list[ReadableEvidence]:
+        start_line, end_line, snippet = _extract_relevant_snippet(f.content, AUTH_SNIPPET_KEYS)
         return [
             ReadableEvidence(
                 source_path=f.path,
-                start_line=1,
-                end_line=min(20, len(f.content.splitlines()) or 1),
-                snippet=f.content[:160],
+                start_line=start_line,
+                end_line=end_line,
+                snippet=snippet,
                 reason=reason,
                 data_flow=['source -> state/storage -> sink'],
             )
@@ -173,6 +234,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         )
 
     def _mk_dom_xss(self, f: FileContent) -> ReadableFinding:
+        start_line, end_line, snippet = _extract_relevant_snippet(f.content, DOM_SNIPPET_KEYS)
         return ReadableFinding(
             id=self._id(f.path + 'x'),
             title='외부 입력이 DOM sink로 전달될 가능성',
@@ -181,7 +243,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             confidence='medium',
             affected_files=[f.path],
             summary='외부 입력이 위험 sink로 전달될 수 있습니다.',
-            evidence=self._ev(f, 'source-sink 조합'),
+            evidence=[ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='source-sink 조합', data_flow=['source -> state/storage -> sink'])],
             console_poc=ConsoleSafePoc(
                 poc_type='browser_console',
                 description='hash 기반 확인',
@@ -197,16 +259,17 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation='안전한 DOM API 사용',
         )
 
-    def _mk_validation_bypass(self, f: FileContent) -> ReadableFinding:
-        endpoint = _extract_endpoint(f.content)
+    def _mk_validation_bypass(self, f: FileContent, endpoint: str | None = None) -> ReadableFinding:
+        endpoint = endpoint or _extract_endpoint(f.content)
+        parameters = _extract_validation_parameters(f.content)
         flow = ['source -> state/storage -> sink']
-        for k in ('price', 'amount', 'status', 'userid', 'productid', 'orderid'):
-            if k in f.content.lower():
-                flow.append(f'parameter: {k}')
+        for k in parameters:
+            flow.append(f'parameter: {k}')
         if endpoint:
             flow.append(f'endpoint: {endpoint}')
         flow.append('sink: axios.post' if 'axios.post' in f.content.lower() else ('sink: axios.put' if 'axios.put' in f.content.lower() else ('sink: fetch' if 'fetch(' in f.content.lower() else 'sink: formdata')))
-        ev = [ReadableEvidence(source_path=f.path, start_line=1, end_line=min(20, len(f.content.splitlines()) or 1), snippet=f.content[:160], reason='검증값+요청 API 조합', data_flow=flow)]
+        start_line, end_line, snippet = _extract_relevant_snippet(f.content, VALIDATION_SNIPPET_KEYS)
+        ev = [ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='검증값+요청 API 조합', data_flow=flow)]
         return ReadableFinding(
             id=self._id(f.path + 'v'),
             title='클라이언트 검증값 조작을 통한 요청 변조 가능성',

@@ -3,6 +3,7 @@ import unittest
 from app.models.schemas import FileContent
 from app.services.console_poc_analysis_service import (
     MockConsolePocAnalyzer,
+    _extract_endpoint,
     _auth_bypass_severity,
     analyze_console_exploitability,
     select_console_relevant_files,
@@ -43,12 +44,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIsNone(auth.console_poc.code)
         self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
+        self.assertIn("userInfo.userType === 'ADMIN'", auth.evidence[0].snippet)
 
     def test_storage_evidence_generates_poc_code(self):
         files = [f('src/AdminMypage.js', "const user = JSON.parse(sessionStorage.getItem('user')); if (user?.userType === 'ADMIN') { navigate('/admin') }")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIsNotNone(auth.console_poc.code)
+        self.assertIn("sessionStorage.getItem('user')", auth.evidence[0].snippet)
 
     def test_header_like_routing_only_not_high_confidence(self):
         files = [f('src/Header.js', "if (userType==='ADMIN'){navigate('/admin-mypage')}")]
@@ -64,6 +67,33 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         flow = finding.evidence[0].data_flow
         self.assertTrue(any(x.startswith('parameter: amount') for x in flow))
         self.assertTrue(any(x.startswith('endpoint: /api/order') for x in flow))
+
+    def test_extract_endpoint_supports_template_literal(self):
+        ep = _extract_endpoint("axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, payload)")
+        self.assertEqual(ep, '/api/user/{sessionData.userId}/wallet/charge')
+
+    def test_validation_finds_template_literal_endpoint_in_data_flow(self):
+        files = [f('src/wallet.js', "const payload={amount,userId}; axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, payload)")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass'][0]
+        self.assertIn('endpoint: /api/user/{sessionData.userId}/wallet/charge', finding.evidence[0].data_flow)
+
+    def test_validation_endpoints_are_not_deduped_together(self):
+        content = (
+            "axios.post(`${apiBase}/api/auction/${item.id}/bid`, payload);"
+            "fetch(`${apiBase}/api/order/${orderId}/complete-payment`, {method:'POST'});"
+            "const amount=1; const orderId='x';"
+        )
+        files = [f('src/pay.js', content)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        findings = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass']
+        endpoints = sorted([
+            next((flow.replace('endpoint: ', '') for flow in finding.evidence[0].data_flow if flow.startswith('endpoint: ')), '')
+            for finding in findings
+        ])
+        self.assertIn('/api/auction/{item.id}/bid', endpoints)
+        self.assertIn('/api/order/{orderId}/complete-payment', endpoints)
+        self.assertEqual(len(findings), 2)
 
     def test_dedup_merges_affected_files(self):
         files = [
