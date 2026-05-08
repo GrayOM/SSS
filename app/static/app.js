@@ -35,6 +35,12 @@ function renderFindings(body) {
     const poc = f.console_poc || {};
     const hasPocCode = !!poc.code;
     const verificationNotes = f.verification_notes || [];
+    const dataFlow = ev.data_flow || [];
+    const method = dataFlow.find((x) => x.startsWith('method: '));
+    const endpoint = dataFlow.find((x) => x.startsWith('endpoint: '));
+    const params = dataFlow.filter((x) => x.startsWith('parameter: ')).map((x) => x.replace('parameter: ', ''));
+    const sink = dataFlow.find((x) => x.startsWith('sink: '));
+    const structuredFlow = method || endpoint || params.length || sink;
     return `<div class="card">
       <h3>${esc(f.title)}</h3>
       <p><b>유형:</b> ${esc(f.vulnerability_type)} / <b>위험도:</b> ${esc(f.severity)} / <b>신뢰도:</b> ${esc(f.confidence)}</p>
@@ -42,7 +48,12 @@ function renderFindings(body) {
       <p><b>영향 파일:</b> ${(f.affected_files || []).map(esc).join(', ')}</p>
       <p><b>근거 snippet:</b> ${esc(ev.snippet || '')}</p>
       <p><b>근거 사유:</b> ${esc(ev.reason || '')}</p>
-      <p><b>데이터 흐름:</b> ${((ev.data_flow || []).map(esc).join(' → '))}</p>
+      ${structuredFlow
+        ? `<p><b>Method:</b> ${esc((method || '').replace('method: ', 'UNKNOWN'))}</p>
+           <p><b>Endpoint:</b> ${esc((endpoint || '').replace('endpoint: ', 'UNKNOWN'))}</p>
+           <p><b>Parameters:</b> ${params.map(esc).join(', ') || 'N/A'}</p>
+           <p><b>Sink:</b> ${esc((sink || '').replace('sink: ', 'UNKNOWN'))}</p>`
+        : `<p><b>데이터 흐름:</b> ${((ev.data_flow || []).map(esc).join(' → '))}</p>`}
       <p><b>공격 시나리오:</b> ${(f.attack_scenario || []).map(esc).join(' → ')}</p>
       <p><b>PoC 설명:</b> ${esc(poc.description || '')}</p>
       <p><b>사전조건:</b> ${(poc.preconditions || []).map(esc).join(', ')}</p>

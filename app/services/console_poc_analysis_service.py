@@ -5,8 +5,9 @@ from abc import ABC, abstractmethod
 from app.core.config import settings
 from app.models.schemas import ConsoleSafePoc, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
+from app.services.api_candidate_extractor import extract_api_call_candidates
 from app.services.json_utils import extract_json_payload
-from app.services.prompt_builder import build_console_poc_analysis_prompt
+from app.services.prompt_builder import build_candidate_analysis_prompt, build_console_poc_analysis_prompt
 
 KEYWORDS = [
     'login', 'auth', 'session', 'token', 'jwt', 'cookie', 'localStorage', 'sessionStorage', 'userType', 'role',
@@ -166,13 +167,10 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 findings.append(self._mk_auth_bypass(f, files, missing_deps))
             if 'innerhtml' in c_lower and any(x in c_lower for x in ('location', 'document.url', 'input.value', 'postmessage')):
                 findings.append(self._mk_dom_xss(f))
-            if any(x in c_lower for x in ('price', 'amount', 'status')) and any(x in c_lower for x in ('formdata', 'axios.post', 'fetch(')):
-                endpoints = _extract_endpoints(c)
-                if endpoints:
-                    for endpoint in endpoints:
-                        findings.append(self._mk_validation_bypass(f, endpoint=endpoint))
-                else:
-                    findings.append(self._mk_validation_bypass(f))
+            if any(x in c_lower for x in ('axios.', 'fetch(', 'apiclient.', 'request.', 'httpclient.', 'client.', '$.ajax', 'jquery.ajax', 'formdata')):
+                for cand in extract_api_call_candidates([f]).candidates:
+                    if cand.sink.startswith(('axios', 'fetch', '$.ajax', 'apiClient', 'request', 'httpClient', 'client')):
+                        findings.append(self._mk_validation_bypass(f, endpoint=cand.endpoint, method=cand.method, parameters=cand.parameters, sink=cand.sink))
         return _dedup_findings(findings)
 
     def _id(self, seed: str) -> str:
@@ -259,32 +257,44 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation='안전한 DOM API 사용',
         )
 
-    def _mk_validation_bypass(self, f: FileContent, endpoint: str | None = None) -> ReadableFinding:
+    def _mk_validation_bypass(self, f: FileContent, endpoint: str | None = None, method: str | None = None, parameters: list[str] | None = None, sink: str | None = None) -> ReadableFinding:
         endpoint = endpoint or _extract_endpoint(f.content)
-        parameters = _extract_validation_parameters(f.content)
+        parameters = parameters or _extract_validation_parameters(f.content)
+        method = method or 'UNKNOWN'
+        sink = sink or ('axios.post' if 'axios.post' in f.content.lower() else ('axios.put' if 'axios.put' in f.content.lower() else ('fetch' if 'fetch(' in f.content.lower() else 'formdata')))
         flow = ['source -> state/storage -> sink']
+        flow.append(f'method: {method}')
+        flow.append(f"endpoint: {endpoint or 'UNKNOWN'}")
         for k in parameters:
             flow.append(f'parameter: {k}')
-        if endpoint:
-            flow.append(f'endpoint: {endpoint}')
-        flow.append('sink: axios.post' if 'axios.post' in f.content.lower() else ('sink: axios.put' if 'axios.put' in f.content.lower() else ('sink: fetch' if 'fetch(' in f.content.lower() else 'sink: formdata')))
+        flow.append(f'sink: {sink}')
         start_line, end_line, snippet = _extract_relevant_snippet(f.content, VALIDATION_SNIPPET_KEYS)
         ev = [ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='검증값+요청 API 조합', data_flow=flow)]
+        notes = []
+        conf = 'low'
+        poc_type = 'manual_check'
+        poc_code = None
+        if endpoint == 'UNKNOWN':
+            notes.append('endpoint variable requires manual review')
+        if method == 'GET' and endpoint and endpoint != 'UNKNOWN':
+            poc_type = 'browser_console'
+            poc_code = f"fetch('{endpoint}', {{ method: 'GET' }}).then(r => r.status)"
+            conf = 'medium'
         return ReadableFinding(
             id=self._id(f.path + 'v'),
             title='클라이언트 검증값 조작을 통한 요청 변조 가능성',
             vulnerability_type='Client-side Validation Bypass',
             severity='medium',
-            confidence='low',
+            confidence=conf,
             affected_files=[f.path],
             summary='요청 전송 전 값 조작 가능성 정황입니다.',
             evidence=ev,
             console_poc=ConsoleSafePoc(
-                poc_type='browser_console',
-                description='payload 점검',
+                poc_type=poc_type,
+                description='payload 점검 및 비파괴 확인',
                 preconditions=['요청 전 payload 확인'],
                 steps=['개발자도구 점검'],
-                code='// payload 값 변조 가능성만 점검',
+                code=poc_code,
                 expected_result='변조 가능성 확인',
                 safety='실제 변경 요청을 수행하지 않는다.',
             ),
@@ -292,6 +302,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             impact='비즈니스 로직 오남용',
             root_cause='클라이언트 검증 의존',
             remediation='서버 검증 강제',
+            verification_notes=notes,
         )
 
 
@@ -300,7 +311,8 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         self.client = client
 
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
-        payload = extract_json_payload(self.client.analyze(build_console_poc_analysis_prompt(files)))
+        candidates = extract_api_call_candidates(files).candidates
+        payload = extract_json_payload(self.client.analyze(build_candidate_analysis_prompt(files, candidates)))
         if payload is None or not isinstance(payload.get('findings'), list):
             return []
 

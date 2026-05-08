@@ -95,6 +95,26 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('/api/order/{orderId}/complete-payment', endpoints)
         self.assertEqual(len(findings), 2)
 
+    def test_get_endpoint_allows_safe_console_poc(self):
+        files = [f('src/get.js', "fetch('/api/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass'][0]
+        self.assertEqual(finding.console_poc.poc_type, 'browser_console')
+        self.assertIn("method: 'GET'", finding.console_poc.code or '')
+
+    def test_unknown_endpoint_is_low_with_verification_note(self):
+        files = [f('src/x.js', "const endpoint = API_ENDPOINTS.CHARGE_POINT; apiClient.post(endpoint, payload); const amount=1;")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'Client-side Validation Bypass'][0]
+        self.assertEqual(finding.confidence, 'low')
+        self.assertIn('endpoint variable requires manual review', finding.verification_notes)
+
+    def test_no_api_candidate_no_validation_finding(self):
+        files = [f('src/plain.js', "const x = 1; const y = x + 2;")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        types = [x.vulnerability_type for x in result.findings]
+        self.assertNotIn('Client-side Validation Bypass', types)
+
     def test_dedup_merges_affected_files(self):
         files = [
             f('src/a.js', "const u=sessionStorage.getItem('user'); if(role==='ADMIN'){navigate('/admin')}"),

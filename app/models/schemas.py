@@ -186,3 +186,21 @@ class FullAnalysisResponse(BaseModel):
     chunks: ChunkSummaryResult
     analysis: AnalysisResult
     readable_analysis: ReadableAnalysisResult | None = None
+
+
+class ApiCallCandidate(BaseModel):
+    source_path: str
+    method: str
+    endpoint: str
+    parameters: list[str] = Field(default_factory=list)
+    start_line: int
+    end_line: int
+    snippet: str
+    sink: str
+    confidence: str
+    notes: list[str] = Field(default_factory=list)
+
+
+class CandidateExtractionResult(BaseModel):
+    total_candidates: int
+    candidates: list[ApiCallCandidate] = Field(default_factory=list)
