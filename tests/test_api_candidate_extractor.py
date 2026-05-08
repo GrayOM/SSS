@@ -45,6 +45,30 @@ new URLSearchParams({ orderId: orderId, status: status })
         self.assertTrue(with_params)
         self.assertTrue(any('/api/test' in c.snippet for c in result.candidates))
 
+    def test_object_style_request_and_unknown_url(self):
+        content = "apiClient.request({ method: 'PUT', url: '/api/order/status', data: { orderId, status } })\nrequest({ method: 'POST', url: endpoint, data: payload })"
+        result = extract_api_call_candidates([fc(content)])
+        put = [c for c in result.candidates if c.sink == 'apiClient.request' and c.method == 'PUT'][0]
+        self.assertEqual(put.endpoint, '/api/order/status')
+        self.assertIn('orderId', put.parameters)
+        self.assertIn('status', put.parameters)
+        post_unknown = [c for c in result.candidates if c.method == 'POST' and c.endpoint == 'UNKNOWN']
+        self.assertTrue(post_unknown)
+
+    def test_parameter_extraction_json_and_mixed_object(self):
+        content = "fetch('/api/order/1', { method:'POST', body: JSON.stringify({ orderId, amount, userId }) }); apiClient.post('/api/x', { userId: currentUserId, amount })"
+        result = extract_api_call_candidates([fc(content)])
+        all_params = sorted(set(p for c in result.candidates for p in c.parameters))
+        self.assertIn('orderId', all_params)
+        self.assertIn('amount', all_params)
+        self.assertIn('userId', all_params)
+
+    def test_wrapper_sensitive_and_non_sensitive_function(self):
+        content = "saveOrder(orderId, payload)\ncalculateTotal(price)"
+        result = extract_api_call_candidates([fc(content)])
+        self.assertTrue(any(c.sink == 'function_call' and 'saveOrder' in c.snippet for c in result.candidates))
+        self.assertFalse(any(c.sink == 'function_call' and 'calculateTotal' in c.snippet for c in result.candidates))
+
 
 if __name__ == '__main__':
     unittest.main()

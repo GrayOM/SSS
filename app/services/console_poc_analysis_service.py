@@ -153,6 +153,9 @@ class ConsolePocAnalyzer(ABC):
 
 
 class MockConsolePocAnalyzer(ConsolePocAnalyzer):
+    """Pattern-based fallback for tests and offline validation only.
+    Production-quality reasoning should use GeminiConsolePocAnalyzer with structured API candidates.
+    """
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
         findings: list[ReadableFinding] = []
         missing_deps = detect_missing_dependencies(files)

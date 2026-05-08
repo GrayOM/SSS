@@ -30,8 +30,19 @@ def _snippet(lines: list[str], line_idx: int, context: int = 6) -> tuple[int, in
 def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
     params = set()
     notes = []
-    for m in re.finditer(r'\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*[:},]', snippet):
+    for m in re.finditer(r'\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^,}]*)?(?:,|})', snippet):
         params.add(m.group(1))
+    for block in re.findall(r'\{([^{}]+)\}', snippet):
+        for token in block.split(','):
+            t = token.strip()
+            if not t:
+                continue
+            k = re.match(r'([A-Za-z_][A-Za-z0-9_]*)', t)
+            if k:
+                params.add(k.group(1))
+    for m in re.finditer(r'JSON\.stringify\(\s*\{([^}]*)\}', snippet):
+        for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,|$)', m.group(1)):
+            params.add(km.group(1))
     for m in re.finditer(r'FormData\.append\(\s*["\']([^"\']+)', snippet):
         params.add(m.group(1))
     for m in re.finditer(r'URLSearchParams\(\s*\{([^}]*)\}', snippet):
@@ -44,6 +55,16 @@ def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
     return out, notes
 
 
+def _extract_object_style_request(snip: str, sink: str) -> tuple[str, str]:
+    mm = re.search(r'method\s*:\s*["\']([A-Za-z]+)["\']', snip)
+    method = mm.group(1).upper() if mm else 'UNKNOWN'
+    um = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip)
+    if um:
+        endpoint, _ = _normalize_endpoint(um.group(2))
+        return method, endpoint
+    return method, 'UNKNOWN'
+
+
 def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtractionResult:
     candidates: list[ApiCallCandidate] = []
     patterns = [
@@ -52,6 +73,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
         (r'(fetch)\(', 'fetch'),
         (r'(\$\.ajax|jQuery\.ajax)\(', '$.ajax'),
         (r'(apiClient)\.request\(', 'apiClient.request'),
+        (r'\b(request)\(', 'request'),
     ]
 
     for file in files:
@@ -65,7 +87,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                 sink_name = m.group(1)
                 method = (m.group(2).upper() if len(m.groups()) > 1 and m.group(2) else 'UNKNOWN')
                 sink = sink_tpl.format(sink=sink_name, method=m.group(2) if len(m.groups()) > 1 and m.group(2) else '').replace('..', '.')
-                start_line, end_line, snip = _snippet(lines, i)
+                start_line, end_line, snip = _snippet(lines, i, context=0)
                 notes = ['server-side authorization cannot be confirmed from frontend source only']
 
                 endpoint = 'UNKNOWN'
@@ -90,9 +112,10 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                 if sink_name in ('$.ajax', 'jQuery.ajax'):
                     mm = re.search(r'(?:type|method)\s*:\s*["\']([A-Za-z]+)["\']', snip)
                     method = mm.group(1).upper() if mm else 'UNKNOWN'
-                if 'request(' in stripped:
-                    mm = re.search(r'method\s*:\s*["\']([A-Za-z]+)["\']', snip)
-                    method = mm.group(1).upper() if mm else 'UNKNOWN'
+                if sink_name == 'request' or 'request(' in stripped:
+                    method, endpoint = _extract_object_style_request(snip, sink)
+                    if endpoint == 'UNKNOWN':
+                        notes.append('endpoint variable requires manual review')
 
                 params, pnotes = _extract_parameters(snip)
                 notes.extend(pnotes)
@@ -103,8 +126,14 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                 candidates.append(ApiCallCandidate(source_path=file.path, method=method, endpoint=endpoint, parameters=params, start_line=start_line, end_line=end_line, snippet=snip, sink=sink, confidence=confidence, notes=sorted(set(notes))))
 
             fn = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)', stripped)
-            if fn and fn.group(1) not in {'if', 'for', 'while', 'switch', 'fetch'} and any(x in fn.group(1).lower() for x in ('update', 'charge', 'complete', 'pay')):
-                start_line, end_line, snip = _snippet(lines, i)
+            sensitive_verbs = ('update', 'charge', 'complete', 'pay', 'save', 'submit', 'create', 'modify', 'change', 'approve', 'cancel', 'refund', 'register', 'remove', 'delete', 'bid', 'order', 'payment', 'point', 'role', 'status')
+            sensitive_tokens = ('amount', 'userid', 'orderid', 'status', 'role', 'price', 'payment', 'point', 'payload', 'data', 'form')
+            fn_name = fn.group(1) if fn else ''
+            token_sensitive = any(x in stripped.lower() for x in sensitive_tokens)
+            if fn and fn_name not in {'if', 'for', 'while', 'switch', 'fetch'} and (
+                any(x in fn_name.lower() for x in sensitive_verbs) or (token_sensitive and not fn_name.lower().startswith('calculate'))
+            ):
+                start_line, end_line, snip = _snippet(lines, i, context=0)
                 args = [a.strip() for a in fn.group(2).split(',') if a.strip()]
                 candidates.append(ApiCallCandidate(source_path=file.path, method='UNKNOWN', endpoint='UNKNOWN', parameters=args[:20], start_line=start_line, end_line=end_line, snippet=snip, sink='function_call', confidence='low', notes=['wrapper/service function call requires implementation review', 'endpoint variable requires manual review']))
 
