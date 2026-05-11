@@ -181,6 +181,106 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     def _id(self, seed: str) -> str:
         return hashlib.sha256(seed.encode()).hexdigest()[:12]
 
+
+
+    def _replace_endpoint_placeholders(self, endpoint: str) -> str:
+        endpoint = re.sub(r'\{(?:userId|currentUserId|sessionData\.userId)\}', 'TEST_USER_ID', endpoint, flags=re.IGNORECASE)
+        endpoint = re.sub(r'\{(?:orderId|orderNo|auctionItem\.orderId)\}', 'TEST_ORDER_ID', endpoint, flags=re.IGNORECASE)
+        endpoint = re.sub(r'\{(?:item\.id|itemId|productId)\}', 'TEST_ITEM_ID', endpoint, flags=re.IGNORECASE)
+        endpoint = re.sub(r'\{paymentId\}', 'TEST_PAYMENT_ID', endpoint, flags=re.IGNORECASE)
+        endpoint = re.sub(r'\{[^}]+\}', 'TEST_VALUE', endpoint)
+        return endpoint
+
+    def _build_payload_from_parameters(self, parameters: list[str]) -> dict:
+        payload = {}
+        for key in parameters:
+            kl = key.lower()
+            if kl in {'amount', 'price', 'totalamount', 'usepoints', 'point', 'points', 'balance'}:
+                payload[key] = 1
+            elif kl in {'userid', 'currentuserid', 'memberid', 'accountid'}:
+                payload[key] = 'TEST_USER_ID'
+            elif kl in {'orderid', 'orderno'}:
+                payload[key] = 'TEST_ORDER_ID'
+            elif kl in {'productid', 'itemid'}:
+                payload[key] = 'TEST_ITEM_ID'
+            elif kl == 'paymentid':
+                payload[key] = 'TEST_PAYMENT_ID'
+            elif kl == 'merchant_uid':
+                payload[key] = 'TEST_MERCHANT_UID'
+            elif kl == 'imp_uid':
+                payload[key] = 'TEST_IMP_UID'
+            elif kl == 'status':
+                payload[key] = 'TEST_STATUS'
+            elif kl in {'role', 'usertype'}:
+                payload[key] = 'TEST_ROLE'
+            elif kl == 'email':
+                payload[key] = 'test@example.com'
+            elif kl in {'verificationcode', 'code'}:
+                payload[key] = 'TEST_CODE'
+            else:
+                payload[key] = 'TEST_VALUE'
+        return payload
+
+    def _build_readonly_get_poc(self, endpoint: str) -> str:
+        endpoint = self._replace_endpoint_placeholders(endpoint)
+        return f"""(async () => {{
+  const endpoint = '{endpoint}';
+
+  const res = await fetch(endpoint, {{
+    method: 'GET',
+    credentials: 'include'
+  }});
+
+  const text = await res.text();
+
+  console.log('[PoC] read-only check:', {{
+    endpoint,
+    status: res.status,
+    body: text
+  }});
+}})();"""
+
+    def _build_guarded_mutation_poc(self, method: str, endpoint: str, parameters: list[str]) -> str:
+        endpoint = self._replace_endpoint_placeholders(endpoint)
+        payload = self._build_payload_from_parameters(parameters)
+        payload_lines = '\n'.join([f"    {k}: {repr(v)}," for k, v in payload.items()])
+        return f"""(async () => {{
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) {{
+    throw new Error('승인된 테스트 환경에서만 true로 변경 후 실행하세요.');
+  }}
+
+  const endpoint = '{endpoint}';
+
+  const payload = {{
+{payload_lines}
+  }};
+
+  const res = await fetch(endpoint, {{
+    method: '{method}',
+    credentials: 'include',
+    headers: {{
+      'Content-Type': 'application/json'
+    }},
+    body: JSON.stringify(payload)
+  }});
+
+  const text = await res.text();
+
+  console.log('[PoC] guarded request check:', {{
+    endpoint,
+    payload,
+    status: res.status,
+    body: text
+  }});
+}})();"""
+
+    def _is_irreversible_or_high_risk(self, method: str, endpoint: str, parameters: list[str]) -> bool:
+        if method.upper() == 'DELETE':
+            return True
+        hay = f"{endpoint.lower()} {' '.join(p.lower() for p in parameters)}"
+        return any(k in hay for k in ('delete', 'remove', 'withdraw', 'transfer', 'refund', 'bulk', 'cancel-all', 'admin/delete'))
+
     def _ev(self, f: FileContent, reason: str) -> list[ReadableEvidence]:
         start_line, end_line, snippet = _extract_relevant_snippet(f.content, AUTH_SNIPPET_KEYS)
         return [
@@ -333,25 +433,47 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         parameters = candidate.parameters or _extract_validation_parameters(f.content)
         method = (candidate.method or 'UNKNOWN').upper()
         sink = candidate.sink or 'UNKNOWN'
-        flow = ['source -> state/storage -> sink']
-        flow.append(f'method: {method}')
-        flow.append(f'endpoint: {endpoint}')
+
+        flow = ['source -> state/storage -> sink', f'method: {method}', f'endpoint: {endpoint}']
         for k in parameters:
             flow.append(f'parameter: {k}')
         flow.append(f'sink: {sink}')
-        ev = [ReadableEvidence(source_path=f.path, start_line=candidate.start_line, end_line=candidate.end_line, snippet=candidate.snippet, reason='검증값+요청 API 조합', data_flow=flow)]
-        notes = []
+
+        ev = [ReadableEvidence(
+            source_path=f.path,
+            start_line=candidate.start_line,
+            end_line=candidate.end_line,
+            snippet=candidate.snippet,
+            reason='검증값+요청 API 조합',
+            data_flow=flow,
+        )]
+
+        notes: list[str] = []
         conf = 'low'
         poc_type = 'manual_check'
         poc_code = None
+        safety = '실제 변경 요청을 수행하지 않는다.'
+
         if endpoint == 'UNKNOWN':
             notes.append('endpoint variable requires manual review')
-        if method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
-            notes.append('state-changing request requires manual verification; do not execute in browser console')
-        if method == 'GET' and endpoint and endpoint != 'UNKNOWN':
+
+        if method == 'GET' and endpoint != 'UNKNOWN':
             poc_type = 'browser_console'
-            poc_code = f"fetch('{endpoint}', {{ method: 'GET', credentials: 'include' }}).then(r => r.status)"
+            poc_code = self._build_readonly_get_poc(endpoint)
             conf = 'medium'
+            safety = '조회형 요청으로 응답 status/body만 확인한다.'
+        elif method in {'POST', 'PUT', 'PATCH'}:
+            if endpoint != 'UNKNOWN' and not self._is_irreversible_or_high_risk(method, endpoint, parameters):
+                poc_type = 'browser_console'
+                poc_code = self._build_guarded_mutation_poc(method, endpoint, parameters)
+                conf = 'medium'
+                notes.append('Guarded PoC: CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됩니다.')
+                safety = '기본값 false guard로 즉시 실행되지 않으며, 승인된 테스트 계정/테스트 데이터에서만 실행해야 한다.'
+            else:
+                notes.append('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.')
+        elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):
+            notes.append('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.')
+
         classification = self._classify_api_candidate(candidate)
         return ReadableFinding(
             id=self._id(f.path + 'v'),
@@ -364,12 +486,12 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             evidence=ev,
             console_poc=ConsoleSafePoc(
                 poc_type=poc_type,
-                description='payload 점검 및 비파괴 확인',
-                preconditions=['요청 전 payload 확인'],
-                steps=['개발자도구 점검'],
+                description=('승인된 테스트 환경에서 실행 가능한 Guarded PoC' if method in {'POST', 'PUT', 'PATCH'} and poc_code else 'payload 점검 및 비파괴 확인'),
+                preconditions=(['승인된 테스트 계정', '테스트 데이터 또는 테스트 주문', 'CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됨'] if method in {'POST', 'PUT', 'PATCH'} and poc_code else ['요청 전 payload 확인']),
+                steps=(['Console에 PoC 입력', 'CONFIRM_AUTHORIZED_TEST를 true로 변경', '응답 status/body 확인'] if method in {'POST', 'PUT', 'PATCH'} and poc_code else ['개발자도구 점검']),
                 code=poc_code,
-                expected_result='변조 가능성 확인',
-                safety='실제 변경 요청을 수행하지 않는다.',
+                expected_result=('서버가 조작된 payload를 허용하는지 status/body로 확인' if method in {'POST', 'PUT', 'PATCH'} and poc_code else '변조 가능성 확인'),
+                safety=safety,
             ),
             attack_scenario=['파라미터 조작'],
             impact=classification['impact'],
@@ -377,6 +499,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation=classification['remediation'],
             verification_notes=notes,
         )
+
 
 
 class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):

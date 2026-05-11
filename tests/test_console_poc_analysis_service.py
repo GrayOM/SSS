@@ -136,14 +136,44 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/reset.js', "axios.post('/api/user/reset-password', { email, verificationCode })")]
         findings = MockConsolePocAnalyzer().analyze(files)
         finding = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
-        self.assertIsNone(finding.console_poc.code)
+        self.assertIsNotNone(finding.console_poc.code)
+        self.assertIn('CONFIRM_AUTHORIZED_TEST = false', finding.console_poc.code or '')
 
-    def test_post_request_console_poc_is_manual_check(self):
-        files = [f('src/post.js', "axios.post('/api/pay', { amount, orderId })")]
+    def test_post_request_generates_guarded_poc(self):
+        files = [f('src/post.js', "axios.post('/api/pay', { amount, orderId, userId })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
+        self.assertIsNotNone(finding.console_poc.code)
+        self.assertEqual(finding.console_poc.poc_type, 'browser_console')
+        self.assertIn('CONFIRM_AUTHORIZED_TEST = false', finding.console_poc.code or '')
+        self.assertIn('fetch(endpoint', finding.console_poc.code or '')
+        self.assertIn("orderId: 'TEST_ORDER_ID'", finding.console_poc.code or '')
+        self.assertIn("userId: 'TEST_USER_ID'", finding.console_poc.code or '')
+        self.assertIn('Guarded PoC: CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됩니다.', finding.verification_notes)
+
+    def test_get_endpoint_has_executable_readonly_poc(self):
+        files = [f('src/get2.js', "fetch('/api/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
+        self.assertIsNotNone(finding.console_poc.code)
+        self.assertIn("method: 'GET'", finding.console_poc.code or '')
+        self.assertIn("credentials: 'include'", finding.console_poc.code or '')
+
+    def test_complete_payment_and_charge_are_guarded_not_blocked(self):
+        files = [
+            f('src/pay1.js', "axios.post('/api/order/{orderId}/complete-payment', { orderId, totalAmount, usePoints })"),
+            f('src/pay2.js', "axios.post('/api/user/{sessionData.userId}/wallet/charge', { amount, userId })"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pocs = [x.console_poc.code or '' for x in result.findings if 'Manipulation Candidate' in x.vulnerability_type]
+        self.assertTrue(any('CONFIRM_AUTHORIZED_TEST = false' in c for c in pocs))
+
+    def test_delete_endpoint_manual_check_with_reason(self):
+        files = [f('src/del.js', "axios.delete('/api/admin/delete-user/{userId}')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type in {'State/Status Manipulation Candidate', 'Client-side Validation Bypass', 'Generic API Review Candidate'}][0]
         self.assertIsNone(finding.console_poc.code)
-        self.assertEqual(finding.console_poc.poc_type, 'manual_check')
+        self.assertTrue(any('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.' in n for n in finding.verification_notes))
 
     def test_dedup_merges_affected_files(self):
         files = [
