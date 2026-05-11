@@ -20,7 +20,7 @@ ALLOWED_SEVERITIES = {'low', 'medium', 'high', 'critical'}
 ALLOWED_CONFIDENCES = {'low', 'medium', 'high'}
 ALLOWED_POC_TYPES = {'browser_console', 'manual_check'}
 DANGEROUS_POC_PATTERNS = (
-    'delete', 'remove', 'payment', 'pay(', '/pay', 'transfer', 'fetch(', 'axios.post', 'axios.delete',
+    'delete', 'remove', 'payment', 'pay(', '/pay', 'transfer', 'axios.post', 'axios.delete',
     'xmlhttprequest', 'document.cookie=', 'child_process', 'exec', 'eval(',
 )
 AUTH_SNIPPET_KEYS = ['requireAuth', 'checkSession', 'userInfo.userType', 'userType', 'role', 'isAdmin', 'ADMIN', 'NAFAL', 'navigate']
@@ -115,11 +115,24 @@ def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
     grouped: dict[tuple[str, str, tuple[str, ...], str], ReadableFinding] = {}
     for f in findings:
         endpoint = ''
+        method = ''
+        sink = ''
         parameters: tuple[str, ...] = tuple()
-        if f.vulnerability_type == 'Client-side Validation Bypass' and f.evidence:
-            endpoint = next((x.replace('endpoint: ', '') for x in f.evidence[0].data_flow if x.startswith('endpoint: ')), '')
-            parameters = tuple(sorted([x.replace('parameter: ', '') for x in f.evidence[0].data_flow if x.startswith('parameter: ')]))
-        key = (f.vulnerability_type, endpoint, parameters, f.root_cause)
+        api_types = {
+            'Client-side Validation Bypass',
+            'Payment/Point Manipulation Candidate',
+            'IDOR / Unauthorized Data Access Candidate',
+            'State/Status Manipulation Candidate',
+            'Account Recovery Flow Abuse Candidate',
+            'Generic API Review Candidate',
+        }
+        if f.vulnerability_type in api_types and f.evidence:
+            flows = f.evidence[0].data_flow
+            endpoint = next((x.replace('endpoint: ', '') for x in flows if x.startswith('endpoint: ')), '')
+            method = next((x.replace('method: ', '') for x in flows if x.startswith('method: ')), '')
+            sink = next((x.replace('sink: ', '') for x in flows if x.startswith('sink: ')), '')
+            parameters = tuple(sorted([x.replace('parameter: ', '') for x in flows if x.startswith('parameter: ')]))
+        key = (f.vulnerability_type, method, endpoint, parameters, sink, f.root_cause)
         if key not in grouped:
             grouped[key] = f
             continue
@@ -127,6 +140,18 @@ def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
         g.affected_files = sorted(set(g.affected_files + f.affected_files))
         g.evidence = (g.evidence + f.evidence)[:5]
     return list(grouped.values())
+
+
+def _is_allowed_guarded_poc_code(code: str) -> bool:
+    low = code.lower()
+    if 'fetch(' not in low:
+        return True
+    if re.search(r"method\s*:\s*['\"]delete['\"]", low):
+        return False
+    is_mutation = bool(re.search(r"method\s*:\s*['\"](post|put|patch)['\"]", low))
+    if is_mutation:
+        return 'confirm_authorized_test = false' in low
+    return True
 
 
 def _has_storage_auth_evidence(files: list[FileContent], primary_file: FileContent) -> bool:
@@ -243,7 +268,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     def _build_guarded_mutation_poc(self, method: str, endpoint: str, parameters: list[str]) -> str:
         endpoint = self._replace_endpoint_placeholders(endpoint)
         payload = self._build_payload_from_parameters(parameters)
-        payload_lines = '\n'.join([f"    {k}: {repr(v)}," for k, v in payload.items()])
+        payload_lines = '\n'.join([f"    {repr(k)}: {repr(v)}," for k, v in payload.items()])
         return f"""(async () => {{
   const CONFIRM_AUTHORIZED_TEST = false;
   if (!CONFIRM_AUTHORIZED_TEST) {{
@@ -476,7 +501,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
 
         classification = self._classify_api_candidate(candidate)
         return ReadableFinding(
-            id=self._id(f.path + 'v'),
+            id=self._id(f"{f.path}:{method}:{endpoint}:{sink}:{','.join(sorted(parameters))}:{classification['vulnerability_type']}"),
             title=classification['title'],
             vulnerability_type=classification['vulnerability_type'],
             severity=classification['severity'],
@@ -528,7 +553,7 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
                 if poc.get('poc_type') not in ALLOWED_POC_TYPES:
                     continue
                 code = (poc.get('code') or '').lower()
-                if any(x in code for x in DANGEROUS_POC_PATTERNS):
+                if any(x in code for x in DANGEROUS_POC_PATTERNS) or not _is_allowed_guarded_poc_code(code):
                     poc['code'] = None
                     notes = item.get('verification_notes') or []
                     notes.append('위험 요청 가능성이 있어 Console PoC code를 제거했습니다.')

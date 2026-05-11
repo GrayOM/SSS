@@ -3,6 +3,7 @@ import unittest
 from app.models.schemas import FileContent
 from app.services.console_poc_analysis_service import (
     MockConsolePocAnalyzer,
+    _is_allowed_guarded_poc_code,
     _extract_endpoint,
     _auth_bypass_severity,
     analyze_console_exploitability,
@@ -104,6 +105,18 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('/api/order/{orderId}/complete-payment', endpoints)
         self.assertEqual(len(findings), 2)
 
+    def test_different_payment_endpoints_not_deduped(self):
+        files = [f('src/pay.js', "axios.post('/api/a/charge', { amount }); axios.post('/api/b/charge', { amount });")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        findings = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate']
+        self.assertEqual(len(findings), 2)
+
+    def test_different_endpoint_ids_are_unique(self):
+        files = [f('src/pay.js', "axios.post('/api/a/charge', { amount }); axios.post('/api/b/charge', { amount });")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        findings = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate']
+        self.assertNotEqual(findings[0].id, findings[1].id)
+
     def test_get_endpoint_allows_safe_console_poc(self):
         files = [f('src/get.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
@@ -147,8 +160,9 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(finding.console_poc.poc_type, 'browser_console')
         self.assertIn('CONFIRM_AUTHORIZED_TEST = false', finding.console_poc.code or '')
         self.assertIn('fetch(endpoint', finding.console_poc.code or '')
-        self.assertIn("orderId: 'TEST_ORDER_ID'", finding.console_poc.code or '')
-        self.assertIn("userId: 'TEST_USER_ID'", finding.console_poc.code or '')
+        self.assertIn("'orderId': 'TEST_ORDER_ID'", finding.console_poc.code or '')
+        self.assertIn("'userId': 'TEST_USER_ID'", finding.console_poc.code or '')
+        self.assertIn("'amount': 1", finding.console_poc.code or '')
         self.assertIn('Guarded PoC: CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됩니다.', finding.verification_notes)
 
     def test_get_endpoint_has_executable_readonly_poc(self):
@@ -174,6 +188,18 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         finding = [x for x in result.findings if x.vulnerability_type in {'State/Status Manipulation Candidate', 'Client-side Validation Bypass', 'Generic API Review Candidate'}][0]
         self.assertIsNone(finding.console_poc.code)
         self.assertTrue(any('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.' in n for n in finding.verification_notes))
+
+    def test_guarded_post_code_allowed_by_filter(self):
+        code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; const res = await fetch('/api/x',{method:'POST'});})();"
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_post_without_guard_rejected_by_filter(self):
+        code = "fetch('/api/x',{method:'POST'})"
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_delete_fetch_rejected_by_filter(self):
+        code = "fetch('/api/x',{method:'DELETE'})"
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
 
     def test_dedup_merges_affected_files(self):
         files = [
