@@ -149,6 +149,25 @@ axios.post("/api/pay", fd);
         self.assertIn('payload', cand.parameters)
         self.assertIn('payload object requires manual review', cand.notes)
 
+    def test_get_session_does_not_mix_mutation_params(self):
+        content = "fetch('/api/user/session'); axios.post('/api/pay',{ amount, orderId, status, userId })"
+        result = extract_api_call_candidates([fc(content)])
+        get_c = [c for c in result.candidates if c.method == 'GET'][0]
+        self.assertNotIn('amount', get_c.parameters)
+        self.assertNotIn('orderId', get_c.parameters)
+        self.assertNotIn('status', get_c.parameters)
+        self.assertNotIn('userId', get_c.parameters)
+
+    def test_get_params_only_extracts_limit(self):
+        content = "fetch('/api/user/session', { params: { limit: 10 } })"
+        cand = extract_api_call_candidates([fc(content)]).candidates[0]
+        self.assertEqual(cand.parameters, ['limit'])
+
+    def test_response_alias_not_parameter(self):
+        content = "const { data: winnerData } = await axios.get('/api/auction')"
+        cand = extract_api_call_candidates([fc(content)]).candidates[0]
+        self.assertNotIn('winnerData', cand.parameters)
+
 
 if __name__ == '__main__':
     unittest.main()

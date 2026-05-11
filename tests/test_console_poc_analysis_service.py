@@ -33,7 +33,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
-        self.assertIsNone(auth.console_poc.code)
+        self.assertIn('fetch hook installed', auth.console_poc.code or '')
         self.assertIn('requireAuth/checkSession 구현 파일 확인이 필요합니다.', auth.verification_notes)
         self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
         self.assertEqual(auth.confidence, 'low')
@@ -43,7 +43,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/AdminPage.js', "const userInfo = requireAuth(); if (userInfo.userType === 'ADMIN') { navigate('/admin') } import { requireAuth } from '../utils/sessionUtils';")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
-        self.assertIsNone(auth.console_poc.code)
+        self.assertIn('fetch hook installed', auth.console_poc.code or '')
         self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
         self.assertIn("userInfo.userType === 'ADMIN'", auth.evidence[0].snippet)
 
@@ -139,11 +139,36 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertNotIn('Client-side Validation Bypass', types)
         self.assertNotIn('Generic API Review Candidate', types)
 
+    def test_generic_get_auction_is_not_promoted(self):
+        files = [f('src/a.js', "fetch('/api/auction/product/1')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(x.vulnerability_type == 'Generic API Review Candidate' for x in result.findings))
+
     def test_idor_candidate_classification(self):
         files = [f('src/order.js', "fetch('/api/order/by-product/${productId}/user/${userId}')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'IDOR / Unauthorized Data Access Candidate'][0]
         self.assertIn('식별자 기반 조회 요청의 접근 제어 확인 필요', finding.title)
+
+    def test_user_session_get_is_kept(self):
+        files = [f('src/s.js', "fetch('/api/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(x.vulnerability_type == 'Generic API Review Candidate' for x in result.findings))
+
+    def test_api_base_verify_code_does_not_use_test_value_endpoint(self):
+        files = [f('src/v.js', "axios.post('{API_BASE}/verify-code', { code })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        findings = [x for x in result.findings if 'Candidate' in x.vulnerability_type]
+        if findings:
+            finding = findings[0]
+            self.assertNotIn('TEST_VALUE/verify-code', finding.console_poc.code or '')
+            self.assertTrue(any('API_BASE 값을 실제 대상 URL로 변경해야 합니다.' in n for n in finding.verification_notes) or finding.console_poc.code is None)
+
+    def test_auth_missing_dependency_uses_fetch_hook_poc(self):
+        files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertIn('fetch hook installed', auth.console_poc.code or '')
 
     def test_account_recovery_candidate_classification(self):
         files = [f('src/reset.js', "axios.post('/api/user/reset-password', { email, verificationCode })")]

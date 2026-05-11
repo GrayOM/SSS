@@ -202,7 +202,9 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             if any(x in c_lower for x in ('axios.', 'fetch(', 'apiclient.', 'request.', 'httpclient.', 'client.', '$.ajax', 'jquery.ajax', 'formdata')):
                 for cand in extract_api_call_candidates([f]).candidates:
                     if cand.sink.startswith(('axios', 'fetch', '$.ajax', 'apiClient', 'request', 'httpClient', 'client')):
-                        findings.append(self._mk_validation_bypass(f, candidate=cand))
+                        finding = self._mk_validation_bypass(f, candidate=cand)
+                        if finding is not None:
+                            findings.append(finding)
         return _dedup_findings(findings)
 
     def _id(self, seed: str) -> str:
@@ -338,6 +340,25 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             ])
         verification_notes.extend([f'{d} 구현 파일이 ZIP에 없어 requireAuth 동작을 확정할 수 없습니다.' for d in missing_deps])
 
+        if needs_manual_validation:
+            poc_code = """(() => {
+  const originalFetch = window.fetch;
+  window.fetch = async (...args) => {
+    const [url, options = {}] = args;
+    const target = String(url).toLowerCase();
+    if (target.includes('session') || target.includes('auth') || target.includes('user')) {
+      console.group('[PoC] auth/session request observed');
+      console.log('URL:', url);
+      console.log('Method:', options.method || 'GET');
+      console.log('Credentials:', options.credentials || null);
+      console.log('Body:', options.body || null);
+      console.groupEnd();
+    }
+    return originalFetch(...args);
+  };
+  console.log('[PoC] fetch hook installed. 정상 로그인/페이지 이동을 수행하고 Console 로그를 확인하세요.');
+})();"""
+
         return ReadableFinding(
             id=self._id(f.path + 'a'),
             title='클라이언트 권한 값 조작을 통한 접근 우회 가능성',
@@ -354,7 +375,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 steps=['Console 실행', '코드 실행', '새로고침'],
                 code=poc_code,
                 expected_result='화면 분기 변화 확인',
-                safety='데이터 변경 없이 화면 접근 가능성만 확인한다.',
+                safety='새 요청을 생성하지 않고 기존 요청을 관찰한다.',
             ),
             attack_scenario=['저장소 값 조작'],
             impact='클라이언트 단 통제 우회 가능성',
@@ -455,7 +476,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             'severity': 'low',
         }
 
-    def _mk_validation_bypass(self, f: FileContent, candidate: ApiCallCandidate) -> ReadableFinding:
+    def _mk_validation_bypass(self, f: FileContent, candidate: ApiCallCandidate) -> ReadableFinding | None:
         endpoint = candidate.endpoint or 'UNKNOWN'
         parameters = candidate.parameters or _extract_validation_parameters(f.content)
         method = (candidate.method or 'UNKNOWN').upper()
@@ -484,18 +505,29 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         if endpoint == 'UNKNOWN':
             notes.append('endpoint variable requires manual review')
 
-        if method == 'GET' and endpoint != 'UNKNOWN':
+        important_get = (
+            any(k in endpoint.lower() for k in ('session', 'auth', 'me', 'profile', 'wallet', 'order'))
+            or any(p.lower() in {'userid', 'memberid', 'accountid', 'orderid', 'paymentid'} for p in parameters)
+            or any('endpoint variable requires manual review' in n for n in (candidate.notes or []))
+        )
+        if method == 'GET' and endpoint != 'UNKNOWN' and important_get:
             poc_type = 'browser_console'
             poc_code = self._build_readonly_get_poc(endpoint)
             conf = 'medium'
             safety = '조회형 요청으로 응답 status/body만 확인한다.'
+        elif method == 'GET' and not important_get:
+            return None
         elif method in {'POST', 'PUT', 'PATCH'}:
-            if endpoint != 'UNKNOWN' and not self._is_irreversible_or_high_risk(method, endpoint, parameters):
+            if endpoint != 'UNKNOWN' and not endpoint.startswith('TEST_VALUE') and not self._is_irreversible_or_high_risk(method, endpoint, parameters):
                 poc_type = 'browser_console'
                 poc_code = self._build_guarded_mutation_poc(method, endpoint, parameters)
                 conf = 'medium'
                 notes.append('Guarded PoC: CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됩니다.')
                 safety = '기본값 false guard로 즉시 실행되지 않으며, 승인된 테스트 계정/테스트 데이터에서만 실행해야 한다.'
+                if any(x in endpoint for x in ('{API_BASE}', 'API_BASE', 'BASE_URL', 'apiBase')):
+                    poc_code = poc_code.replace("const endpoint = '", "const API_BASE = 'https://TARGET_BASE_URL';\n  const endpoint = `${API_BASE}")
+                    poc_code = poc_code.replace("';\n\n  const payload", "`;\n\n  const payload")
+                    notes.append('API_BASE 값을 실제 대상 URL로 변경해야 합니다.')
             else:
                 notes.append('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.')
         elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):

@@ -4,11 +4,17 @@ from app.models.schemas import ApiCallCandidate, CandidateExtractionResult, File
 
 _METHODS = ['get', 'post', 'put', 'delete', 'patch']
 _META_KEYS = {'method', 'url', 'data', 'body', 'headers', 'credentials', 'withCredentials', 'mode', 'cache', 'expr'}
+_RESPONSE_NOISE_KEYS = {
+    'data', 'response', 'result', 'winnerData', 'paymentResult', 'productResponse',
+    'chargeData', 'verifyRes', 'transactionData', 'walletData', 'existingOrderData',
+}
 
 
 def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
     notes: list[str] = []
     value = raw.strip()
+    if re.match(r'^\{?(API_BASE|BASE_URL|apiBase)\}?', value):
+        notes.append('base URL variable requires manual review')
     value = re.sub(r'\$\{([^}]+)\}', r'{\1}', value)
     value = re.sub(r'^\{?[A-Za-z_][A-Za-z0-9_]*\}?\s*\+\s*', '', value)
     value = re.sub(r'^\{apiBase\}', '', value, flags=re.IGNORECASE)
@@ -45,7 +51,7 @@ def _collect_call_block(lines: list[str], start_idx: int, max_lines: int = 40) -
     return start + 1, end + 1, '\n'.join(lines[start:end + 1])
 
 
-def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
+def _extract_parameters(snippet: str, method: str) -> tuple[list[str], list[str]]:
     snippet = re.sub(r'\$\{[^}]+\}', '{expr}', snippet)
     params = set()
     notes = []
@@ -67,7 +73,26 @@ def _extract_parameters(snippet: str) -> tuple[list[str], list[str]]:
     for m in re.finditer(r'URLSearchParams\(\s*\{([^}]*)\}', snippet):
         for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*:', m.group(1)):
             params.add(km.group(1))
-    out = sorted(k for k in params if k not in _META_KEYS and k.lower() not in {'expr', 'sessiondata'})
+    allowed = set(params)
+    m_upper = method.upper()
+    if m_upper == 'GET':
+        # GET: only query/params/urlsearchparams context
+        allowed = set()
+        for qm in re.finditer(r'[?&]([A-Za-z_][A-Za-z0-9_]*)=', snippet):
+            allowed.add(qm.group(1))
+        for pm in re.finditer(r'params\s*:\s*\{([^}]*)\}', snippet, re.DOTALL):
+            for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,|$)', pm.group(1)):
+                allowed.add(km.group(1))
+        for um in re.finditer(r'URLSearchParams\(\s*\{([^}]*)\}', snippet, re.DOTALL):
+            for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,|$)', um.group(1)):
+                allowed.add(km.group(1))
+    out = sorted(
+        k for k in allowed
+        if k not in _META_KEYS
+        and k.lower() not in {'expr', 'sessiondata'}
+        and k not in _RESPONSE_NOISE_KEYS
+        and k.lower() not in {x.lower() for x in _RESPONSE_NOISE_KEYS}
+    )
     if len(out) > 20:
         notes.append('parameter list truncated')
         out = out[:20]
@@ -148,10 +173,10 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         if endpoint == 'UNKNOWN':
                             notes.append('endpoint variable requires manual review')
 
-                    params, pnotes = _extract_parameters(snip)
+                    params, pnotes = _extract_parameters(snip, method)
                     for key in ('data', 'body', 'params'):
                         pv = re.search(rf'{key}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)', snip)
-                        if pv and pv.group(1).lower() not in {'undefined', 'null', 'expr'}:
+                        if pv and method != 'GET' and pv.group(1).lower() not in {'undefined', 'null', 'expr'}:
                             params.append(pv.group(1))
                             notes.append('payload object requires manual review')
                     near_start = max(0, i - 10)
