@@ -162,7 +162,16 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         if findings:
             finding = findings[0]
             self.assertNotIn('TEST_VALUE/verify-code', finding.console_poc.code or '')
+            self.assertIn("const API_BASE = 'https://TARGET_BASE_URL';", finding.console_poc.code or '')
+            self.assertIn('const endpoint = `${API_BASE}/verify-code`;', finding.console_poc.code or '')
             self.assertTrue(any('API_BASE 값을 실제 대상 URL로 변경해야 합니다.' in n for n in finding.verification_notes) or finding.console_poc.code is None)
+
+    def test_api_base_get_endpoint_uses_placeholder_base(self):
+        files = [f('src/vget.js', "fetch('{API_BASE}/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
+        self.assertIn("const API_BASE = 'https://TARGET_BASE_URL';", finding.console_poc.code or '')
+        self.assertIn('const endpoint = `${API_BASE}/user/session`;', finding.console_poc.code or '')
 
     def test_auth_missing_dependency_uses_fetch_hook_poc(self):
         files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]

@@ -213,12 +213,21 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
 
 
     def _replace_endpoint_placeholders(self, endpoint: str) -> str:
+        if self._is_base_variable_endpoint(endpoint):
+            return endpoint
         endpoint = re.sub(r'\{(?:userId|currentUserId|sessionData\.userId)\}', 'TEST_USER_ID', endpoint, flags=re.IGNORECASE)
         endpoint = re.sub(r'\{(?:orderId|orderNo|auctionItem\.orderId)\}', 'TEST_ORDER_ID', endpoint, flags=re.IGNORECASE)
         endpoint = re.sub(r'\{(?:item\.id|itemId|productId)\}', 'TEST_ITEM_ID', endpoint, flags=re.IGNORECASE)
         endpoint = re.sub(r'\{paymentId\}', 'TEST_PAYMENT_ID', endpoint, flags=re.IGNORECASE)
         endpoint = re.sub(r'\{[^}]+\}', 'TEST_VALUE', endpoint)
         return endpoint
+
+    def _is_base_variable_endpoint(self, endpoint: str) -> bool:
+        return bool(re.match(r'^\{?(API_BASE|BASE_URL|apiBase)\}?', endpoint))
+
+    def _strip_base_variable(self, endpoint: str) -> str:
+        value = re.sub(r'^\{?(API_BASE|BASE_URL|apiBase)\}?', '', endpoint)
+        return value if value.startswith('/') else f"/{value.lstrip('/')}"
 
     def _build_payload_from_parameters(self, parameters: list[str]) -> dict:
         payload = {}
@@ -251,9 +260,15 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         return payload
 
     def _build_readonly_get_poc(self, endpoint: str) -> str:
+        base_var = self._is_base_variable_endpoint(endpoint)
         endpoint = self._replace_endpoint_placeholders(endpoint)
+        endpoint_decl = (
+            f"  const API_BASE = 'https://TARGET_BASE_URL';\n  const endpoint = `${{API_BASE}}{self._strip_base_variable(endpoint)}`;"
+            if base_var
+            else f"  const endpoint = '{endpoint}';"
+        )
         return f"""(async () => {{
-  const endpoint = '{endpoint}';
+{endpoint_decl}
 
   const res = await fetch(endpoint, {{
     method: 'GET',
@@ -270,7 +285,13 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
 }})();"""
 
     def _build_guarded_mutation_poc(self, method: str, endpoint: str, parameters: list[str]) -> str:
+        base_var = self._is_base_variable_endpoint(endpoint)
         endpoint = self._replace_endpoint_placeholders(endpoint)
+        endpoint_decl = (
+            f"  const API_BASE = 'https://TARGET_BASE_URL';\n  const endpoint = `${{API_BASE}}{self._strip_base_variable(endpoint)}`;"
+            if base_var
+            else f"  const endpoint = '{endpoint}';"
+        )
         payload = self._build_payload_from_parameters(parameters)
         payload_lines = '\n'.join([f"    {repr(k)}: {repr(v)}," for k, v in payload.items()])
         return f"""(async () => {{
@@ -279,7 +300,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     throw new Error('승인된 테스트 환경에서만 true로 변경 후 실행하세요.');
   }}
 
-  const endpoint = '{endpoint}';
+{endpoint_decl}
 
   const payload = {{
 {payload_lines}
@@ -524,9 +545,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 conf = 'medium'
                 notes.append('Guarded PoC: CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됩니다.')
                 safety = '기본값 false guard로 즉시 실행되지 않으며, 승인된 테스트 계정/테스트 데이터에서만 실행해야 한다.'
-                if any(x in endpoint for x in ('{API_BASE}', 'API_BASE', 'BASE_URL', 'apiBase')):
-                    poc_code = poc_code.replace("const endpoint = '", "const API_BASE = 'https://TARGET_BASE_URL';\n  const endpoint = `${API_BASE}")
-                    poc_code = poc_code.replace("';\n\n  const payload", "`;\n\n  const payload")
+                if self._is_base_variable_endpoint(endpoint):
                     notes.append('API_BASE 값을 실제 대상 URL로 변경해야 합니다.')
             else:
                 notes.append('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.')
