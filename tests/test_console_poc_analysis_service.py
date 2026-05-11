@@ -190,7 +190,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.' in n for n in finding.verification_notes))
 
     def test_guarded_post_code_allowed_by_filter(self):
-        code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; const res = await fetch('/api/x',{method:'POST'});})();"
+        code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))
 
     def test_post_without_guard_rejected_by_filter(self):
@@ -199,6 +199,54 @@ class ConsolePocAnalysisTests(unittest.TestCase):
 
     def test_delete_fetch_rejected_by_filter(self):
         code = "fetch('/api/x',{method:'DELETE'})"
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_guarded_complete_payment_post_allowed(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  await fetch('/api/order/TEST_ORDER_ID/complete-payment', { method: 'POST' });
+})();"""
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_guarded_pay_endpoint_post_allowed(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  await fetch('/api/pay', { method: 'POST' });
+})();"""
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_guarded_payment_method_parameter_allowed(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  const payload = { paymentMethod: 'POINTS' };
+  await fetch('/api/order/pay', { method: 'POST', body: JSON.stringify(payload) });
+})();"""
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_refund_endpoint_rejected(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  await fetch('/api/order/refund', { method: 'POST' });
+})();"""
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_transfer_endpoint_rejected(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  await fetch('/api/wallet/transfer', { method: 'POST' });
+})();"""
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_guard_variable_without_if_guard_rejected(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  await fetch('/api/pay', { method: 'POST' });
+})();"""
         self.assertFalse(_is_allowed_guarded_poc_code(code))
 
     def test_dedup_merges_affected_files(self):
