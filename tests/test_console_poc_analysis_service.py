@@ -34,14 +34,25 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIn('fetch hook installed', auth.console_poc.code or '')
-        self.assertIn("window.fetch = async (...args) => {", auth.console_poc.code or '')
-        self.assertIn('return originalFetch(...args);', auth.console_poc.code or '')
-        self.assertNotIn('async (.args)', auth.console_poc.code or '')
+        self.assertIn("window.fetch = async function(input, init = {}) {", auth.console_poc.code or '')
+        self.assertIn('return originalFetch.call(this, input, init);', auth.console_poc.code or '')
+        self.assertNotIn('...args', auth.console_poc.code or '')
+        self.assertNotIn('.args', auth.console_poc.code or '')
+        self.assertNotIn('originalFetch(...args)', auth.console_poc.code or '')
         self.assertNotIn('originalFetch(.args)', auth.console_poc.code or '')
         self.assertIn('requireAuth/checkSession 구현 파일 확인이 필요합니다.', auth.verification_notes)
         self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
         self.assertEqual(auth.confidence, 'low')
         self.assertIn('추가 확인 필요', auth.summary)
+
+    def test_auth_fetch_hook_regression_no_spread_args(self):
+        files = [f('src/AuthPage.js', "if (userInfo.userType !== 'ADMIN') { navigate('/'); } requireAuth(user);")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        code = auth.console_poc.code or ''
+        self.assertNotIn('.args', code)
+        self.assertNotIn('...args', code)
+        self.assertIn('originalFetch.call(this, input, init)', code)
 
     def test_requireauth_userinfo_admin_without_dependency_file_has_no_poc_code(self):
         files = [f('src/AdminPage.js', "const userInfo = requireAuth(); if (userInfo.userType === 'ADMIN') { navigate('/admin') } import { requireAuth } from '../utils/sessionUtils';")]

@@ -437,8 +437,9 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         if needs_manual_validation:
             poc_code = """(() => {
   const originalFetch = window.fetch;
-  window.fetch = async (...args) => {
-    const [url, options = {}] = args;
+  window.fetch = async function(input, init = {}) {
+    const url = input;
+    const options = init || {};
     const target = String(url).toLowerCase();
     if (target.includes('session') || target.includes('auth') || target.includes('user')) {
       console.group('[PoC] auth/session request observed');
@@ -448,7 +449,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
       console.log('Body:', options.body || null);
       console.groupEnd();
     }
-    return originalFetch(...args);
+    return originalFetch.call(this, input, init);
   };
   console.log('[PoC] fetch hook installed. 정상 로그인/페이지 이동을 수행하고 Console 로그를 확인하세요.');
 })();"""
