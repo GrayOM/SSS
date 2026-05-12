@@ -174,6 +174,21 @@ axios.post("/api/pay", fd);
         self.assertEqual(cand.endpoint, '{API_BASE}/verify-code')
         self.assertIn('base URL variable requires manual review', cand.notes)
 
+    def test_get_does_not_attach_formdata_append_but_post_keeps_it(self):
+        content = """
+const fd = new FormData();
+fd.append("amount", amount);
+fetch('/api/user/session?page=1&size=10');
+axios.post('/api/pay', fd);
+"""
+        result = extract_api_call_candidates([fc(content)]).candidates
+        get_c = [c for c in result if c.method == 'GET'][0]
+        post_c = [c for c in result if c.sink == 'axios.post'][0]
+        self.assertNotIn('amount', get_c.parameters)
+        self.assertIn('page', get_c.parameters)
+        self.assertIn('size', get_c.parameters)
+        self.assertIn('amount', post_c.parameters)
+
 
 if __name__ == '__main__':
     unittest.main()

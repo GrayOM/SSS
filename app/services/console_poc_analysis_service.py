@@ -659,20 +659,40 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         self.client = client
 
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
+        def _ensure_finding_id(item: dict) -> None:
+            if item.get('id'):
+                return
+            evidence = item.get('evidence') or []
+            ev0 = evidence[0] if isinstance(evidence, list) and evidence else {}
+            seed = "|".join([
+                str(item.get('vulnerability_type', '')),
+                str(item.get('title', '')),
+                ",".join(item.get('affected_files') or []),
+                str(ev0.get('source_path', '')) if isinstance(ev0, dict) else '',
+                str(ev0.get('start_line', '')) if isinstance(ev0, dict) else '',
+                str(item.get('root_cause', '')),
+            ])
+            item['id'] = hashlib.sha256(seed.encode()).hexdigest()[:12]
+
         candidates = extract_api_call_candidates(files).candidates
         payload = extract_json_payload(self.client.analyze(build_candidate_analysis_prompt(files, candidates)))
         if payload is None or not isinstance(payload.get('findings'), list):
             return []
 
         out: list[ReadableFinding] = []
+        dropped_count = 0
         for item in payload['findings']:
             if not isinstance(item, dict):
+                dropped_count += 1
                 continue
             if item.get('severity') not in ALLOWED_SEVERITIES or item.get('confidence') not in ALLOWED_CONFIDENCES:
+                dropped_count += 1
                 continue
             if not isinstance(item.get('evidence'), list) or not item['evidence']:
+                dropped_count += 1
                 continue
             if not isinstance(item.get('attack_scenario'), list) or not item['attack_scenario']:
+                dropped_count += 1
                 continue
 
             poc = item.get('console_poc')
@@ -687,9 +707,12 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
                     item['verification_notes'] = notes
 
             try:
+                _ensure_finding_id(item)
                 out.append(ReadableFinding(**item))
             except Exception:
+                dropped_count += 1
                 continue
+        # NOTE: dropped_count is kept for debug/investigation when malformed Gemini items are skipped.
         return out
 
 

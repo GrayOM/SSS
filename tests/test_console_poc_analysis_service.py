@@ -2,6 +2,7 @@ import unittest
 
 from app.models.schemas import FileContent
 from app.services.console_poc_analysis_service import (
+    GeminiConsolePocAnalyzer,
     MockConsolePocAnalyzer,
     _is_allowed_guarded_poc_code,
     _extract_endpoint,
@@ -236,6 +237,34 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIn('fetch hook installed', auth.console_poc.code or '')
+
+    def test_gemini_missing_id_is_auto_generated(self):
+        class FakeGeminiClient:
+            def analyze(self, prompt: str) -> str:
+                return """{"findings":[{"title":"t","vulnerability_type":"Generic API Review Candidate","severity":"medium","confidence":"medium","affected_files":["src/a.js"],"summary":"s","evidence":[{"source_path":"src/a.js","start_line":1,"end_line":1,"snippet":"fetch('/api/user/session')","reason":"r","data_flow":["source -> state/storage -> sink"]}],"console_poc":{"poc_type":"manual_check","description":"d","preconditions":[],"steps":[],"code":null,"expected_result":"e","safety":"safe"},"attack_scenario":["x"],"impact":"i","root_cause":"c","remediation":"m","verification_notes":[]}]}"""
+        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient())
+        findings = analyzer.analyze([f('src/a.js', "fetch('/api/user/session')")])
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0].id)
+
+    def test_gemini_dangerous_poc_code_removed_but_id_kept(self):
+        class FakeGeminiClient:
+            def analyze(self, prompt: str) -> str:
+                return """{"findings":[{"title":"t","vulnerability_type":"Payment/Point Manipulation Candidate","severity":"high","confidence":"medium","affected_files":["src/a.js"],"summary":"s","evidence":[{"source_path":"src/a.js","start_line":1,"end_line":1,"snippet":"axios.post('/api/pay')","reason":"r","data_flow":["source -> state/storage -> sink"]}],"console_poc":{"poc_type":"browser_console","description":"d","preconditions":[],"steps":[],"code":"fetch('/api/x',{method:'DELETE'})","expected_result":"e","safety":"safe"},"attack_scenario":["x"],"impact":"i","root_cause":"c","remediation":"m","verification_notes":[]}]}"""
+        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient())
+        findings = analyzer.analyze([f('src/a.js', "axios.post('/api/pay',{amount:1})")])
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0].id)
+        self.assertIsNone(findings[0].console_poc.code)
+
+    def test_gemini_malformed_item_does_not_break_all(self):
+        class FakeGeminiClient:
+            def analyze(self, prompt: str) -> str:
+                return """{"findings":[{"title":"bad","vulnerability_type":"Generic API Review Candidate","severity":"medium","confidence":"medium","affected_files":["src/a.js"],"summary":"s","evidence":[],"console_poc":{"poc_type":"manual_check","description":"d","preconditions":[],"steps":[],"code":null,"expected_result":"e","safety":"safe"},"attack_scenario":["x"],"impact":"i","root_cause":"c","remediation":"m","verification_notes":[]},{"title":"ok","vulnerability_type":"Generic API Review Candidate","severity":"medium","confidence":"medium","affected_files":["src/a.js"],"summary":"s","evidence":[{"source_path":"src/a.js","start_line":1,"end_line":1,"snippet":"fetch('/api/user/session')","reason":"r","data_flow":["source -> state/storage -> sink"]}],"console_poc":{"poc_type":"manual_check","description":"d","preconditions":[],"steps":[],"code":null,"expected_result":"e","safety":"safe"},"attack_scenario":["x"],"impact":"i","root_cause":"c","remediation":"m","verification_notes":[]}]}"""
+        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient())
+        findings = analyzer.analyze([f('src/a.js', "fetch('/api/user/session')")])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].title, 'ok')
 
     def test_account_recovery_candidate_classification(self):
         files = [f('src/reset.js', "axios.post('/api/user/reset-password', { email, verificationCode })")]

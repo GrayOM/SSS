@@ -182,10 +182,11 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         if pv and method != 'GET' and pv.group(1).lower() not in {'undefined', 'null', 'expr'}:
                             params.append(pv.group(1))
                             notes.append('payload object requires manual review')
-                    near_start = max(0, i - 10)
-                    near = '\n'.join(lines[near_start:i + 1])
-                    for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
-                        params.append(mfd.group(1))
+                    if method != 'GET':
+                        near_start = max(0, i - 10)
+                        near = '\n'.join(lines[near_start:i + 1])
+                        for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
+                            params.append(mfd.group(1))
                     params = sorted({p for p in params if p.lower() not in {'expr', 'sessiondata'}})
                     notes.extend(pnotes)
                     if method == 'UNKNOWN':
