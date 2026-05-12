@@ -102,6 +102,44 @@ def _extract_relevant_snippet(content: str, keywords: list[str], context_lines: 
     return start + 1, end + 1, '\n'.join(lines[start:end + 1])
 
 
+def _extract_auth_branch_snippet(content: str) -> tuple[int, int, str]:
+    lines = content.splitlines() or ['']
+    lowered = [line.lower() for line in lines]
+
+    def is_import_line(idx: int) -> bool:
+        return lowered[idx].lstrip().startswith('import ')
+
+    priority_patterns = [
+        r'(userinfo\.(usertype|role)|user\?\.(usertype|role)|\brole\b|\bisadmin\b).*(===|!==|==|!=|>|<)',
+        r'\bif\b.*\b(admin|nafal)\b',
+        r'(requireauth|checkauthstatus)\s*\(',
+        r'\bnavigate\s*\(',
+    ]
+
+    hit_idx = None
+    for pattern in priority_patterns:
+        for idx, line in enumerate(lowered):
+            if is_import_line(idx):
+                continue
+            if re.search(pattern, line):
+                hit_idx = idx
+                break
+        if hit_idx is not None:
+            break
+
+    if hit_idx is None:
+        end = min(len(lines), 20)
+        return 1, end, '\n'.join(lines[:end])
+
+    start = max(0, hit_idx - 6)
+    end = min(len(lines) - 1, hit_idx + 6)
+    while start < end and is_import_line(start):
+        start += 1
+    while end > start and is_import_line(end):
+        end -= 1
+    return start + 1, end + 1, '\n'.join(lines[start:end + 1])
+
+
 def _extract_validation_parameters(content: str) -> list[str]:
     found: list[str] = []
     lower = content.lower()
@@ -336,7 +374,10 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         return any(k in hay for k in ('delete', 'remove', 'withdraw', 'transfer', 'refund', 'bulk', 'cancel-all', 'admin/delete'))
 
     def _ev(self, f: FileContent, reason: str) -> list[ReadableEvidence]:
-        start_line, end_line, snippet = _extract_relevant_snippet(f.content, AUTH_SNIPPET_KEYS)
+        if '권한' in reason:
+            start_line, end_line, snippet = _extract_auth_branch_snippet(f.content)
+        else:
+            start_line, end_line, snippet = _extract_relevant_snippet(f.content, AUTH_SNIPPET_KEYS)
         return [
             ReadableEvidence(
                 source_path=f.path,

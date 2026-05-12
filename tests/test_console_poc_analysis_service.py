@@ -47,6 +47,27 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
         self.assertIn("userInfo.userType === 'ADMIN'", auth.evidence[0].snippet)
 
+    def test_auth_evidence_excludes_requireauth_import_line(self):
+        files = [f('src/AdminPage.js', "import { requireAuth } from '../utils/sessionUtils';\nconst userInfo = requireAuth();\nif (userInfo.userType === 'ADMIN') { navigate('/admin'); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertNotIn("import { requireAuth }", auth.evidence[0].snippet)
+        self.assertIn("userInfo.userType === 'ADMIN'", auth.evidence[0].snippet)
+
+    def test_auth_evidence_keeps_requireauth_call_and_admin_branch_together(self):
+        files = [f('src/AdminPage.js', "const userInfo = requireAuth();\nconst x = 1;\nif (userInfo.userType === 'ADMIN') {\n  navigate('/admin');\n}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertIn("const userInfo = requireAuth();", auth.evidence[0].snippet)
+        self.assertIn("if (userInfo.userType === 'ADMIN')", auth.evidence[0].snippet)
+
+    def test_auth_evidence_excludes_checkauthstatus_import_line(self):
+        files = [f('src/Header.js', "import { checkAuthStatus } from '../utils/auth';\nconst role = userInfo.role;\nif (role === 'NAFAL') { navigate('/admin'); }\ncheckAuthStatus();")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertNotIn("import { checkAuthStatus }", auth.evidence[0].snippet)
+        self.assertIn("if (role === 'NAFAL')", auth.evidence[0].snippet)
+
     def test_storage_evidence_generates_poc_code(self):
         files = [f('src/AdminMypage.js', "const user = JSON.parse(sessionStorage.getItem('user')); if (user?.userType === 'ADMIN') { navigate('/admin') }")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
