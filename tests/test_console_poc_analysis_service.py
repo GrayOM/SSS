@@ -34,6 +34,10 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIn('fetch hook installed', auth.console_poc.code or '')
+        self.assertIn("window.fetch = async (...args) => {", auth.console_poc.code or '')
+        self.assertIn('return originalFetch(...args);', auth.console_poc.code or '')
+        self.assertNotIn('async (.args)', auth.console_poc.code or '')
+        self.assertNotIn('originalFetch(.args)', auth.console_poc.code or '')
         self.assertIn('requireAuth/checkSession 구현 파일 확인이 필요합니다.', auth.verification_notes)
         self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
         self.assertEqual(auth.confidence, 'low')
@@ -67,6 +71,20 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertNotIn("import { checkAuthStatus }", auth.evidence[0].snippet)
         self.assertIn("if (role === 'NAFAL')", auth.evidence[0].snippet)
+
+    def test_auth_evidence_skips_role_badge_presentation_code(self):
+        files = [f('src/Header.js', "function getRoleBadgeColor(role) {\n  switch (role) {\n    case 'ADMIN': return 'var(--red)';\n    case 'NAFAL': return 'var(--blue)';\n    default: return 'var(--gray)';\n  }\n}\nif (userInfo.userType !== 'ADMIN') { navigate('/'); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertNotIn('getRoleBadgeColor', auth.evidence[0].snippet)
+        self.assertIn("userInfo.userType !== 'ADMIN'", auth.evidence[0].snippet)
+
+    def test_auth_evidence_skips_notification_display_code(self):
+        files = [f('src/Header.js', "function shouldShowNotification(notification, userInfo) {\n  const notificationRole = notification.role;\n  return notificationRole === userInfo.role;\n}\nif (userInfo.userType !== 'ADMIN') { navigate('/'); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertNotIn('shouldShowNotification', auth.evidence[0].snippet)
+        self.assertIn("userInfo.userType !== 'ADMIN'", auth.evidence[0].snippet)
 
     def test_storage_evidence_generates_poc_code(self):
         files = [f('src/AdminMypage.js', "const user = JSON.parse(sessionStorage.getItem('user')); if (user?.userType === 'ADMIN') { navigate('/admin') }")]

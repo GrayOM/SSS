@@ -109,17 +109,43 @@ def _extract_auth_branch_snippet(content: str) -> tuple[int, int, str]:
     def is_import_line(idx: int) -> bool:
         return lowered[idx].lstrip().startswith('import ')
 
-    priority_patterns = [
-        r'(userinfo\.(usertype|role)|user\?\.(usertype|role)|\brole\b|\bisadmin\b).*(===|!==|==|!=|>|<)',
-        r'\bif\b.*\b(admin|nafal)\b',
+    presentation_noise = (
+        'getrolebadgecolor', 'badge', 'color', 'notificationrole', 'shouldshownotification',
+        '알림 표시', '역할별 뱃지', '역할별 알림', "return ['admin'", "return ['nafal'", "return 'var(",
+    )
+
+    def context_window(idx: int) -> str:
+        s = max(0, idx - 3)
+        e = min(len(lines) - 1, idx + 3)
+        return '\n'.join(lowered[s:e + 1])
+
+    def has_auth_flow_nearby(idx: int) -> bool:
+        ctx = context_window(idx)
+        return bool(re.search(r'(requireauth|checkauthstatus)\s*\(', ctx) or re.search(r'\bnavigate\s*\(', ctx))
+
+    def is_presentation_only(idx: int) -> bool:
+        ctx = context_window(idx)
+        if any(k in ctx for k in presentation_noise):
+            return not has_auth_flow_nearby(idx)
+        return False
+
+    tier1_patterns = [
         r'(requireauth|checkauthstatus)\s*\(',
-        r'\bnavigate\s*\(',
+        r'(userinfo\.(usertype|role)|user\?\.(usertype|role)|\buserType\b|\brole\b|\bisadmin\b).*(===|!==|==|!=|>|<)',
     ]
+    tier2_patterns = [
+        r'\bif\b[^{\n]*\b(usertype|role|isadmin)\b[^{\n]*\b(admin|nafal)\b',
+        r'\bif\b[^{\n]*\b(admin|nafal)\b.*\bnavigate\s*\(',
+        r'\bif\b[^{\n]*\b(admin|nafal)\b.*\breturn\b',
+    ]
+    tier3_patterns = [r'(protectedroute|privateroute)']
 
     hit_idx = None
-    for pattern in priority_patterns:
+    for pattern in (tier1_patterns + tier2_patterns + tier3_patterns + [r'\bnavigate\s*\(']):
         for idx, line in enumerate(lowered):
             if is_import_line(idx):
+                continue
+            if is_presentation_only(idx):
                 continue
             if re.search(pattern, line):
                 hit_idx = idx
@@ -133,6 +159,8 @@ def _extract_auth_branch_snippet(content: str) -> tuple[int, int, str]:
 
     start = max(0, hit_idx - 6)
     end = min(len(lines) - 1, hit_idx + 6)
+    while start < hit_idx and is_presentation_only(start):
+        start += 1
     while start < end and is_import_line(start):
         start += 1
     while end > start and is_import_line(end):
