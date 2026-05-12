@@ -13,9 +13,12 @@ _RESPONSE_NOISE_KEYS = {
 def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
     notes: list[str] = []
     value = raw.strip()
-    if re.match(r'^\{?(API_BASE|BASE_URL|apiBase)\}?', value):
-        notes.append('base URL variable requires manual review')
     value = re.sub(r'\$\{([^}]+)\}', r'{\1}', value)
+    has_base_variable = bool(re.match(r'^\{?(API_BASE|BASE_URL|apiBase)\}?', value))
+    if has_base_variable:
+        notes.append('base URL variable requires manual review')
+        if re.match(r'^\{?(API_BASE|BASE_URL)\}?', value) and ' ' not in value:
+            return value, notes
     value = re.sub(r'^\{?[A-Za-z_][A-Za-z0-9_]*\}?\s*\+\s*', '', value)
     value = re.sub(r'^\{apiBase\}', '', value, flags=re.IGNORECASE)
     if '/api/' in value:

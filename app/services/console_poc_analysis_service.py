@@ -215,6 +215,9 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     def _replace_endpoint_placeholders(self, endpoint: str) -> str:
         if self._is_base_variable_endpoint(endpoint):
             return endpoint
+        return self._replace_path_placeholders(endpoint)
+
+    def _replace_path_placeholders(self, endpoint: str) -> str:
         endpoint = re.sub(r'\{(?:userId|currentUserId|sessionData\.userId)\}', 'TEST_USER_ID', endpoint, flags=re.IGNORECASE)
         endpoint = re.sub(r'\{(?:orderId|orderNo|auctionItem\.orderId)\}', 'TEST_ORDER_ID', endpoint, flags=re.IGNORECASE)
         endpoint = re.sub(r'\{(?:item\.id|itemId|productId)\}', 'TEST_ITEM_ID', endpoint, flags=re.IGNORECASE)
@@ -227,6 +230,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
 
     def _strip_base_variable(self, endpoint: str) -> str:
         value = re.sub(r'^\{?(API_BASE|BASE_URL|apiBase)\}?', '', endpoint)
+        value = self._replace_path_placeholders(value)
         return value if value.startswith('/') else f"/{value.lstrip('/')}"
 
     def _build_payload_from_parameters(self, parameters: list[str]) -> dict:

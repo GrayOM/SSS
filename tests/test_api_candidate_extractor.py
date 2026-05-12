@@ -168,6 +168,12 @@ axios.post("/api/pay", fd);
         cand = extract_api_call_candidates([fc(content)]).candidates[0]
         self.assertNotIn('winnerData', cand.parameters)
 
+    def test_template_api_base_has_manual_review_note(self):
+        content = "axios.post(`${API_BASE}/verify-code`, { code })"
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
+        self.assertEqual(cand.endpoint, '{API_BASE}/verify-code')
+        self.assertIn('base URL variable requires manual review', cand.notes)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -173,6 +173,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn("const API_BASE = 'https://TARGET_BASE_URL';", finding.console_poc.code or '')
         self.assertIn('const endpoint = `${API_BASE}/user/session`;', finding.console_poc.code or '')
 
+    def test_api_base_path_variable_is_replaced_in_poc(self):
+        files = [f('src/vpath.js', "axios.post('{API_BASE}/api/user/{userId}/wallet', { amount })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if 'Candidate' in x.vulnerability_type][0]
+        self.assertNotIn('TEST_VALUE/wallet', finding.console_poc.code or '')
+        self.assertIn("const API_BASE = 'https://TARGET_BASE_URL';", finding.console_poc.code or '')
+        self.assertIn('const endpoint = `${API_BASE}/api/user/TEST_USER_ID/wallet`;', finding.console_poc.code or '')
+
     def test_auth_missing_dependency_uses_fetch_hook_poc(self):
         files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
