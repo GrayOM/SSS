@@ -38,6 +38,10 @@ class RoutesAnalyzeTests(unittest.TestCase):
             body = result.model_dump()
             self.assertIn('readable_analysis', body)
             self.assertIn('finding_count', body['readable_analysis'])
+            self.assertIn('analysis_debug', body)
+            self.assertEqual(body['analysis_debug']['backend'], 'mock')
+            self.assertTrue(body['analysis_debug']['called'])
+            self.assertNotIn('GEMINI_API_KEY', result.model_dump_json())
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 
@@ -145,5 +149,7 @@ class RoutesAnalyzeHttpTests(unittest.TestCase):
             res = client.post('/api/analyze', files={'file': ('a.zip', bio.getvalue(), 'application/zip')})
             self.assertEqual(res.status_code, 200)
             self.assertIn('readable_analysis', res.json())
+            self.assertIn('analysis_debug', res.json())
+            self.assertEqual(res.json()['analysis_debug']['backend'], 'mock')
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend

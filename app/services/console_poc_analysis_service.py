@@ -3,7 +3,7 @@ import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
-from app.models.schemas import ApiCallCandidate, ConsoleSafePoc, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
+from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, ConsoleSafePoc, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.api_candidate_extractor import extract_api_call_candidates
 from app.services.json_utils import extract_json_payload
@@ -271,7 +271,18 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                         finding = self._mk_validation_bypass(f, candidate=cand)
                         if finding is not None:
                             findings.append(finding)
-        return _dedup_findings(findings)
+        findings = _dedup_findings(findings)
+        self.last_debug = AiAnalysisDebug(
+            backend='mock',
+            configured=True,
+            called=True,
+            call_count=1,
+            candidate_count=len(files),
+            raw_item_count=len(findings),
+            accepted_item_count=len(findings),
+            dropped_item_count=0,
+        )
+        return findings
 
     def _id(self, seed: str) -> str:
         return hashlib.sha256(seed.encode()).hexdigest()[:12]
@@ -657,8 +668,25 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
 class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
     def __init__(self, client: GeminiClientProtocol):
         self.client = client
+        self.last_debug = AiAnalysisDebug(backend='gemini')
 
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
+        def _summary(item: dict) -> dict:
+            evidence = item.get('evidence') or []
+            ev0 = evidence[0] if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict) else {}
+            return {
+                'title': item.get('title'),
+                'vulnerability_type': item.get('vulnerability_type'),
+                'severity': item.get('severity'),
+                'source_path': ev0.get('source_path'),
+            }
+
+        def _drop(index: int | None, stage: str, reason: str, item: dict | None = None) -> None:
+            self.last_debug.dropped_item_count += 1
+            self.last_debug.drop_reasons.append(
+                AnalysisDebugDropReason(index=index, stage=stage, reason=reason[:240], item_summary=(_summary(item) if item else None))
+            )
+
         def _ensure_finding_id(item: dict) -> None:
             if item.get('id'):
                 return
@@ -675,29 +703,46 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
             item['id'] = hashlib.sha256(seed.encode()).hexdigest()[:12]
 
         candidates = extract_api_call_candidates(files).candidates
-        payload = extract_json_payload(self.client.analyze(build_candidate_analysis_prompt(files, candidates)))
+        self.last_debug = AiAnalysisDebug(
+            backend='gemini',
+            model=getattr(self.client, 'model', None),
+            configured=bool(self.client),
+            called=False,
+            candidate_count=len(candidates),
+        )
+        self.last_debug.called = True
+        self.last_debug.call_count += 1
+        try:
+            raw_text = self.client.analyze(build_candidate_analysis_prompt(files, candidates))
+        except Exception as exc:
+            self.last_debug.errors.append(f'call failed: {type(exc).__name__}')
+            return []
+        payload = extract_json_payload(raw_text)
         if payload is None or not isinstance(payload.get('findings'), list):
+            self.last_debug.errors.append('parse failed: Gemini response was not valid JSON findings payload')
             return []
 
         out: list[ReadableFinding] = []
-        dropped_count = 0
-        for item in payload['findings']:
+        items = payload['findings']
+        self.last_debug.raw_item_count = len(items)
+        for idx, item in enumerate(items):
             if not isinstance(item, dict):
-                dropped_count += 1
+                _drop(idx, 'shape', 'Item is not a dict')
                 continue
             if item.get('severity') not in ALLOWED_SEVERITIES or item.get('confidence') not in ALLOWED_CONFIDENCES:
-                dropped_count += 1
+                _drop(idx, 'shape', 'Invalid severity/confidence', item)
                 continue
             if not isinstance(item.get('evidence'), list) or not item['evidence']:
-                dropped_count += 1
+                _drop(idx, 'shape', 'Missing evidence', item)
                 continue
             if not isinstance(item.get('attack_scenario'), list) or not item['attack_scenario']:
-                dropped_count += 1
+                _drop(idx, 'shape', 'Missing attack_scenario', item)
                 continue
 
             poc = item.get('console_poc')
             if isinstance(poc, dict):
                 if poc.get('poc_type') not in ALLOWED_POC_TYPES:
+                    _drop(idx, 'shape', 'Invalid console_poc type', item)
                     continue
                 code = (poc.get('code') or '').lower()
                 if any(x in code for x in DANGEROUS_POC_PATTERNS) or not _is_allowed_guarded_poc_code(code):
@@ -705,14 +750,15 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
                     notes = item.get('verification_notes') or []
                     notes.append('위험 요청 가능성이 있어 Console PoC code를 제거했습니다.')
                     item['verification_notes'] = notes
+                    self.last_debug.errors.append('safety: Dangerous Console PoC code removed')
 
             try:
                 _ensure_finding_id(item)
                 out.append(ReadableFinding(**item))
-            except Exception:
-                dropped_count += 1
+                self.last_debug.accepted_item_count += 1
+            except Exception as exc:
+                _drop(idx, 'validation', f'ReadableFinding validation failed: {type(exc).__name__}: {str(exc)[:120]}', item)
                 continue
-        # NOTE: dropped_count is kept for debug/investigation when malformed Gemini items are skipped.
         return out
 
 

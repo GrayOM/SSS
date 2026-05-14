@@ -246,6 +246,11 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         findings = analyzer.analyze([f('src/a.js', "fetch('/api/user/session')")])
         self.assertEqual(len(findings), 1)
         self.assertTrue(findings[0].id)
+        self.assertEqual(analyzer.last_debug.backend, 'gemini')
+        self.assertTrue(analyzer.last_debug.called)
+        self.assertEqual(analyzer.last_debug.raw_item_count, 1)
+        self.assertEqual(analyzer.last_debug.accepted_item_count, 1)
+        self.assertEqual(analyzer.last_debug.dropped_item_count, 0)
 
     def test_gemini_dangerous_poc_code_removed_but_id_kept(self):
         class FakeGeminiClient:
@@ -256,6 +261,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertTrue(findings[0].id)
         self.assertIsNone(findings[0].console_poc.code)
+        self.assertEqual(analyzer.last_debug.accepted_item_count, 1)
 
     def test_gemini_malformed_item_does_not_break_all(self):
         class FakeGeminiClient:
@@ -265,6 +271,19 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         findings = analyzer.analyze([f('src/a.js', "fetch('/api/user/session')")])
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].title, 'ok')
+        self.assertEqual(analyzer.last_debug.accepted_item_count, 1)
+        self.assertEqual(analyzer.last_debug.dropped_item_count, 1)
+        self.assertIn(analyzer.last_debug.drop_reasons[0].stage, {'shape', 'validation'})
+
+    def test_gemini_invalid_json_records_parse_error(self):
+        class FakeGeminiClient:
+            def analyze(self, prompt: str) -> str:
+                return "not-json"
+        analyzer = GeminiConsolePocAnalyzer(FakeGeminiClient())
+        findings = analyzer.analyze([f('src/a.js', "fetch('/api/user/session')")])
+        self.assertEqual(findings, [])
+        self.assertTrue(analyzer.last_debug.called)
+        self.assertTrue(any('parse failed' in e for e in analyzer.last_debug.errors))
 
     def test_account_recovery_candidate_classification(self):
         files = [f('src/reset.js', "axios.post('/api/user/reset-password', { email, verificationCode })")]

@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -142,6 +144,27 @@ class ReadableAnalysisResult(BaseModel):
     analyzed_focus: list[str] = Field(default_factory=list)
 
 
+class AnalysisDebugDropReason(BaseModel):
+    index: int | None = None
+    stage: str
+    reason: str
+    item_summary: dict[str, Any] | None = None
+
+
+class AiAnalysisDebug(BaseModel):
+    backend: str
+    model: str | None = None
+    configured: bool = False
+    called: bool = False
+    call_count: int = 0
+    candidate_count: int = 0
+    raw_item_count: int = 0
+    accepted_item_count: int = 0
+    dropped_item_count: int = 0
+    drop_reasons: list[AnalysisDebugDropReason] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 class FileContentSummary(BaseModel):
     path: str
     extension: str
@@ -186,6 +209,7 @@ class FullAnalysisResponse(BaseModel):
     chunks: ChunkSummaryResult
     analysis: AnalysisResult
     readable_analysis: ReadableAnalysisResult | None = None
+    analysis_debug: AiAnalysisDebug | None = None
 
 
 class ApiCallCandidate(BaseModel):
