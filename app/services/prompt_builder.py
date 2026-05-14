@@ -35,7 +35,7 @@ Chunk metadata:
 
 Chunk content:
 <source_code>
-{chunk.content}
+{html.escape(chunk.content, quote=False)}
 </source_code>
 
 Return schema example:
@@ -143,7 +143,7 @@ def build_candidate_analysis_prompt(files: list[FileContent], candidates: list[A
             f'<candidate index="{idx}" source_path="{html.escape(c.source_path, quote=True)}" method="{html.escape(c.method, quote=True)}" '
             f'endpoint="{html.escape(c.endpoint, quote=True)}" sink="{html.escape(c.sink, quote=True)}" confidence="{html.escape(c.confidence, quote=True)}">\n'
             f'<parameters>\n{params}\n</parameters>\n'
-            f'<candidate_snippet lines="{html.escape(f"{c.start_line}-{c.end_line}", quote=True)}">\n{c.snippet}\n</candidate_snippet>\n'
+            f'<candidate_snippet lines="{html.escape(f"{c.start_line}-{c.end_line}", quote=True)}">\n{html.escape(c.snippet, quote=False)}\n</candidate_snippet>\n'
             f'<notes>\n{notes}\n</notes>\n'
             f'</candidate>'
         )

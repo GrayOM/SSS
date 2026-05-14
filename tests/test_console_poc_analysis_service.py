@@ -247,6 +247,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertTrue(findings[0].id)
         self.assertEqual(analyzer.last_debug.backend, 'gemini')
+        self.assertEqual(analyzer.last_debug.scope, 'readable_analysis')
         self.assertTrue(analyzer.last_debug.called)
         self.assertEqual(analyzer.last_debug.raw_item_count, 1)
         self.assertEqual(analyzer.last_debug.accepted_item_count, 1)
@@ -332,6 +333,49 @@ class ConsolePocAnalysisTests(unittest.TestCase):
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_axios_post_without_guard_rejected(self):
+        code = "axios.post('/api/pay', { amount: 1 })"
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_axios_post_with_guard_allowed(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  await axios.post('/api/pay', { amount: 1 });
+})();"""
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_axios_delete_rejected(self):
+        code = "axios.delete('/api/user/1')"
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_xhr_post_without_guard_rejected(self):
+        code = "const x = new XMLHttpRequest(); x.open('POST','/api/pay'); x.send('x');"
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_xhr_post_with_guard_allowed(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  const x = new XMLHttpRequest(); x.open('POST','/api/pay'); x.send('x');
+})();"""
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_send_beacon_rejected(self):
+        code = "navigator.sendBeacon('/api/pay', 'x')"
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
+    def test_execute_query_not_blocked_by_exec_substring(self):
+        code = """(async () => {
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); }
+  await fetch('/api/execute-query', { method: 'POST' });
+})();"""
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_exec_function_call_rejected(self):
+        self.assertFalse(_is_allowed_guarded_poc_code("exec('rm -rf /')"))
 
     def test_post_without_guard_rejected_by_filter(self):
         code = "fetch('/api/x',{method:'POST'})"

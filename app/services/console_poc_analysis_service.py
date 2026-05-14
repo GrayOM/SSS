@@ -21,7 +21,7 @@ ALLOWED_CONFIDENCES = {'low', 'medium', 'high'}
 ALLOWED_POC_TYPES = {'browser_console', 'manual_check'}
 DANGEROUS_POC_PATTERNS = (
     'delete', 'remove', 'transfer', 'withdraw', 'refund', 'bulk', 'axios.delete',
-    'xmlhttprequest', 'document.cookie=', 'child_process', 'exec', 'eval(',
+    'document.cookie=', 'child_process', 'eval(',
 )
 AUTH_SNIPPET_KEYS = ['requireAuth', 'checkSession', 'userInfo.userType', 'userType', 'role', 'isAdmin', 'ADMIN', 'NAFAL', 'navigate']
 DOM_SNIPPET_KEYS = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'location', 'document.URL', 'postMessage', 'input.value']
@@ -210,13 +210,30 @@ def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
 
 def _is_allowed_guarded_poc_code(code: str) -> bool:
     low = code.lower()
-    if 'fetch(' not in low:
+    network_sink_re = re.compile(
+        r'(fetch\s*\(|axios\.(get|post|put|patch|delete|request)\s*\(|new\s+xmlhttprequest\s*\(|xmlhttprequest\s*\(|navigator\.sendbeacon\s*\()',
+        re.IGNORECASE,
+    )
+    if not network_sink_re.search(low):
+        if re.search(r'\b(exec|execsync|execfile)\s*\(', low):
+            return False
         return True
-    if re.search(r"method\s*:\s*['\"]delete['\"]", low):
-        return False
+
     if any(x in low for x in ('refund', 'transfer', 'withdraw', 'delete', 'remove', 'bulk')):
         return False
-    is_mutation = bool(re.search(r"method\s*:\s*['\"](post|put|patch)['\"]", low))
+    if re.search(r'\b(exec|execsync|execfile)\s*\(', low):
+        return False
+    if re.search(r'axios\.delete\s*\(', low):
+        return False
+    if re.search(r"method\s*:\s*['\"]delete['\"]", low):
+        return False
+    if 'navigator.sendbeacon' in low:
+        return False
+    is_mutation = bool(
+        re.search(r"method\s*:\s*['\"](post|put|patch)['\"]", low)
+        or re.search(r'axios\.(post|put|patch)\s*\(', low)
+        or re.search(r'\.open\s*\(\s*[\'"](post|put|patch)[\'"]', low)
+    )
     if is_mutation:
         return 'confirm_authorized_test = false' in low and 'if (!confirm_authorized_test)' in low
     return True

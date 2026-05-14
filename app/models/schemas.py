@@ -152,6 +152,7 @@ class AnalysisDebugDropReason(BaseModel):
 
 
 class AiAnalysisDebug(BaseModel):
+    scope: str = 'readable_analysis'
     backend: str
     model: str | None = None
     configured: bool = False
