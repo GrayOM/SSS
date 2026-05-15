@@ -9,6 +9,8 @@ _RESPONSE_NOISE_KEYS = {
     'chargeData', 'verifyRes', 'transactionData', 'walletData', 'existingOrderData',
 }
 
+_RESPONSE_VAR_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*(?:Response|Result|Data|Res))\b')
+
 
 def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
     notes: list[str] = []
@@ -89,12 +91,22 @@ def _extract_parameters(snippet: str, method: str) -> tuple[list[str], list[str]
         for um in re.finditer(r'URLSearchParams\(\s*\{([^}]*)\}', snippet, re.DOTALL):
             for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,|$)', um.group(1)):
                 allowed.add(km.group(1))
+    response_vars = set()
+    for m in re.finditer(r'const\s+\{\s*data\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*=\s*await\s+(?:axios|fetch|\$\.ajax|jQuery\.ajax)', snippet):
+        response_vars.add(m.group(1))
+    for m in re.finditer(r'const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*await\s+(?:axios|fetch|\$\.ajax|jQuery\.ajax)', snippet):
+        response_vars.add(m.group(1))
+    for m in _RESPONSE_VAR_RE.finditer(snippet):
+        response_vars.add(m.group(1))
+
     out = sorted(
         k for k in allowed
         if k not in _META_KEYS
         and k.lower() not in {'expr', 'sessiondata'}
         and k not in _RESPONSE_NOISE_KEYS
         and k.lower() not in {x.lower() for x in _RESPONSE_NOISE_KEYS}
+        and k not in response_vars
+        and k.lower() not in {x.lower() for x in response_vars}
     )
     if len(out) > 20:
         notes.append('parameter list truncated')
@@ -171,12 +183,19 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     if sink_name in ('$.ajax', 'jQuery.ajax'):
                         mm = re.search(r'(?:type|method)\s*:\s*["\']([A-Za-z]+)["\']', snip)
                         method = mm.group(1).upper() if mm else 'UNKNOWN'
+                        if re.search(r'url\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\b', snip) and endpoint == 'UNKNOWN':
+                            notes.append('generic ajax wrapper requires callsite tracing')
                     if sink == 'apiClient.request' or sink == 'request':
                         method, endpoint = _extract_object_style_request(snip, sink)
                         if endpoint == 'UNKNOWN':
                             notes.append('endpoint variable requires manual review')
 
                     params, pnotes = _extract_parameters(snip, method)
+                    response_vars = set()
+                    for rm in re.finditer(r'const\s+\{\s*data\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*=\s*await\s+(?:axios|fetch|\$\.ajax|jQuery\.ajax)', snip):
+                        response_vars.add(rm.group(1).lower())
+                    for rm in re.finditer(r'const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*await\s+(?:axios|fetch|\$\.ajax|jQuery\.ajax)', snip):
+                        response_vars.add(rm.group(1).lower())
                     for key in ('data', 'body', 'params'):
                         pv = re.search(rf'{key}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)', snip)
                         if pv and method != 'GET' and pv.group(1).lower() not in {'undefined', 'null', 'expr'}:
@@ -187,7 +206,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         near = '\n'.join(lines[near_start:i + 1])
                         for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
                             params.append(mfd.group(1))
-                    params = sorted({p for p in params if p.lower() not in {'expr', 'sessiondata'}})
+                    params = sorted({p for p in params if p.lower() not in {'expr', 'sessiondata'} and p.lower() not in response_vars})
                     notes.extend(pnotes)
                     if method == 'UNKNOWN':
                         notes.append('method could not be determined')

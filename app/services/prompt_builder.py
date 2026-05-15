@@ -13,8 +13,8 @@ Analyze the following code chunk and return JSON only.
 Rules:
 - Evidence 기반 분석을 수행하라.
 - 코드 근거가 없으면 finding을 생성하지 마라.
-- PoC만 허용한다.
-- destructive exploit, 데이터 삭제/변조, 외부 연결은 금지한다.
+- safe PoC만 허용한다.
+- destructive exploit, 데이터 삭제/변조, 권한 상승, 외부 연결은 금지한다.
 - findings가 없으면 반드시 {{"findings": []}} 를 반환하라.
 - markdown code fence를 사용하지 마라.
 - JSON 외 설명 문장을 출력하지 마라.

@@ -177,6 +177,26 @@ def _extract_validation_parameters(content: str) -> list[str]:
     return sorted(set(found), key=lambda x: x.lower())
 
 
+def _find_dom_xss_flow(content: str) -> tuple[int, int, str] | None:
+    lines = content.splitlines() or ['']
+    sinks = ('innerhtml', 'outerhtml', 'insertadjacenthtml', 'document.write', 'dangerouslysetinnerhtml')
+    sources = ('location.hash', 'location.search', 'document.url', 'document.location', 'event.data', 'input.value', 'urlsearchparams', 'window.name', 'location')
+    for idx, line in enumerate(lines):
+        low = line.lower()
+        if not any(s in low for s in sinks):
+            continue
+        if any(x in low for x in ("innerhtml = ''", 'innerhtml = ""', 'testelement.innerhtml')):
+            continue
+        if re.search(r'innerhtml\s*=\s*[\'"][^\'"]*[\'"]\s*;?', low):
+            continue
+        start = max(0, idx - 6)
+        end = min(len(lines) - 1, idx + 6)
+        window = '\n'.join(lines[start:end + 1]).lower()
+        if any(src in window for src in sources):
+            return start + 1, end + 1, '\n'.join(lines[start:end + 1])
+    return None
+
+
 def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
     grouped: dict[tuple[str, str, tuple[str, ...], str], ReadableFinding] = {}
     for f in findings:
@@ -281,7 +301,9 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             ):
                 findings.append(self._mk_auth_bypass(f, files, missing_deps))
             if 'innerhtml' in c_lower and any(x in c_lower for x in ('location', 'document.url', 'input.value', 'postmessage')):
-                findings.append(self._mk_dom_xss(f))
+                dom = self._mk_dom_xss(f)
+                if dom is not None:
+                    findings.append(dom)
             if any(x in c_lower for x in ('axios.', 'fetch(', 'apiclient.', 'request.', 'httpclient.', 'client.', '$.ajax', 'jquery.ajax', 'formdata')):
                 for cand in extract_api_call_candidates([f]).candidates:
                     if cand.sink.startswith(('axios', 'fetch', '$.ajax', 'apiClient', 'request', 'httpClient', 'client')):
@@ -507,8 +529,13 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             verification_notes=verification_notes,
         )
 
-    def _mk_dom_xss(self, f: FileContent) -> ReadableFinding:
-        start_line, end_line, snippet = _extract_relevant_snippet(f.content, DOM_SNIPPET_KEYS)
+    def _mk_dom_xss(self, f: FileContent) -> ReadableFinding | None:
+        if any(x in f.path.lower() for x in ('jquery-ui.js', 'jquery.fullpage.js', 'jquery.selectbox.js', '/vendor/', '/vendors/', '/plugins/')):
+            return None
+        flow = _find_dom_xss_flow(f.content)
+        if flow is None:
+            return None
+        start_line, end_line, snippet = flow
         return ReadableFinding(
             id=self._id(f.path + 'x'),
             title='외부 입력이 DOM sink로 전달될 가능성',
@@ -601,9 +628,16 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
 
     def _mk_validation_bypass(self, f: FileContent, candidate: ApiCallCandidate) -> ReadableFinding | None:
         endpoint = candidate.endpoint or 'UNKNOWN'
-        parameters = candidate.parameters or _extract_validation_parameters(f.content)
+        if candidate.parameters:
+            parameters = candidate.parameters
+        elif (candidate.method or 'UNKNOWN').upper() == 'GET':
+            parameters = []
+        else:
+            parameters = _extract_validation_parameters(candidate.snippet or '')
         method = (candidate.method or 'UNKNOWN').upper()
         sink = candidate.sink or 'UNKNOWN'
+        if sink in {'$.ajax', 'jQuery.ajax'} and endpoint == 'UNKNOWN' and any('generic ajax wrapper requires callsite tracing' in n for n in (candidate.notes or [])):
+            return None
 
         flow = ['source -> state/storage -> sink', f'method: {method}', f'endpoint: {endpoint}']
         for k in parameters:

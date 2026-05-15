@@ -189,6 +189,24 @@ axios.post('/api/pay', fd);
         self.assertIn('size', get_c.parameters)
         self.assertIn('amount', post_c.parameters)
 
+    def test_response_aliases_not_collected_as_parameters(self):
+        content = """
+const { data: paymentResult } = await axios.post('/api/pay', { amount });
+const { data: verifyRes } = await axios.post('/api/verify', { code });
+const productResponse = await axios.get('/api/product');
+"""
+        cands = extract_api_call_candidates([fc(content)]).candidates
+        all_params = {p for c in cands for p in c.parameters}
+        self.assertNotIn('paymentResult', all_params)
+        self.assertNotIn('verifyRes', all_params)
+        self.assertNotIn('productResponse', all_params)
+
+    def test_generic_ajax_wrapper_note(self):
+        content = "$.ajax({ url: url, type: 'POST', data: data, success: ()=>{} })"
+        cand = extract_api_call_candidates([fc(content)]).candidates[0]
+        self.assertEqual(cand.endpoint, 'UNKNOWN')
+        self.assertIn('generic ajax wrapper requires callsite tracing', cand.notes)
+
 
 if __name__ == '__main__':
     unittest.main()

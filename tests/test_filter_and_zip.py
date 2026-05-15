@@ -60,6 +60,22 @@ class FilterPolicyTests(unittest.TestCase):
             self.assertFalse(decision.include)
             self.assertEqual(decision.reason_code, 'EXCLUDED_MINIFIED')
 
+    def test_third_party_library_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            jq_ui = Path(td) / 'jquery-ui.js'
+            jq_ui.write_text('x')
+            self.assertFalse(should_include_file(jq_ui).include)
+            self.assertEqual(should_include_file(jq_ui).reason_code, 'EXCLUDED_THIRD_PARTY_LIBRARY')
+
+            app = Path(td) / 'application.js'
+            app.write_text('x')
+            self.assertTrue(should_include_file(app).include)
+
+            vendor = Path(td) / 'vendor' / 'jquery-ui.js'
+            vendor.parent.mkdir(parents=True)
+            vendor.write_text('x')
+            self.assertFalse(should_include_file(vendor).include)
+
 
 
     def test_config_filename_included_and_old_backup_excluded(self):

@@ -120,6 +120,29 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any(x.startswith('parameter: amount') for x in flow))
         self.assertTrue(any(x.startswith('endpoint: /api/order') for x in flow))
 
+    def test_dom_xss_requires_source_sink_flow(self):
+        files = [f('src/x.js', "const testElement = document.createElement('div'); testElement.innerHTML = '';")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(x.vulnerability_type == 'DOM XSS' for x in result.findings))
+
+    def test_dom_xss_static_innerhtml_not_reported(self):
+        files = [f('src/x.js', 'el.innerHTML = "<span>static</span>";')]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(x.vulnerability_type == 'DOM XSS' for x in result.findings))
+
+    def test_get_session_no_global_parameter_fallback(self):
+        files = [f('src/mix.js', "const amount=1; const orderId='x'; fetch('/api/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
+        flow = finding.evidence[0].data_flow
+        self.assertFalse(any(p.startswith('parameter: amount') for p in flow))
+        self.assertFalse(any(p.startswith('parameter: orderId') for p in flow))
+
+    def test_generic_ajax_wrapper_not_promoted(self):
+        files = [f('src/ajax.js', "$.ajax({ url: url, type: 'POST', data: data, success: ()=>{} })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(x.vulnerability_type in {'Client-side Validation Bypass', 'Payment/Point Manipulation Candidate'} for x in result.findings))
+
     def test_extract_endpoint_supports_template_literal(self):
         ep = _extract_endpoint("axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, payload)")
         self.assertEqual(ep, '/api/user/{sessionData.userId}/wallet/charge')
