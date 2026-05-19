@@ -4,6 +4,7 @@ from app.models.schemas import FileContent
 from app.services.console_poc_analysis_service import (
     GeminiConsolePocAnalyzer,
     MockConsolePocAnalyzer,
+    _build_fetch_hook_mutation_poc,
     _is_allowed_guarded_poc_code,
     _extract_endpoint,
     _auth_bypass_severity,
@@ -401,8 +402,17 @@ class ConsolePocAnalysisTests(unittest.TestCase):
     def test_disabled_button_only_generates_playbook_console_code(self):
         files = [f('src/pay.js', "<button disabled={amount <= 0} onClick={handlePay}>Pay</button>")]
         findings = MockConsolePocAnalyzer().analyze(files)
-        finding = [x for x in findings if x.verification_playbook and x.verification_playbook.strategy == 'disabled_button_bypass'][0]
-        self.assertIn('button[disabled]', finding.verification_playbook.console_code or '')
+        self.assertEqual(len([x for x in findings if x.verification_playbook and x.verification_playbook.strategy == 'disabled_button_bypass']), 0)
+
+    def test_disabled_loading_only_does_not_create_disabled_finding(self):
+        files = [f('src/x.js', "<button disabled={loading}>Pay</button>")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        self.assertFalse(any(x.verification_playbook and x.verification_playbook.strategy == 'disabled_button_bypass' for x in findings))
+
+    def test_disabled_with_handler_and_api_creates_playbook(self):
+        files = [f('src/pay.js', "const handlePay=()=>{axios.post('/api/pay',{ amount })}; <button disabled={amount <= 0} onClick={handlePay}>Pay</button>")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        self.assertTrue(any(x.verification_playbook and x.verification_playbook.strategy == 'disabled_button_bypass' for x in findings))
 
     def test_auth_guard_playbook_contains_role_watch_variables(self):
         files = [f('src/auth.js', "if (userInfo.userType !== 'ADMIN') { navigate('/'); }")]
@@ -411,6 +421,30 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIsNotNone(auth.verification_playbook)
         self.assertIn('userInfo', auth.verification_playbook.breakpoints[0].watch_variables)
         self.assertIn('userType', auth.verification_playbook.breakpoints[0].watch_variables)
+
+    def test_validation_return_breakpoint_is_included(self):
+        files = [f('src/verify.js', "function handleVerify(){ if (!code) return; axios.post('/verify-code', { code }); }")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        rec = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
+        reasons = [b.reason for b in rec.verification_playbook.breakpoints]
+        self.assertIn('클라이언트 검증 실패 분기 확인', reasons)
+        self.assertIn('API 호출 직전 payload 변조 확인', reasons)
+        all_watch = {w for bp in rec.verification_playbook.breakpoints for w in bp.watch_variables}
+        self.assertIn('code', all_watch)
+
+    def test_fetch_hook_endpoint_is_escaped(self):
+        code = _build_fetch_hook_mutation_poc('/api/o"rder')
+        self.assertIn('url.includes("/api/o\\"rder")', code)
+
+    def test_location_href_without_source_sink_flow_not_reported(self):
+        files = [f('src/safe.js', 'const x = window.location.href; el.innerHTML = safeValue;')]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        self.assertFalse(any(x.vulnerability_type == 'DOM XSS' for x in findings))
+
+    def test_location_hash_still_reports_dom_xss(self):
+        files = [f('src/xss.js', 'const x = location.hash; el.innerHTML = x;')]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        self.assertTrue(any(x.vulnerability_type == 'DOM XSS' for x in findings))
 
     def test_post_request_generates_guarded_poc(self):
         files = [f('src/post.js', "axios.post('/api/pay', { amount, orderId, userId })")]

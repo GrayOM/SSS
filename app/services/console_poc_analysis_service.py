@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 from abc import ABC, abstractmethod
 
@@ -180,7 +181,7 @@ def _extract_validation_parameters(content: str) -> list[str]:
 def _find_dom_xss_flow(content: str) -> tuple[int, int, str] | None:
     lines = content.splitlines() or ['']
     sinks = ('innerhtml', 'outerhtml', 'insertadjacenthtml', 'document.write', 'dangerouslysetinnerhtml')
-    sources = ('location.hash', 'location.search', 'document.url', 'document.location', 'event.data', 'input.value', 'urlsearchparams', 'window.name', 'location')
+    sources = ('location.hash', 'location.search', 'document.url', 'document.location', 'event.data', 'input.value', 'urlsearchparams', 'window.name')
     for idx, line in enumerate(lines):
         low = line.lower()
         if not any(s in low for s in sinks):
@@ -314,6 +315,7 @@ if (target) {
 
 
 def _build_fetch_hook_mutation_poc(endpoint: str) -> str:
+    endpoint_js = json.dumps(endpoint)
     return f"""(() => {{
   const CONFIRM_AUTHORIZED_TEST = false;
   if (!CONFIRM_AUTHORIZED_TEST) {{
@@ -322,7 +324,7 @@ def _build_fetch_hook_mutation_poc(endpoint: str) -> str:
   const originalFetch = window.fetch;
   window.fetch = async function(input, init = {{}}) {{
     const url = String(input);
-    if (url.includes('{endpoint}') && init?.body) {{
+    if (url.includes({endpoint_js}) && init?.body) {{
       const payload = JSON.parse(init.body);
       console.log('[PoC] original payload:', payload);
       if ('amount' in payload) payload.amount = 1;
@@ -355,13 +357,38 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
         )
     endpoint = (candidate.endpoint if candidate else '/api') or '/api'
     watch = ['payload', 'amount', 'userId', 'orderId', 'status'] + ((candidate.parameters or []) if candidate else [])
+    breakpoints = _find_validation_return_breakpoints(f)
+    breakpoints.append(BreakpointHint(source_path=f.path, start_line=(candidate.start_line if candidate else 1), end_line=(candidate.end_line if candidate else 1), reason='API 호출 직전 payload 변조 확인', watch_variables=sorted(set(watch))))
     return ConsoleVerificationPlaybook(
         strategy='breakpoint_payload_mutation',
-        breakpoints=[BreakpointHint(source_path=f.path, start_line=(candidate.start_line if candidate else 1), end_line=(candidate.end_line if candidate else 1), reason='API 호출 직전 payload 변조 확인', watch_variables=sorted(set(watch)))],
+        breakpoints=breakpoints,
         console_steps=['DevTools Sources에서 breakpoint 설정', '정상 UI 버튼 클릭', 'Scope에서 payload 값 확인', '테스트 값으로 변경', 'Resume 후 서버 응답 확인'],
         console_code=_build_fetch_hook_mutation_poc(endpoint if endpoint != 'UNKNOWN' else '/api'),
         expected_observation='요청 직전 payload 변경이 전송 본문에 반영됨',
     )
+
+
+def _find_validation_return_breakpoints(f: FileContent) -> list[BreakpointHint]:
+    keys = ('amount', 'price', 'status', 'userid', 'orderid', 'code', 'email', 'password', 'role', 'usertype')
+    hints: list[BreakpointHint] = []
+    lines = f.content.splitlines() or ['']
+    for idx, line in enumerate(lines, start=1):
+        low = line.lower()
+        if not any(k in low for k in keys):
+            continue
+        has_return_guard = bool(re.search(r'if\s*\(.*\)\s*return\b', low) or re.search(r'if\s*\(.*\)\s*\{\s*return;?\s*\}', low))
+        has_alert_return = 'alert(' in low and 'return' in low
+        has_throw_or_seterror = ('throw new error' in low or 'seterror' in low) and 'return' in low
+        if has_return_guard or has_alert_return or has_throw_or_seterror:
+            vars_found = sorted({k for k in keys if k in low})
+            hints.append(BreakpointHint(
+                source_path=f.path,
+                start_line=idx,
+                end_line=idx,
+                reason='클라이언트 검증 실패 분기 확인',
+                watch_variables=vars_found,
+            ))
+    return hints
 
 
 class ConsolePocAnalyzer(ABC):
@@ -380,12 +407,17 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         findings: list[ReadableFinding] = []
         missing_deps = detect_missing_dependencies(files)
         handler_candidates = extract_ui_handler_candidates(files)
+        api_candidates_all = extract_api_call_candidates(files).candidates
         for f in files:
             c = f.content
             if _is_build_or_third_party_path(f.path, c):
                 continue
             c_lower = c.lower()
-            if any(h.get('source_path') == f.path and h.get('ui_event') == 'disabled' for h in handler_candidates):
+            file_handlers = [h for h in handler_candidates if h.get('source_path') == f.path]
+            has_disabled_expr = any(h.get('ui_event') == 'disabled' and h.get('disabled_expression') for h in file_handlers)
+            has_ui_event_handler = any(h.get('ui_event') in {'onClick', 'onSubmit'} and h.get('handler_name') for h in file_handlers)
+            file_api_candidates = [c for c in api_candidates_all if c.source_path == f.path]
+            if has_disabled_expr and has_ui_event_handler and bool(file_api_candidates):
                 findings.append(ReadableFinding(
                     id=self._id(f.path + 'd'),
                     title='비활성화 UI 우회 검증 필요',
