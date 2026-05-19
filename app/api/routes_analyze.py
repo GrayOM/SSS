@@ -6,8 +6,7 @@ from app.core.config import settings
 from app.models.schemas import FullAnalysisResponse
 from app.services.analysis_service import analyze_chunks
 from app.services.chunk_service import build_chunks
-from app.services.console_poc_analysis_service import GeminiConsolePocAnalyzer, MockConsolePocAnalyzer, analyze_console_exploitability
-from app.services.ai_clients import GeminiClient
+from app.services.console_poc_analysis_service import analyze_console_exploitability, get_console_poc_analyzer
 from app.services.file_content_loader import load_file_contents
 from app.services.response_mapper import to_safe_analysis_result, to_safe_chunk_result, to_safe_content_load_result
 from app.services.scan_service import scan_extracted_directory
@@ -37,19 +36,10 @@ async def analyze_zip(file: UploadFile = File(...)):
         except Exception as exc:
             raise HTTPException(status_code=502, detail='Analysis backend failed') from exc
         try:
-            backend = settings.ANALYZER_BACKEND.lower()
-            if backend == 'mock':
-                readable_analyzer = MockConsolePocAnalyzer()
-            elif backend == 'gemini':
-                readable_analyzer = GeminiConsolePocAnalyzer(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f'Unsupported readable analysis backend: {settings.ANALYZER_BACKEND}',
-                )
+            readable_analyzer = get_console_poc_analyzer()
             readable_result = analyze_console_exploitability(content_result.files, analyzer=readable_analyzer)
-        except HTTPException:
-            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail='Readable analysis backend failed') from exc
         analysis_debug = getattr(readable_analyzer, 'last_debug', None)

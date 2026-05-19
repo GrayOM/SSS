@@ -9,6 +9,7 @@ from app.services.console_poc_analysis_service import (
     _auth_bypass_severity,
     analyze_console_exploitability,
     select_console_relevant_files,
+    get_console_poc_analyzer,
 )
 
 
@@ -294,6 +295,18 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('application.js', client.last_prompt)
         self.assertEqual(analyzer.last_debug.candidate_count, 1)
 
+
+
+    def test_get_console_poc_analyzer_unsupported_backend_raises(self):
+        from app.services import console_poc_analysis_service as svc
+        original_backend = svc.settings.ANALYZER_BACKEND
+        try:
+            svc.settings.ANALYZER_BACKEND = 'openai'
+            with self.assertRaises(ValueError) as cm:
+                get_console_poc_analyzer()
+            self.assertIn('Unsupported readable analysis backend', str(cm.exception))
+        finally:
+            svc.settings.ANALYZER_BACKEND = original_backend
     def test_gemini_missing_id_is_auto_generated(self):
         class FakeGeminiClient:
             def analyze(self, prompt: str) -> str:

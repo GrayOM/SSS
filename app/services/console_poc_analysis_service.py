@@ -836,13 +836,19 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         return out
 
 
+def get_console_poc_analyzer() -> ConsolePocAnalyzer:
+    backend = settings.ANALYZER_BACKEND.lower()
+    if backend == 'mock':
+        return MockConsolePocAnalyzer()
+    if backend == 'gemini':
+        return GeminiConsolePocAnalyzer(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
+    raise ValueError(f'Unsupported readable analysis backend: {settings.ANALYZER_BACKEND}')
+
+
+
 def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePocAnalyzer | None = None) -> ReadableAnalysisResult:
     selected = select_console_relevant_files(files)
-    analyzer = analyzer or (
-        MockConsolePocAnalyzer()
-        if settings.ANALYZER_BACKEND.lower() == 'mock'
-        else GeminiConsolePocAnalyzer(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
-    )
+    analyzer = analyzer or get_console_poc_analyzer()
     findings = analyzer.analyze(selected)
     return ReadableAnalysisResult(
         finding_count=len(findings),
