@@ -190,6 +190,26 @@ if __name__ == '__main__':
 
 @unittest.skipIf(TestClient is None, 'httpx is not installed')
 class RoutesAnalyzeHttpTests(unittest.TestCase):
+
+    def test_http_analyze_with_unsupported_backend_returns_400(self):
+        from app.api import routes_analyze
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        original_analyze_chunks = routes_analyze.analyze_chunks
+        client = TestClient(__import__('app.main', fromlist=['app']).app)
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'openai'
+            routes_analyze.analyze_chunks = lambda chunks: AnalysisResult(total_chunks=0, analyzed_chunks=0, finding_count=0, findings=[], skipped_chunks=[])
+            import io, zipfile
+            bio = io.BytesIO()
+            with zipfile.ZipFile(bio, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('src/app.js', 'const a = 1;')
+            res = client.post('/api/analyze', files={'file': ('a.zip', bio.getvalue(), 'application/zip')})
+            self.assertEqual(res.status_code, 400)
+            self.assertIn('Unsupported readable analysis backend', res.json().get('detail', ''))
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+            routes_analyze.analyze_chunks = original_analyze_chunks
+
     def test_http_analyze_success(self):
         original_backend = analysis_service.settings.ANALYZER_BACKEND
         client = TestClient(__import__('app.main', fromlist=['app']).app)

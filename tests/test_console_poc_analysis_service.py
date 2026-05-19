@@ -292,7 +292,11 @@ class ConsolePocAnalysisTests(unittest.TestCase):
             f('src/application.js', "fetch('/api/user/session')"),
         ])
         self.assertNotIn('app-bd3d900226fb938894f0.js', client.last_prompt)
+        self.assertNotIn('self.webpackChunkgatsby', client.last_prompt)
         self.assertIn('application.js', client.last_prompt)
+        self.assertIn('/api/user/session', client.last_prompt)
+        self.assertEqual(analyzer.last_debug.backend, 'gemini')
+        self.assertTrue(analyzer.last_debug.called)
         self.assertEqual(analyzer.last_debug.candidate_count, 1)
 
 
