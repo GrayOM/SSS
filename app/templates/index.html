@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Code Analyzer</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>ZIP 소스코드 취약점 분석</h1>
+    <form id="analyze-form">
+      <input id="zip-file" type="file" accept=".zip" required />
+      <button type="submit">분석 시작</button>
+      <button type="button" id="download-json">JSON 다운로드</button>
+    </form>
+    <p id="status"></p>
+    <section id="summary"></section>
+    <section id="findings"></section>
+    <pre id="result" class="hidden"></pre>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
