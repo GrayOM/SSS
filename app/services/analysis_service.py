@@ -54,7 +54,7 @@ def _has_dom_xss_flow(content: str) -> bool:
             continue
         if "innerhtml = ''" in low or 'innerhtml = ""' in low:
             continue
-        if re.search(r'innerhtml\s*=\s*['"][^'"]*['"]\s*;?', line, re.IGNORECASE):
+        if re.search(r"innerhtml\s*=\s*['\"][^'\"]*['\"]\s*;?", line, re.IGNORECASE):
             continue
         start = max(0, idx - 6)
         end = min(len(lines) - 1, idx + 6)

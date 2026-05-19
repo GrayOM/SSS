@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 from app.api.routes_analyze import analyze_zip
+from app.models.schemas import AnalysisResult, ReadableAnalysisResult, AiAnalysisDebug
 from app.api.routes_upload import upload_zip
 from app.services import analysis_service
 
@@ -46,6 +47,51 @@ class RoutesAnalyzeTests(unittest.TestCase):
             self.assertNotIn('GEMINI_API_KEY', result.model_dump_json())
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+
+    def test_analyze_with_openai_backend_returns_400(self):
+        from app.api import routes_analyze
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        original_analyze_chunks = routes_analyze.analyze_chunks
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'openai'
+            routes_analyze.analyze_chunks = lambda chunks: AnalysisResult(total_chunks=0, analyzed_chunks=0, finding_count=0, findings=[], skipped_chunks=[])
+            data = self._zip_bytes({'src/app.js': 'const a = 1;'})
+            with self.assertRaises(HTTPException) as cm:
+                asyncio.run(analyze_zip(self._upload('sample.zip', data)))
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertIn('Unsupported readable analysis backend', cm.exception.detail)
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+            routes_analyze.analyze_chunks = original_analyze_chunks
+
+    def test_analyze_with_gemini_backend_uses_gemini_analyzer_path(self):
+        from app.api import routes_analyze
+
+        class DummyGeminiAnalyzer:
+            def __init__(self, client):
+                self.last_debug = AiAnalysisDebug(backend='gemini', called=True, configured=True)
+
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        original_gemini_analyzer = routes_analyze.GeminiConsolePocAnalyzer
+        original_gemini_client = routes_analyze.GeminiClient
+        original_analyze_console = routes_analyze.analyze_console_exploitability
+        original_analyze_chunks = routes_analyze.analyze_chunks
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'gemini'
+            routes_analyze.GeminiConsolePocAnalyzer = DummyGeminiAnalyzer
+            routes_analyze.GeminiClient = lambda *args, **kwargs: object()
+            routes_analyze.analyze_chunks = lambda chunks: AnalysisResult(total_chunks=0, analyzed_chunks=0, finding_count=0, findings=[], skipped_chunks=[])
+            routes_analyze.analyze_console_exploitability = lambda files, analyzer: ReadableAnalysisResult(finding_count=0, findings=[], analyzed_focus=[])
+            data = self._zip_bytes({'src/app.js': 'const a = 1;'})
+            result = asyncio.run(analyze_zip(self._upload('sample.zip', data)))
+            self.assertEqual(result.analysis_debug.backend, 'gemini')
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+            routes_analyze.GeminiConsolePocAnalyzer = original_gemini_analyzer
+            routes_analyze.GeminiClient = original_gemini_client
+            routes_analyze.analyze_console_exploitability = original_analyze_console
+            routes_analyze.analyze_chunks = original_analyze_chunks
 
     def test_analyze_invalid_signature_returns_400(self):
         original_backend = analysis_service.settings.ANALYZER_BACKEND

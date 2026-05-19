@@ -37,12 +37,19 @@ async def analyze_zip(file: UploadFile = File(...)):
         except Exception as exc:
             raise HTTPException(status_code=502, detail='Analysis backend failed') from exc
         try:
-            readable_analyzer = (
-                MockConsolePocAnalyzer()
-                if settings.ANALYZER_BACKEND.lower() == 'mock'
-                else GeminiConsolePocAnalyzer(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
-            )
+            backend = settings.ANALYZER_BACKEND.lower()
+            if backend == 'mock':
+                readable_analyzer = MockConsolePocAnalyzer()
+            elif backend == 'gemini':
+                readable_analyzer = GeminiConsolePocAnalyzer(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f'Unsupported readable analysis backend: {settings.ANALYZER_BACKEND}',
+                )
             readable_result = analyze_console_exploitability(content_result.files, analyzer=readable_analyzer)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=502, detail='Readable analysis backend failed') from exc
         analysis_debug = getattr(readable_analyzer, 'last_debug', None)

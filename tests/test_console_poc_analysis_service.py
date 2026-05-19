@@ -276,6 +276,24 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIn('fetch hook installed', auth.console_poc.code or '')
 
+
+    def test_gemini_filters_build_artifact_from_prompt_but_keeps_application_js(self):
+        class FakeGeminiClient:
+            def __init__(self):
+                self.last_prompt = ''
+            def analyze(self, prompt: str) -> str:
+                self.last_prompt = prompt
+                return '{"findings":[]}'
+        client = FakeGeminiClient()
+        analyzer = GeminiConsolePocAnalyzer(client)
+        analyzer.analyze([
+            f('src/app-bd3d900226fb938894f0.js', "self.webpackChunkgatsby=[]; fetch('/api/user/session')"),
+            f('src/application.js', "fetch('/api/user/session')"),
+        ])
+        self.assertNotIn('app-bd3d900226fb938894f0.js', client.last_prompt)
+        self.assertIn('application.js', client.last_prompt)
+        self.assertEqual(analyzer.last_debug.candidate_count, 1)
+
     def test_gemini_missing_id_is_auto_generated(self):
         class FakeGeminiClient:
             def analyze(self, prompt: str) -> str:

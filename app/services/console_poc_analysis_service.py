@@ -775,7 +775,8 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
             ])
             item['id'] = hashlib.sha256(seed.encode()).hexdigest()[:12]
 
-        candidates = extract_api_call_candidates(files).candidates
+        safe_files = [f for f in files if not _is_build_or_third_party_path(f.path, f.content)]
+        candidates = extract_api_call_candidates(safe_files).candidates
         self.last_debug = AiAnalysisDebug(
             backend='gemini',
             model=getattr(self.client, 'model', None),
@@ -786,7 +787,7 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         self.last_debug.called = True
         self.last_debug.call_count += 1
         try:
-            raw_text = self.client.analyze(build_candidate_analysis_prompt(files, candidates))
+            raw_text = self.client.analyze(build_candidate_analysis_prompt(safe_files, candidates))
         except Exception as exc:
             self.last_debug.errors.append(f'call failed: {type(exc).__name__}')
             return []
