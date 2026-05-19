@@ -1,4 +1,5 @@
 import hashlib
+import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
@@ -7,8 +8,11 @@ from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.json_utils import extract_json_payload
 from app.services.prompt_builder import build_analysis_prompt
 
-DOM_XSS_SINK = 'innerHTML'
-DOM_XSS_SOURCES = ('location', 'document.URL', 'document.location', 'input.value')
+DOM_XSS_SOURCES = (
+    'location.hash', 'location.search', 'document.URL', 'document.location',
+    'input.value', 'URLSearchParams', 'event.data', 'window.name',
+)
+DOM_XSS_SINKS = ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write')
 EVAL_PATTERN = 'eval('
 COMMAND_EXEC_PATTERNS = (
     'child_process.exec',
@@ -20,6 +24,44 @@ COMMAND_EXEC_PATTERNS = (
 ALLOWED_SEVERITIES = {'low', 'medium', 'high', 'critical'}
 ALLOWED_CONFIDENCES = {'low', 'medium', 'high'}
 
+
+
+
+def _is_probable_build_artifact_path_or_content(path: str, content: str) -> bool:
+    path_l = path.lower()
+    name = path_l.rsplit('/', 1)[-1]
+    path_patterns = (
+        r'^(app|commons|framework|webpack-runtime|runtime|polyfill|polyfills|vendors?|component---.+)-[a-f0-9]{8,}\.js$',
+        r'^[0-9]+-[a-f0-9]{8,}\.js$',
+        r'^[a-f0-9]{8,}-[a-f0-9]{8,}\.js$',
+        r'^.+-[a-f0-9]{12,}\.js$',
+    )
+    if any(re.match(p, name) for p in path_patterns):
+        return True
+    if any(seg in path_l for seg in ('/vendor/', '/vendors/', '/node_modules/', '/lib/', '/plugins/')):
+        return True
+    head = content[:8192].lower()
+    return any(sig in head for sig in ('webpackchunk', '__webpack_require__', '.license.txt', 'sourcemappingurl'))
+
+
+def _has_dom_xss_flow(content: str) -> bool:
+    lines = content.splitlines() or ['']
+    for idx, line in enumerate(lines):
+        low = line.lower()
+        if not any(s.lower() in low for s in DOM_XSS_SINKS):
+            continue
+        if 'testelement.innerhtml' in low:
+            continue
+        if "innerhtml = ''" in low or 'innerhtml = ""' in low:
+            continue
+        if re.search(r'innerhtml\s*=\s*['"][^'"]*['"]\s*;?', line, re.IGNORECASE):
+            continue
+        start = max(0, idx - 6)
+        end = min(len(lines) - 1, idx + 6)
+        window = '\n'.join(lines[start:end + 1])
+        if any(src in window for src in DOM_XSS_SOURCES):
+            return True
+    return False
 
 class Analyzer(ABC):
     @abstractmethod
@@ -64,7 +106,7 @@ class MockAnalyzer(Analyzer):
         findings: list[VulnerabilityFinding] = []
         content = chunk.content
 
-        if DOM_XSS_SINK in content and any(x in content for x in DOM_XSS_SOURCES):
+        if not _is_probable_build_artifact_path_or_content(chunk.source_path, content) and _has_dom_xss_flow(content):
             findings.append(self._make_finding(
                 chunk, 'DOM XSS', 'high', 'medium', '외부 입력이 innerHTML sink로 전달될 가능성',
                 ['공격자가 외부 입력값을 조작한다.', '조작된 값이 DOM sink(innerHTML)에 전달된다.', '브라우저에서 스크립트가 실행될 수 있다.'],

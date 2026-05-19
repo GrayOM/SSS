@@ -53,6 +53,10 @@ async def analyze_zip(file: UploadFile = File(...)):
             analysis=to_safe_analysis_result(analysis_result),
             readable_analysis=readable_result,
             analysis_debug=analysis_debug,
+            analysis_notes=[
+                'analysis is legacy chunk analyzer output.',
+                'readable_analysis is console-oriented readable finding output.',
+            ],
         )
     finally:
         shutil.rmtree(workspace, ignore_errors=True)

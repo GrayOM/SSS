@@ -39,6 +39,8 @@ class RoutesAnalyzeTests(unittest.TestCase):
             self.assertIn('readable_analysis', body)
             self.assertIn('finding_count', body['readable_analysis'])
             self.assertIn('analysis_debug', body)
+            self.assertIn('analysis_notes', body)
+            self.assertIn('analysis is legacy chunk analyzer output.', body['analysis_notes'])
             self.assertEqual(body['analysis_debug']['backend'], 'mock')
             self.assertTrue(body['analysis_debug']['called'])
             self.assertNotIn('GEMINI_API_KEY', result.model_dump_json())

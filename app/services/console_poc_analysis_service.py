@@ -197,6 +197,26 @@ def _find_dom_xss_flow(content: str) -> tuple[int, int, str] | None:
     return None
 
 
+
+
+def _is_build_or_third_party_path(path: str, content: str = "") -> bool:
+    path_l = path.lower()
+    name = path_l.rsplit('/', 1)[-1]
+    if name in {'jquery-ui.js', 'jquery.fullpage.js', 'jquery.selectbox.js'}:
+        return True
+    if any(seg in path_l for seg in ('/vendor/', '/vendors/', '/node_modules/', '/lib/', '/libs/', '/plugins/')):
+        return True
+    patterns = (
+        r'^(app|commons|framework|webpack-runtime|runtime|polyfill|polyfills|vendors?|component---.+)-[a-f0-9]{8,}\.js$',
+        r'^[0-9]+-[a-f0-9]{8,}\.js$',
+        r'^[a-f0-9]{8,}-[a-f0-9]{8,}\.js$',
+        r'^.+-[a-f0-9]{12,}\.js$',
+    )
+    if any(re.match(p, name) for p in patterns):
+        return True
+    head = content[:8192].lower()
+    return any(sig in head for sig in ('webpackchunk', '__webpack_require__', '.license.txt', 'sourcemappingurl'))
+
 def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
     grouped: dict[tuple[str, str, tuple[str, ...], str], ReadableFinding] = {}
     for f in findings:
@@ -293,6 +313,8 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         missing_deps = detect_missing_dependencies(files)
         for f in files:
             c = f.content
+            if _is_build_or_third_party_path(f.path, c):
+                continue
             c_lower = c.lower()
             if (
                 any(x in c_lower for x in ('usertype', 'role', 'isadmin'))

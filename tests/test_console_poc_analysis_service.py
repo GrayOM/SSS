@@ -17,6 +17,21 @@ def f(path, content):
 
 
 class ConsolePocAnalysisTests(unittest.TestCase):
+
+    def test_build_artifact_dom_xss_not_generated(self):
+        files = [f('src/app-bd3d900226fb938894f0.js', 'self.webpackChunkgatsby=[]; el.innerHTML=location.hash;')]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(x.vulnerability_type == 'DOM XSS' for x in result.findings))
+
+    def test_build_artifact_api_candidate_not_generated(self):
+        files = [f('src/framework-481beeb6bc5ccc2a4757.js', "fetch('/api/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(x.vulnerability_type == 'Generic API Review Candidate' for x in result.findings))
+
+    def test_application_js_api_candidate_kept(self):
+        files = [f('src/application.js', "fetch('/api/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(x.vulnerability_type == 'Generic API Review Candidate' for x in result.findings))
     def test_auth_bypass_severity_navigate_only_is_low(self):
         self.assertEqual(_auth_bypass_severity("if (role==='ADMIN'){navigate('/admin')}"), 'low')
 

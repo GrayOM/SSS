@@ -211,6 +211,7 @@ class FullAnalysisResponse(BaseModel):
     analysis: AnalysisResult
     readable_analysis: ReadableAnalysisResult | None = None
     analysis_debug: AiAnalysisDebug | None = None
+    analysis_notes: list[str] = Field(default_factory=list)
 
 
 class ApiCallCandidate(BaseModel):

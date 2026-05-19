@@ -37,6 +37,20 @@ class AnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result.finding_count, 1)
         self.assertEqual(result.findings[0].vulnerability_type, 'DOM XSS')
 
+
+    def test_webpack_chunk_dom_xss_not_reported(self):
+        content = 'self.webpackChunkgatsby=[]; el.innerHTML = location.hash;'
+        result = analyze_chunks([_chunk(content)])
+        self.assertEqual(result.finding_count, 0)
+
+    def test_empty_innerhtml_not_reported(self):
+        result = analyze_chunks([_chunk('el.innerHTML = "";')])
+        self.assertEqual(result.finding_count, 0)
+
+    def test_static_innerhtml_not_reported(self):
+        result = analyze_chunks([_chunk("el.innerHTML = '<span>static</span>';" )])
+        self.assertEqual(result.finding_count, 0)
+
     def test_eval_pattern_creates_finding(self):
         result = analyze_chunks([_chunk('eval(userInput)')])
         self.assertEqual(result.finding_count, 1)

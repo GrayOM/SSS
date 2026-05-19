@@ -40,8 +40,21 @@ BUILD_ARTIFACT_REGEXES = (
     re.compile(r'^vendor\.[a-f0-9]{6,}\.js$'),
     re.compile(r'^vendors\.[a-f0-9]{6,}\.js$'),
     re.compile(r'^chunk-vendors\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^(app|commons|framework|webpack-runtime|runtime|polyfill|polyfills|vendors?|component---.+)-[a-f0-9]{8,}\.js$'),
+    re.compile(r'^[0-9]+-[a-f0-9]{8,}\.js$'),
+    re.compile(r'^[a-f0-9]{8,}-[a-f0-9]{8,}\.js$'),
+    re.compile(r'^.+-[a-f0-9]{12,}\.js$'),
 )
 
+BUILD_ARTIFACT_CONTENT_SIGNATURES = (
+    b'webpackChunk',
+    b'webpackJsonp',
+    b'__webpack_require__',
+    b'/*! For license information please see',
+    b'.LICENSE.txt',
+    b'sourceMappingURL=',
+    b'self.webpackChunk',
+)
 
 
 def _decision(include: bool, reason: str, reason_code: str, priority: int) -> InclusionDecision:
@@ -54,6 +67,16 @@ def _is_binary(file_path: Path) -> bool:
             return b'\x00' in f.read(4096)
     except OSError:
         return True
+
+
+
+def _is_build_artifact_by_content(file_path: Path) -> bool:
+    try:
+        with file_path.open('rb') as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    return any(sig in head for sig in BUILD_ARTIFACT_CONTENT_SIGNATURES)
 
 
 def should_include_file(file_path: Path) -> InclusionDecision:
@@ -76,8 +99,11 @@ def should_include_file(file_path: Path) -> InclusionDecision:
         rel_l = '/'.join(x.lower() for x in file_path.parts)
         if any(seg in rel_l for seg in ('/vendor/', '/vendors/', '/node_modules/', '/lib/', '/libs/', '/plugins/')):
             return _decision(False, 'third-party library directory', 'EXCLUDED_THIRD_PARTY_LIBRARY', 100)
-    if any(rx.match(name) for rx in BUILD_ARTIFACT_REGEXES):
-        return _decision(False, 'react build artifact', 'EXCLUDED_MINIFIED', 100)
+    if name.endswith('.js') and name not in APPLIKE_BASENAMES:
+        if any(rx.match(name) for rx in BUILD_ARTIFACT_REGEXES):
+            return _decision(False, 'build artifact', 'EXCLUDED_MINIFIED', 100)
+        if _is_build_artifact_by_content(file_path):
+            return _decision(False, 'webpack build artifact', 'EXCLUDED_MINIFIED', 100)
     rel = '/'.join(file_path.parts).lower()
     if '/static/js/' in rel and name.endswith('.js'):
         return _decision(False, 'react static build artifact', 'EXCLUDED_MINIFIED', 100)
