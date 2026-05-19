@@ -278,6 +278,34 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('fetch hook installed', auth.console_poc.code or '')
 
 
+
+    def test_gemini_analyzer_filters_build_artifact_files_from_prompt(self):
+        class FakeGeminiClient:
+            model = 'fake-gemini'
+
+            def __init__(self):
+                self.prompt = None
+
+            def analyze(self, prompt: str) -> str:
+                self.prompt = prompt
+                return '{"findings": []}'
+
+        files = [
+            f('src/app-bd3d900226fb938894f0.js', "self.webpackChunkgatsby=[]; fetch('/api/user/session')"),
+            f('src/application.js', "fetch('/api/user/session')"),
+        ]
+        fake_client = FakeGeminiClient()
+        analyzer = GeminiConsolePocAnalyzer(fake_client)
+        analyzer.analyze(files)
+
+        self.assertIsNotNone(fake_client.prompt)
+        self.assertNotIn('app-bd3d900226fb938894f0.js', fake_client.prompt)
+        self.assertNotIn('self.webpackChunkgatsby', fake_client.prompt)
+        self.assertIn('application.js', fake_client.prompt)
+        self.assertIn('/api/user/session', fake_client.prompt)
+        self.assertEqual(analyzer.last_debug.backend, 'gemini')
+        self.assertTrue(analyzer.last_debug.called)
+
     def test_gemini_filters_build_artifact_from_prompt_but_keeps_application_js(self):
         class FakeGeminiClient:
             def __init__(self):
