@@ -1,7 +1,7 @@
 import unittest
 
 from app.models.schemas import FileContent
-from app.services.api_candidate_extractor import extract_api_call_candidates
+from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 
 
 def fc(content: str):
@@ -9,6 +9,16 @@ def fc(content: str):
 
 
 class ApiCandidateExtractorTests(unittest.TestCase):
+    def test_extract_ui_handler_candidates(self):
+        content = """
+<button disabled={amount <= 0} onClick={handlePay}>Pay</button>
+<form onSubmit={handleVerify}></form>
+"""
+        handlers = extract_ui_handler_candidates([fc(content)])
+        self.assertTrue(any(h['ui_event'] == 'onClick' and h['handler_name'] == 'handlePay' for h in handlers))
+        self.assertTrue(any(h['ui_event'] == 'onSubmit' and h['handler_name'] == 'handleVerify' for h in handlers))
+        self.assertTrue(any(h['ui_event'] == 'disabled' and 'amount <=' in (h['disabled_expression'] or '') for h in handlers))
+
     def test_various_patterns(self):
         content = """
 axios.post('/api/test', { amount })

@@ -91,6 +91,7 @@ class VulnerabilityFinding(BaseModel):
     root_cause: str
     remediation: str
     related_cwe: list[str] = Field(default_factory=list)
+    verification_playbook: ConsoleVerificationPlaybook | None = None
 
 
 class AnalysisResult(BaseModel):
@@ -120,6 +121,25 @@ class ReadableEvidence(BaseModel):
     data_flow: list[str] = Field(default_factory=list)
 
 
+
+
+class BreakpointHint(BaseModel):
+    source_path: str
+    start_line: int
+    end_line: int
+    function_name: str | None = None
+    reason: str
+    watch_variables: list[str] = Field(default_factory=list)
+
+
+class ConsoleVerificationPlaybook(BaseModel):
+    strategy: str
+    breakpoints: list[BreakpointHint] = Field(default_factory=list)
+    console_steps: list[str] = Field(default_factory=list)
+    console_code: str | None = None
+    expected_observation: str
+    limitations: list[str] = Field(default_factory=list)
+
 class ReadableFinding(BaseModel):
     id: str
     title: str
@@ -136,6 +156,7 @@ class ReadableFinding(BaseModel):
     remediation: str
     verification_notes: list[str] = Field(default_factory=list)
     related_cwe: list[str] = Field(default_factory=list)
+    verification_playbook: ConsoleVerificationPlaybook | None = None
 
 
 class ReadableAnalysisResult(BaseModel):

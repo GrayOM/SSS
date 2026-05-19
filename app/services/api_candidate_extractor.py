@@ -229,3 +229,46 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                 candidates.append(ApiCallCandidate(source_path=file.path, method='UNKNOWN', endpoint='UNKNOWN', parameters=args[:20], start_line=start_line, end_line=end_line, snippet=snip, sink='function_call', confidence='low', notes=['wrapper/service function call requires implementation review', 'endpoint variable requires manual review']))
 
     return CandidateExtractionResult(total_candidates=len(candidates), candidates=candidates)
+
+
+def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
+    out: list[dict] = []
+    ev_re = re.compile(r'on(Click|Submit|Change)\s*=\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}')
+    dis_re = re.compile(r'disabled\s*=\s*\{([^}]+)\}')
+    fn_hint = re.compile(r'\b(handle(?:Payment|Submit|Order|Bid|Verify|Login|Signup|Charge|Purchase)[A-Za-z0-9_]*)\b')
+    for file in files:
+        lines = file.content.splitlines() or ['']
+        for i,line in enumerate(lines, start=1):
+            for m in ev_re.finditer(line):
+                out.append({
+                    'handler_name': m.group(2),
+                    'ui_event': f"on{m.group(1)}",
+                    'disabled_expression': None,
+                    'source_path': file.path,
+                    'start_line': i,
+                    'end_line': i,
+                    'snippet': line.strip(),
+                })
+            dm = dis_re.search(line)
+            if dm:
+                out.append({
+                    'handler_name': None,
+                    'ui_event': 'disabled',
+                    'disabled_expression': dm.group(1).strip(),
+                    'source_path': file.path,
+                    'start_line': i,
+                    'end_line': i,
+                    'snippet': line.strip(),
+                })
+            fm = fn_hint.search(line)
+            if fm:
+                out.append({
+                    'handler_name': fm.group(1),
+                    'ui_event': 'function_hint',
+                    'disabled_expression': None,
+                    'source_path': file.path,
+                    'start_line': i,
+                    'end_line': i,
+                    'snippet': line.strip(),
+                })
+    return out

@@ -3,9 +3,9 @@ import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
-from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, ConsoleSafePoc, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
+from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, BreakpointHint, ConsoleSafePoc, ConsoleVerificationPlaybook, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
-from app.services.api_candidate_extractor import extract_api_call_candidates
+from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 from app.services.json_utils import extract_json_payload
 from app.services.prompt_builder import build_candidate_analysis_prompt, build_console_poc_analysis_prompt
 
@@ -296,6 +296,74 @@ def _has_storage_auth_evidence(files: list[FileContent], primary_file: FileConte
     return bool(storage_read_re.search(combined) and auth_key_re.search(combined) and admin_branch_re.search(combined))
 
 
+def _build_disabled_console_code() -> str:
+    return """const candidates = [...document.querySelectorAll('button[disabled], input[disabled]')];
+console.table(candidates.map((el, i) => ({
+  index: i,
+  text: el.innerText || el.value,
+  disabled: el.disabled
+})));
+
+const target = candidates[0];
+if (target) {
+  target.disabled = false;
+  target.removeAttribute('disabled');
+  target.click();
+}
+"""
+
+
+def _build_fetch_hook_mutation_poc(endpoint: str) -> str:
+    return f"""(() => {{
+  const CONFIRM_AUTHORIZED_TEST = false;
+  if (!CONFIRM_AUTHORIZED_TEST) {{
+    throw new Error('승인된 테스트 환경에서만 true로 변경 후 실행하세요.');
+  }}
+  const originalFetch = window.fetch;
+  window.fetch = async function(input, init = {{}}) {{
+    const url = String(input);
+    if (url.includes('{endpoint}') && init?.body) {{
+      const payload = JSON.parse(init.body);
+      console.log('[PoC] original payload:', payload);
+      if ('amount' in payload) payload.amount = 1;
+      if ('status' in payload) payload.status = 'TEST_STATUS';
+      init.body = JSON.stringify(payload);
+      console.log('[PoC] modified payload:', payload);
+      debugger;
+    }}
+    return originalFetch.call(this, input, init);
+  }};
+  console.log('[PoC] hook installed. 정상 UI 버튼을 눌러 요청을 발생시키세요.');
+}})();"""
+
+
+def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, auth: bool = False, disabled: bool = False) -> ConsoleVerificationPlaybook:
+    if auth:
+        return ConsoleVerificationPlaybook(
+            strategy='auth_route_guard',
+            breakpoints=[BreakpointHint(source_path=f.path, start_line=1, end_line=max(1, len(f.content.splitlines())), reason='권한 조건문 분기 확인', watch_variables=['userInfo', 'user', 'role', 'userType', 'isAdmin'])],
+            console_steps=['권한 조건문 breakpoint 설정', '로그인 후 보호 페이지 접근', 'Scope에서 userType/role 확인', '클라이언트 분기만 막는지, API 서버 검증도 있는지 확인'],
+            expected_observation='권한 분기가 클라이언트에만 존재하는지 확인',
+        )
+    if disabled:
+        return ConsoleVerificationPlaybook(
+            strategy='disabled_button_bypass',
+            console_steps=['disabled 버튼 목록 확인', '대상 버튼 disabled 해제', '클릭 후 핸들러/요청 발생 여부 확인'],
+            console_code=_build_disabled_console_code(),
+            expected_observation='disabled 속성 제거만으로 요청이 발생하는지 확인',
+            limitations=['React/Vue state 기반 검증이 있으면 DOM disabled 제거만으로는 부족할 수 있음', 'handler 내부 validation return 지점 breakpoint 확인 필요'],
+        )
+    endpoint = (candidate.endpoint if candidate else '/api') or '/api'
+    watch = ['payload', 'amount', 'userId', 'orderId', 'status'] + ((candidate.parameters or []) if candidate else [])
+    return ConsoleVerificationPlaybook(
+        strategy='breakpoint_payload_mutation',
+        breakpoints=[BreakpointHint(source_path=f.path, start_line=(candidate.start_line if candidate else 1), end_line=(candidate.end_line if candidate else 1), reason='API 호출 직전 payload 변조 확인', watch_variables=sorted(set(watch)))],
+        console_steps=['DevTools Sources에서 breakpoint 설정', '정상 UI 버튼 클릭', 'Scope에서 payload 값 확인', '테스트 값으로 변경', 'Resume 후 서버 응답 확인'],
+        console_code=_build_fetch_hook_mutation_poc(endpoint if endpoint != 'UNKNOWN' else '/api'),
+        expected_observation='요청 직전 payload 변경이 전송 본문에 반영됨',
+    )
+
+
 class ConsolePocAnalyzer(ABC):
     @abstractmethod
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
@@ -311,11 +379,29 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
         findings: list[ReadableFinding] = []
         missing_deps = detect_missing_dependencies(files)
+        handler_candidates = extract_ui_handler_candidates(files)
         for f in files:
             c = f.content
             if _is_build_or_third_party_path(f.path, c):
                 continue
             c_lower = c.lower()
+            if any(h.get('source_path') == f.path and h.get('ui_event') == 'disabled' for h in handler_candidates):
+                findings.append(ReadableFinding(
+                    id=self._id(f.path + 'd'),
+                    title='비활성화 UI 우회 검증 필요',
+                    vulnerability_type='Client-side Validation Bypass',
+                    severity='low',
+                    confidence='low',
+                    affected_files=[f.path],
+                    summary='disabled UI 제한은 Console/DevTools에서 우회될 수 있어 추가 검증이 필요합니다.',
+                    evidence=[ReadableEvidence(source_path=f.path, start_line=1, end_line=min(20, len(c.splitlines()) or 1), snippet='\n'.join((c.splitlines() or [''])[:20]), reason='disabled UI 조건 탐지', data_flow=['source -> state/storage -> sink'])],
+                    attack_scenario=['disabled 속성 제거 후 클릭'],
+                    impact='클라이언트 단 제약 우회 가능성',
+                    root_cause='UI 속성 기반 제한',
+                    remediation='서버측 유효성/권한 검증 강제',
+                    verification_notes=['disabled 제거만으로 우회 가능한지 확인 필요'],
+                    verification_playbook=_build_playbook(f, disabled=True),
+                ))
             if (
                 any(x in c_lower for x in ('usertype', 'role', 'isadmin'))
                 and 'admin' in c_lower
@@ -549,6 +635,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             root_cause='클라이언트 상태 의존',
             remediation='서버 권한 검증 강제',
             verification_notes=verification_notes,
+            verification_playbook=_build_playbook(f, auth=True),
         )
 
     def _mk_dom_xss(self, f: FileContent) -> ReadableFinding | None:
@@ -734,6 +821,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             root_cause=classification['root_cause'],
             remediation=classification['remediation'],
             verification_notes=notes,
+            verification_playbook=_build_playbook(f, candidate=candidate),
         )
 
 

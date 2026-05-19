@@ -135,6 +135,9 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         flow = finding.evidence[0].data_flow
         self.assertTrue(any(x.startswith('parameter: amount') for x in flow))
         self.assertTrue(any(x.startswith('endpoint: /api/order') for x in flow))
+        self.assertIsNotNone(finding.verification_playbook)
+        self.assertIn('API 호출 직전', finding.verification_playbook.breakpoints[0].reason)
+        self.assertIn('amount', finding.verification_playbook.breakpoints[0].watch_variables)
 
     def test_dom_xss_requires_source_sink_flow(self):
         files = [f('src/x.js', "const testElement = document.createElement('div'); testElement.innerHTML = '';")]
@@ -393,6 +396,21 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         finding = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
         self.assertIn('CONFIRM_AUTHORIZED_TEST = false', finding.console_poc.code or '')
+        self.assertIsNotNone(finding.verification_playbook)
+
+    def test_disabled_button_only_generates_playbook_console_code(self):
+        files = [f('src/pay.js', "<button disabled={amount <= 0} onClick={handlePay}>Pay</button>")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        finding = [x for x in findings if x.verification_playbook and x.verification_playbook.strategy == 'disabled_button_bypass'][0]
+        self.assertIn('button[disabled]', finding.verification_playbook.console_code or '')
+
+    def test_auth_guard_playbook_contains_role_watch_variables(self):
+        files = [f('src/auth.js', "if (userInfo.userType !== 'ADMIN') { navigate('/'); }")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        auth = [x for x in findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
+        self.assertIsNotNone(auth.verification_playbook)
+        self.assertIn('userInfo', auth.verification_playbook.breakpoints[0].watch_variables)
+        self.assertIn('userType', auth.verification_playbook.breakpoints[0].watch_variables)
 
     def test_post_request_generates_guarded_poc(self):
         files = [f('src/post.js', "axios.post('/api/pay', { amount, orderId, userId })")]
