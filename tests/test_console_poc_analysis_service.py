@@ -4,7 +4,7 @@ from app.models.schemas import FileContent
 from app.services.console_poc_analysis_service import (
     GeminiConsolePocAnalyzer,
     MockConsolePocAnalyzer,
-    _build_fetch_hook_mutation_poc,
+    _build_network_hook_mutation_poc,
     _is_allowed_guarded_poc_code,
     _extract_endpoint,
     _auth_bypass_severity,
@@ -433,8 +433,27 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('code', all_watch)
 
     def test_fetch_hook_endpoint_is_escaped(self):
-        code = _build_fetch_hook_mutation_poc('/api/o"rder')
+        code = _build_network_hook_mutation_poc('/api/o"rder')
         self.assertIn('url.includes("/api/o\\"rder")', code)
+        self.assertIn('XMLHttpRequest.prototype.open', code)
+        self.assertIn('axios.interceptors.request.use', code)
+
+    def test_unrelated_validation_line_not_included(self):
+        pad = "\n".join([f"const x{i}=1;" for i in range(300)])
+        content = f"{pad}\nfunction handlePay(){{ axios.post('/api/pay', {{ amount }}); }}\n" + "\n".join([f"const y{i}=2;" for i in range(450)]) + "\nif (!code) return;\n"
+        files = [f('src/item.js', content)]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        pay = [x for x in findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
+        self.assertFalse(any(bp.reason == '클라이언트 검증 실패 분기 확인' and bp.start_line > 700 for bp in (pay.verification_playbook.breakpoints if pay.verification_playbook else [])))
+
+    def test_verify_code_watch_variables_are_narrow(self):
+        files = [f('src/verify.js', "function handleVerify(){ if (!code) return; axios.post('/verify-code', { code }); }")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        rec = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
+        all_watch = sorted({w for bp in rec.verification_playbook.breakpoints for w in bp.watch_variables})
+        self.assertIn('payload', all_watch)
+        self.assertIn('code', all_watch)
+        self.assertNotIn('amount', all_watch)
 
     def test_location_href_without_source_sink_flow_not_reported(self):
         files = [f('src/safe.js', 'const x = window.location.href; el.innerHTML = safeValue;')]

@@ -217,6 +217,12 @@ const productResponse = await axios.get('/api/product');
         self.assertEqual(cand.endpoint, 'UNKNOWN')
         self.assertIn('generic ajax wrapper requires callsite tracing', cand.notes)
 
+    def test_ajax_literal_url_type_extraction(self):
+        content = "$.ajax({ url: '/header/recommend_search.do', type: 'GET' })"
+        cand = extract_api_call_candidates([fc(content)]).candidates[0]
+        self.assertEqual(cand.endpoint, '/header/recommend_search.do')
+        self.assertEqual(cand.method, 'GET')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -314,7 +314,7 @@ if (target) {
 """
 
 
-def _build_fetch_hook_mutation_poc(endpoint: str) -> str:
+def _build_network_hook_mutation_poc(endpoint: str) -> str:
     endpoint_js = json.dumps(endpoint)
     return f"""(() => {{
   const CONFIRM_AUTHORIZED_TEST = false;
@@ -326,18 +326,71 @@ def _build_fetch_hook_mutation_poc(endpoint: str) -> str:
     const url = String(input);
     if (url.includes({endpoint_js}) && init?.body) {{
       const payload = JSON.parse(init.body);
-      console.log('[PoC] original payload:', payload);
       if ('amount' in payload) payload.amount = 1;
       if ('status' in payload) payload.status = 'TEST_STATUS';
       init.body = JSON.stringify(payload);
-      console.log('[PoC] modified payload:', payload);
       debugger;
     }}
     return originalFetch.call(this, input, init);
   }};
-  console.log('[PoC] hook installed. 정상 UI 버튼을 눌러 요청을 발생시키세요.');
+  const originalXHROpen = XMLHttpRequest.prototype.open;
+  const originalXHRSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url) {{
+    this.__poc_url = String(url || '');
+    return originalXHROpen.apply(this, arguments);
+  }};
+  XMLHttpRequest.prototype.send = function(body) {{
+    if ((this.__poc_url || '').includes({endpoint_js}) && body) {{
+      try {{
+        const payload = JSON.parse(body);
+        if ('amount' in payload) payload.amount = 1;
+        if ('status' in payload) payload.status = 'TEST_STATUS';
+        body = JSON.stringify(payload);
+        debugger;
+      }} catch (e) {{}}
+    }}
+    return originalXHRSend.call(this, body);
+  }};
+  if (window.axios && axios.interceptors && axios.interceptors.request) {{
+    axios.interceptors.request.use((config) => {{
+      if (String(config?.url || '').includes({endpoint_js}) && config?.data && typeof config.data === 'object') {{
+        if ('amount' in config.data) config.data.amount = 1;
+        if ('status' in config.data) config.data.status = 'TEST_STATUS';
+        debugger;
+      }}
+      return config;
+    }});
+  }}
+  console.log('[PoC] fetch/XHR/axios hook installed. 정상 UI 버튼을 눌러 요청을 발생시키세요.');
 }})();"""
 
+
+
+def _find_enclosing_function_block(content: str, line_number: int) -> tuple[str | None, int, int, str] | None:
+    lines = content.splitlines() or ['']
+    idx = max(1, min(line_number, len(lines))) - 1
+    start = max(0, idx - 120)
+    end = min(len(lines) - 1, idx + 120)
+    pats = [
+        re.compile(r'\basync\s+function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\('),
+        re.compile(r'\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\('),
+        re.compile(r'\bconst\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*async\s*\([^)]*\)\s*=>\s*\{'),
+        re.compile(r'\bconst\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\([^)]*\)\s*=>\s*\{'),
+    ]
+    for s in range(idx, start - 1, -1):
+        m = next((p.search(lines[s]) for p in pats if p.search(lines[s])), None)
+        if not m:
+            continue
+        depth = 0
+        opened = False
+        for e in range(s, end + 1):
+            depth += lines[e].count('{')
+            if lines[e].count('{') > 0:
+                opened = True
+            depth -= lines[e].count('}')
+            if opened and depth <= 0 and e >= idx:
+                return (m.group(1) if m.groups() else None, s + 1, e + 1, '\n'.join(lines[s:e + 1]))
+    return None
 
 def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, auth: bool = False, disabled: bool = False) -> ConsoleVerificationPlaybook:
     if auth:
@@ -356,23 +409,36 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
             limitations=['React/Vue state 기반 검증이 있으면 DOM disabled 제거만으로는 부족할 수 있음', 'handler 내부 validation return 지점 breakpoint 확인 필요'],
         )
     endpoint = (candidate.endpoint if candidate else '/api') or '/api'
-    watch = ['payload', 'amount', 'userId', 'orderId', 'status'] + ((candidate.parameters or []) if candidate else [])
-    breakpoints = _find_validation_return_breakpoints(f)
+    validation_bps = _find_validation_return_breakpoints(f, candidate)
+    vars_from_validation = {w for bp in validation_bps for w in bp.watch_variables}
+    vars_from_endpoint = set(re.findall(r'\{([^}]+)\}', (candidate.endpoint if candidate else '') or ''))
+    watch = ['payload'] + ((candidate.parameters or []) if candidate else []) + list(vars_from_validation) + list(vars_from_endpoint)
+    breakpoints = list(validation_bps)
     breakpoints.append(BreakpointHint(source_path=f.path, start_line=(candidate.start_line if candidate else 1), end_line=(candidate.end_line if candidate else 1), reason='API 호출 직전 payload 변조 확인', watch_variables=sorted(set(watch))))
     return ConsoleVerificationPlaybook(
         strategy='breakpoint_payload_mutation',
         breakpoints=breakpoints,
         console_steps=['DevTools Sources에서 breakpoint 설정', '정상 UI 버튼 클릭', 'Scope에서 payload 값 확인', '테스트 값으로 변경', 'Resume 후 서버 응답 확인'],
-        console_code=_build_fetch_hook_mutation_poc(endpoint if endpoint != 'UNKNOWN' else '/api'),
+        console_code=_build_network_hook_mutation_poc(endpoint if endpoint != 'UNKNOWN' else '/api'),
         expected_observation='요청 직전 payload 변경이 전송 본문에 반영됨',
     )
 
 
-def _find_validation_return_breakpoints(f: FileContent) -> list[BreakpointHint]:
+def _find_validation_return_breakpoints(f: FileContent, candidate: ApiCallCandidate | None = None) -> list[BreakpointHint]:
     keys = ('amount', 'price', 'status', 'userid', 'orderid', 'code', 'email', 'password', 'role', 'usertype')
     hints: list[BreakpointHint] = []
     lines = f.content.splitlines() or ['']
-    for idx, line in enumerate(lines, start=1):
+    if candidate is not None:
+        block = _find_enclosing_function_block(f.content, candidate.start_line)
+        if block:
+            _, begin, finish, _ = block
+        else:
+            begin = max(1, candidate.start_line - 80)
+            finish = min(len(lines), candidate.start_line + 80)
+    else:
+        begin, finish = 1, len(lines)
+    for idx in range(begin, finish + 1):
+        line = lines[idx - 1]
         low = line.lower()
         if not any(k in low for k in keys):
             continue
