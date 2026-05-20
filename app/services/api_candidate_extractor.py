@@ -124,6 +124,15 @@ def _extract_object_style_request(snip: str, sink: str) -> tuple[str, str]:
     return method, 'UNKNOWN'
 
 
+def _extract_payload_keys_nearby(lines: list[str], call_idx: int, var_name: str) -> list[str]:
+    start = max(0, call_idx - 40)
+    window = "\n".join(lines[start:call_idx + 1])
+    m = re.search(rf'(?:const|let|var)\s+{re.escape(var_name)}\s*=\s*\{{([^}}]+)\}}', window, re.DOTALL)
+    if not m:
+        return []
+    return sorted(set(k.group(1) for k in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,|$)', m.group(1))))
+
+
 def _extract_concat_endpoint(snip: str) -> tuple[str, list[str]] | None:
     m = re.search(r'\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*(["\'`])(.+?)\1', snip)
     if not m:
@@ -183,6 +192,10 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     if sink_name in ('$.ajax', 'jQuery.ajax'):
                         mm = re.search(r'(?:type|method)\s*:\s*["\']([A-Za-z]+)["\']', snip)
                         method = mm.group(1).upper() if mm else 'UNKNOWN'
+                        um2 = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip, re.DOTALL)
+                        if um2:
+                            endpoint, epnotes2 = _normalize_endpoint(um2.group(2))
+                            notes.extend(epnotes2)
                         if re.search(r'url\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\b', snip) and endpoint == 'UNKNOWN':
                             notes.append('generic ajax wrapper requires callsite tracing')
                     if sink == 'apiClient.request' or sink == 'request':
@@ -201,6 +214,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         if pv and method != 'GET' and pv.group(1).lower() not in {'undefined', 'null', 'expr'}:
                             params.append(pv.group(1))
                             notes.append('payload object requires manual review')
+                            params.extend(_extract_payload_keys_nearby(lines, i, pv.group(1)))
                     if method != 'GET':
                         near_start = max(0, i - 10)
                         near = '\n'.join(lines[near_start:i + 1])
@@ -210,6 +224,8 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     notes.extend(pnotes)
                     if method == 'UNKNOWN':
                         notes.append('method could not be determined')
+                    if endpoint != 'UNKNOWN':
+                        notes = [n for n in notes if n != 'endpoint variable requires manual review']
                     confidence = 'high' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' and params else ('medium' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' else 'low')
                     candidates.append(ApiCallCandidate(source_path=file.path, method=method, endpoint=endpoint, parameters=params, start_line=start_line, end_line=end_line, snippet=snip, sink=sink, confidence=confidence, notes=sorted(set(notes))))
                     line_has_api_candidate = True

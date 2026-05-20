@@ -239,7 +239,10 @@ def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
             method = next((x.replace('method: ', '') for x in flows if x.startswith('method: ')), '')
             sink = next((x.replace('sink: ', '') for x in flows if x.startswith('sink: ')), '')
             parameters = tuple(sorted([x.replace('parameter: ', '') for x in flows if x.startswith('parameter: ')]))
-        key = (f.vulnerability_type, method, endpoint, parameters, sink, f.root_cause)
+        disabled_marker = ''
+        if f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass':
+            disabled_marker = ','.join(sorted(f.affected_files))
+        key = (f.vulnerability_type, method, endpoint, parameters, sink, f.root_cause, disabled_marker)
         if key not in grouped:
             grouped[key] = f
             continue
@@ -401,8 +404,12 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
             expected_observation='권한 분기가 클라이언트에만 존재하는지 확인',
         )
     if disabled:
+        bps = []
+        if candidate is not None:
+            bps.append(BreakpointHint(source_path=f.path, start_line=candidate.start_line, end_line=candidate.end_line, reason='API 호출 직전 payload 변조 확인', watch_variables=['payload'] + (candidate.parameters or [])))
         return ConsoleVerificationPlaybook(
             strategy='disabled_button_bypass',
+            breakpoints=bps,
             console_steps=['disabled 버튼 목록 확인', '대상 버튼 disabled 해제', '클릭 후 핸들러/요청 발생 여부 확인'],
             console_code=_build_disabled_console_code(),
             expected_observation='disabled 속성 제거만으로 요청이 발생하는지 확인',
@@ -419,8 +426,9 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
         strategy='breakpoint_payload_mutation',
         breakpoints=breakpoints,
         console_steps=['DevTools Sources에서 breakpoint 설정', '정상 UI 버튼 클릭', 'Scope에서 payload 값 확인', '테스트 값으로 변경', 'Resume 후 서버 응답 확인'],
-        console_code=_build_network_hook_mutation_poc(endpoint if endpoint != 'UNKNOWN' else '/api'),
+        console_code=(_build_network_hook_mutation_poc(endpoint) if endpoint != 'UNKNOWN' else None),
         expected_observation='요청 직전 payload 변경이 전송 본문에 반영됨',
+        limitations=(['endpoint가 UNKNOWN이라 자동 hook 코드는 생성하지 않았습니다.'] if endpoint == 'UNKNOWN' else []),
     )
 
 
@@ -484,6 +492,9 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             has_ui_event_handler = any(h.get('ui_event') in {'onClick', 'onSubmit'} and h.get('handler_name') for h in file_handlers)
             file_api_candidates = [c for c in api_candidates_all if c.source_path == f.path]
             if has_disabled_expr and has_ui_event_handler and bool(file_api_candidates):
+                disabled_item = next((h for h in file_handlers if h.get('ui_event') == 'disabled' and h.get('disabled_expression')), None)
+                event_item = next((h for h in file_handlers if h.get('ui_event') in {'onClick', 'onSubmit'} and h.get('handler_name')), None)
+                endpoint_item = file_api_candidates[0]
                 findings.append(ReadableFinding(
                     id=self._id(f.path + 'd'),
                     title='비활성화 UI 우회 검증 필요',
@@ -492,13 +503,19 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                     confidence='low',
                     affected_files=[f.path],
                     summary='disabled UI 제한은 Console/DevTools에서 우회될 수 있어 추가 검증이 필요합니다.',
-                    evidence=[ReadableEvidence(source_path=f.path, start_line=1, end_line=min(20, len(c.splitlines()) or 1), snippet='\n'.join((c.splitlines() or [''])[:20]), reason='disabled UI 조건 탐지', data_flow=['source -> state/storage -> sink'])],
+                    evidence=[ReadableEvidence(source_path=f.path, start_line=1, end_line=min(20, len(c.splitlines()) or 1), snippet='\n'.join((c.splitlines() or [''])[:20]), reason='disabled UI 조건 탐지', data_flow=[
+                        'source -> state/storage -> sink',
+                        f"ui_event: {event_item.get('ui_event') if event_item else 'unknown'}",
+                        f"disabled_expression: {disabled_item.get('disabled_expression') if disabled_item else ''}",
+                        f"handler: {event_item.get('handler_name') if event_item else ''}",
+                        f"endpoint: {endpoint_item.endpoint}",
+                    ])],
                     attack_scenario=['disabled 속성 제거 후 클릭'],
                     impact='클라이언트 단 제약 우회 가능성',
                     root_cause='UI 속성 기반 제한',
                     remediation='서버측 유효성/권한 검증 강제',
                     verification_notes=['disabled 제거만으로 우회 가능한지 확인 필요'],
-                    verification_playbook=_build_playbook(f, disabled=True),
+                    verification_playbook=_build_playbook(f, candidate=endpoint_item, disabled=True),
                 ))
             if (
                 any(x in c_lower for x in ('usertype', 'role', 'isadmin'))
