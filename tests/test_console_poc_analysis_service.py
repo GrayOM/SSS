@@ -455,6 +455,17 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('code', all_watch)
         self.assertNotIn('amount', all_watch)
 
+    def test_disabled_findings_are_not_deduped_across_files(self):
+        files = [
+            f('src/fileA.js', "const handlePay=()=>{axios.post('/api/a',{ amount })}; <button disabled={amount <= 0} onClick={handlePay}>Pay</button>"),
+            f('src/fileB.js', "const handlePay=()=>{axios.post('/api/b',{ amount })}; <button disabled={amount <= 0} onClick={handlePay}>Pay</button>"),
+        ]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        disabled = [x for x in findings if x.verification_playbook and x.verification_playbook.strategy == 'disabled_button_bypass']
+        self.assertEqual(len(disabled), 2)
+        self.assertTrue(all(len(x.affected_files) == 1 for x in disabled))
+        self.assertEqual(sorted([x.affected_files[0] for x in disabled]), ['src/fileA.js', 'src/fileB.js'])
+
     def test_location_href_without_source_sink_flow_not_reported(self):
         files = [f('src/safe.js', 'const x = window.location.href; el.innerHTML = safeValue;')]
         findings = MockConsolePocAnalyzer().analyze(files)

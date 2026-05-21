@@ -216,6 +216,14 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                             notes.append('payload object requires manual review')
                             params.extend(_extract_payload_keys_nearby(lines, i, pv.group(1)))
                     if method != 'GET':
+                        payload_pos = re.search(r'\(\s*([\'"`]).+?\1\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,|\))', tail, re.DOTALL)
+                        if payload_pos:
+                            payload_var = payload_pos.group(2)
+                            if payload_var.lower() not in {'undefined', 'null', 'expr'}:
+                                params.append(payload_var)
+                                params.extend(_extract_payload_keys_nearby(lines, i, payload_var))
+                                notes.append('payload object requires manual review')
+                    if method != 'GET':
                         near_start = max(0, i - 10)
                         near = '\n'.join(lines[near_start:i + 1])
                         for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):

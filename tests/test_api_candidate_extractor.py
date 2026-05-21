@@ -223,6 +223,23 @@ const productResponse = await axios.get('/api/product');
         self.assertEqual(cand.endpoint, '/header/recommend_search.do')
         self.assertEqual(cand.method, 'GET')
 
+    def test_positional_payload_variable_keys_are_extracted(self):
+        content = """
+const payload = { code, email };
+axios.post(`${API_BASE}/verify-code`, payload);
+const payload2 = { amount, orderId };
+apiClient.post('/api/pay', payload2);
+"""
+        cands = extract_api_call_candidates([fc(content)]).candidates
+        verify = [c for c in cands if c.endpoint == '{API_BASE}/verify-code'][0]
+        self.assertIn('payload', verify.parameters)
+        self.assertIn('code', verify.parameters)
+        self.assertIn('email', verify.parameters)
+        pay = [c for c in cands if c.endpoint == '/api/pay'][0]
+        self.assertIn('payload2', pay.parameters)
+        self.assertIn('amount', pay.parameters)
+        self.assertIn('orderId', pay.parameters)
+
 
 if __name__ == '__main__':
     unittest.main()
