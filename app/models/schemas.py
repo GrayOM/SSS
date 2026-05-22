@@ -217,6 +217,9 @@ class ApiInventoryItem(BaseModel):
     start_line: int
     end_line: int
     ui_event_handler: str | None = None
+    ui_event_text: str | None = None
+    ui_event_type: str | None = None
+    interaction_confidence: str | None = None
     risk_category: str | None = None
 
 

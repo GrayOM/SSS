@@ -271,12 +271,14 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
         for i, line in enumerate(lines, start=1):
             title_m = title_re.search(line)
             title_text = title_m.group(1).strip() if title_m else None
+            tm_line = btn_text_re.search(line)
+            line_text = ((tm_line.group(1) or tm_line.group(2)).strip() if tm_line else None)
             for m in react_ev_re.finditer(line):
                 out.append({
                     'handler_name': m.group(2),
                     'ui_event': f"on{m.group(1)}",
                     'disabled_expression': None,
-                    'element_text': None,
+                    'element_text': line_text,
                     'nearby_title': title_text,
                     'source_path': file.path,
                     'start_line': i,
@@ -290,7 +292,7 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
                         'handler_name': handler,
                         'ui_event': 'onClick',
                         'disabled_expression': None,
-                        'element_text': None,
+                        'element_text': line_text,
                         'nearby_title': title_text,
                         'source_path': file.path,
                         'start_line': i,
@@ -303,7 +305,7 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
                     'handler_name': hm.group(1),
                     'ui_event': 'onClick',
                     'disabled_expression': None,
-                    'element_text': None,
+                    'element_text': line_text,
                     'nearby_title': title_text,
                     'source_path': file.path,
                     'start_line': i,

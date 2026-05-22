@@ -1338,8 +1338,33 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
 
     for f in findings:
         flow, method, endpoint, function_name = _flow_and_meta(f)
-        page_hint, action_hint, function_name = _infer_page_action_hints(flow[1], f.evidence[0].snippet if f.evidence else '', function_name=function_name or None)
-        page_hint, action_hint, _, _ = infer_interaction_context(flow[1], function_name or None, f.evidence[0].snippet if f.evidence else '', endpoint, method, [], '', None)
+        src = flow[1]
+        api_match = next((a for a in project_map.api_inventory if a.source_path == src and a.endpoint == endpoint and (not function_name or a.function_name == function_name)), None)
+        page_obj = next((p for p in project_map.pages if p.source_path == src), None)
+        ui_matches = [u.model_dump() for u in project_map.ui_events if u.source_path == src and (not function_name or u.handler_name == function_name)]
+        surrounding_block = ''
+        if f.evidence:
+            ff = next((x for x in selected if x.path == src), None)
+            if ff:
+                b = _find_enclosing_function_block(ff.content, f.evidence[0].start_line)
+                surrounding_block = b[3] if b else ''
+        fallback_page, fallback_action, function_name = _infer_page_action_hints(src, f.evidence[0].snippet if f.evidence else '', function_name=function_name or None)
+        page_hint, action_hint, _, _ = infer_interaction_context(
+            src,
+            function_name or None,
+            f.evidence[0].snippet if f.evidence else '',
+            endpoint,
+            method,
+            (api_match.parameters if api_match else []),
+            surrounding_block,
+            ui_matches or None,
+        )
+        if page_hint == '해당 기능 화면' and page_obj and page_obj.page_hint:
+            page_hint = page_obj.page_hint
+        if page_hint == '해당 기능 화면':
+            page_hint = fallback_page
+        if action_hint == '대상 기능 버튼 클릭':
+            action_hint = fallback_action
         is_low_conf = f.confidence == 'low'
         is_disabled_only = bool(f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass')
         is_unknown = endpoint == 'UNKNOWN'
@@ -1371,7 +1396,22 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         is_compressed = _is_compressed_or_library_evidence(f, function_name)
         score = 0
         score += 3 if function_name else -3
-        score += 3 if any(x.ui_event_handler == function_name and x.endpoint == endpoint and x.source_path == flow[1] for x in project_map.api_inventory) else 0
+        score_reasons: list[str] = []
+        score += 3 if function_name else -3
+        if function_name:
+            score_reasons.append('function_block')
+        if api_match and api_match.ui_event_handler:
+            score += 3
+            score_reasons.append('ui_event_connected')
+        if api_match and api_match.ui_event_text and action_hint != '대상 기능 버튼 클릭':
+            score += 2
+            score_reasons.append('ui_text_matches_action')
+        if api_match and api_match.risk_category:
+            score += 2
+            score_reasons.append(f'endpoint_category={api_match.risk_category}')
+        if api_match and any(p.lower() in {'amount', 'price', 'userid', 'orderid', 'status', 'code', 'email', 'password'} for p in (api_match.parameters or [])):
+            score += 2
+            score_reasons.append('sensitive_payload')
         score += 2 if action_hint != '대상 기능 버튼 클릭' else -2
         score += 1 if page_hint != '해당 기능 화면' else -2
         score += 2 if endpoint != 'UNKNOWN' else -2
@@ -1386,6 +1426,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
         if should_review:
+            f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'no_strong_signals'}")
             if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
                 f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
             if is_generic_action:
@@ -1400,6 +1441,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 f.verification_notes.append('일반 API 후보라 자동 검증 Playbook에서 제외하고 수동 검토 후보로 분류했습니다.')
             review_candidates.append(f)
         else:
+            f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'baseline'}")
             if flow not in seen_flow:
                 seen_flow.add(flow)
                 pb = ConsoleVerificationPlaybookSummary(

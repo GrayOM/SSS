@@ -64,6 +64,21 @@ def _risk_category(method: str, endpoint: str, params: list[str]) -> str | None:
     return None
 
 
+def _page_hint(route_paths: list[str], titles: list[str], component_name: str | None, source_path: str, risk_categories: list[str]) -> str | None:
+    base = ' '.join(route_paths + titles + [component_name or '', source_path]).lower()
+    if any(k in base for k in ('/payment', '/checkout', 'payment', 'checkout', 'order')) or 'payment' in risk_categories:
+        return '결제/주문 화면'
+    if any(k in base for k in ('/auction', '/bid', 'auction', 'bid')) or 'auction' in risk_categories:
+        return '경매/입찰 화면'
+    if any(k in base for k in ('/find-password', 'reset', 'verify', 'password')) or 'account_recovery' in risk_categories:
+        return '계정 복구/인증 화면'
+    if any(k in base for k in ('/wallet', '/point', '/charge', 'wallet', 'point')) or 'wallet_point' in risk_categories:
+        return '지갑/포인트 화면'
+    if any(k in base for k in ('/admin', 'dashboard', 'manage')) or 'authorization' in risk_categories:
+        return '관리자/관리 화면'
+    return None
+
+
 def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandingResult:
     framework = _detect_framework(files)
     ui_raw = extract_ui_handler_candidates(files)
@@ -72,6 +87,12 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
     routes: list[ProjectRoute] = []
     pages: list[ProjectPage] = []
     ui_events = [UiEventCandidate(**u) for u in ui_raw]
+
+    risk_by_file: dict[str, list[str]] = defaultdict(list)
+    for c in api:
+        r = _risk_category(c.method, c.endpoint, c.parameters)
+        if r:
+            risk_by_file[c.source_path].append(r)
 
     for f in files:
         lines = f.content.splitlines()
@@ -89,6 +110,7 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
                 comp = m.group(2) or m.group(3)
                 routes.append(ProjectRoute(path=path, component=comp, source_path=f.path, line=i))
                 pg.route_paths.append(path)
+        pg.page_hint = _page_hint(pg.route_paths, pg.title_texts, pg.component_name, f.path, risk_by_file.get(f.path, []))
         pages.append(pg)
 
     inv: list[ApiInventoryItem] = []
@@ -98,10 +120,15 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
         if src:
             blk = _find_enclosing_function_block(src.content, c.start_line)
             fn = blk[0] if blk else None
-        ui_handler = fn if any(u.get('handler_name') == fn and u.get('source_path') == c.source_path for u in ui_raw) else None
+        linked = [u for u in ui_raw if u.get('source_path') == c.source_path and (u.get('handler_name') == fn or abs(u.get('start_line', 0) - c.start_line) <= 8)]
+        ui_handler = linked[0].get('handler_name') if linked and linked[0].get('handler_name') else (fn if any(u.get('handler_name') == fn and u.get('source_path') == c.source_path for u in ui_raw) else None)
+        ui_event_text = next((u.get('element_text') for u in linked if u.get('element_text')), None)
+        ui_event_type = next((u.get('ui_event') for u in linked if u.get('ui_event') not in {'function_hint', 'element_text'}), None)
+        interaction_confidence = 'high' if (ui_handler and ui_event_type) else ('medium' if ui_handler else 'low')
         inv.append(ApiInventoryItem(
             source_path=c.source_path, function_name=fn, method=c.method, endpoint=c.endpoint, sink=c.sink,
             parameters=c.parameters, start_line=c.start_line, end_line=c.end_line, ui_event_handler=ui_handler,
+            ui_event_text=ui_event_text, ui_event_type=ui_event_type, interaction_confidence=interaction_confidence,
             risk_category=_risk_category(c.method, c.endpoint, c.parameters)
         ))
 
