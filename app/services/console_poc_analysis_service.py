@@ -379,6 +379,18 @@ def _build_network_hook_mutation_poc(endpoint: str) -> str:
         console.warn('[SSS PoC] invalid capture index');
         return null;
       }}
+      if (item.transport === 'axios') {{
+        if (window.axios && typeof axios === 'function') {{
+          const cfg = Object.assign({{}}, item.config || {{}}, overrides || {{}});
+          return axios(cfg);
+        }}
+        console.warn('[SSS PoC] axios replay unavailable: axios 인스턴스를 찾지 못했습니다.');
+        return null;
+      }}
+      if (item.transport === 'xhr') {{
+        console.warn('[SSS PoC] xhr replay는 수동 검증을 사용하세요.');
+        return null;
+      }}
       const init = Object.assign({{}}, item.init || {{}}, overrides || {{}});
       const resp = await originalFetch(item.url, init);
       await logCapturedResponse(resp);
@@ -403,7 +415,7 @@ def _build_network_hook_mutation_poc(endpoint: str) -> str:
         if ('status' in parsed) parsed.status = 'TEST_STATUS';
         init.body = JSON.stringify(parsed);
       }}
-      captured.push({{ method, url, init }});
+      captured.push({{ transport: 'fetch', method, url, init, body: init?.body || null, parsedPayload: parsed }});
       console.group('[SSS PoC] request captured');
       console.log('url:', url);
       console.log('method:', method);
@@ -418,18 +430,28 @@ def _build_network_hook_mutation_poc(endpoint: str) -> str:
   const originalXHROpen = XMLHttpRequest.prototype.open;
   const originalXHRSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function(method, url) {{
+    this.__poc_method = String(method || 'GET').toUpperCase();
     this.__poc_url = String(url || '');
     return originalXHROpen.apply(this, arguments);
   }};
   XMLHttpRequest.prototype.send = function(body) {{
-    if ((this.__poc_url || '').includes({endpoint_js}) && body) {{
-      try {{
-        const payload = JSON.parse(body);
-        if ('amount' in payload) payload.amount = 1;
-        if ('status' in payload) payload.status = 'TEST_STATUS';
-        body = JSON.stringify(payload);
-        debugger;
-      }} catch (e) {{}}
+    if ((this.__poc_url || '').includes(TARGET_ENDPOINT)) {{
+      let parsed = null;
+      if (body) {{
+        try {{ parsed = JSON.parse(body); }} catch (e) {{}}
+      }}
+      captured.push({{
+        transport: 'xhr',
+        method: this.__poc_method || 'GET',
+        url: this.__poc_url || '',
+        body: body || null,
+        parsedPayload: parsed
+      }});
+      if (SSS_POC_STATE.mutationArmed && !BLOCKED_REPLAY && parsed) {{
+        if ('amount' in parsed) parsed.amount = 1;
+        if ('status' in parsed) parsed.status = 'TEST_STATUS';
+        body = JSON.stringify(parsed);
+      }}
     }}
     return originalXHRSend.call(this, body);
   }};
@@ -440,7 +462,7 @@ def _build_network_hook_mutation_poc(endpoint: str) -> str:
           if ('amount' in config.data) config.data.amount = 1;
           if ('status' in config.data) config.data.status = 'TEST_STATUS';
         }}
-        captured.push({{ method: String(config?.method || 'GET').toUpperCase(), url: String(config?.url || ''), init: config }});
+        captured.push({{ transport: 'axios', method: String(config?.method || 'GET').toUpperCase(), url: String(config?.url || ''), config }});
       }}
       return config;
     }});
@@ -929,18 +951,20 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         elif method == 'GET' and not important_get:
             return None
         elif method in {'POST', 'PUT', 'PATCH'}:
-            if endpoint != 'UNKNOWN' and not endpoint.startswith('TEST_VALUE') and not self._is_irreversible_or_high_risk(method, endpoint, parameters):
+            if endpoint != 'UNKNOWN':
                 poc_type = 'browser_console'
                 poc_code = self._build_guarded_mutation_poc(method, endpoint, parameters)
                 conf = 'medium'
-                notes.append('Guarded PoC: CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됩니다.')
+                notes.append('변조 검증은 window.SSS_POC.armMutation() 실행 후 진행하세요.')
                 safety = '기본값 false guard로 즉시 실행되지 않으며, 승인된 테스트 계정/테스트 데이터에서만 실행해야 한다.'
                 if self._is_base_variable_endpoint(endpoint):
                     notes.append('API_BASE 값을 실제 대상 URL로 변경해야 합니다.')
-            else:
-                notes.append('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.')
         elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):
-            notes.append('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.')
+            if endpoint != 'UNKNOWN':
+                poc_type = 'browser_console'
+                poc_code = _build_network_hook_mutation_poc(endpoint)
+                conf = 'medium'
+            notes.append('고위험 요청은 replay/mutation이 차단되며 observe mode만 제공됩니다.')
 
         classification = self._classify_api_candidate(candidate)
         return ReadableFinding(
@@ -954,11 +978,11 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             evidence=ev,
             console_poc=ConsoleSafePoc(
                 poc_type=poc_type,
-                description=('승인된 테스트 환경에서 실행 가능한 Guarded PoC' if method in {'POST', 'PUT', 'PATCH'} and poc_code else 'payload 점검 및 비파괴 확인'),
-                preconditions=(['승인된 테스트 계정', '테스트 데이터 또는 테스트 주문', 'CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됨'] if method in {'POST', 'PUT', 'PATCH'} and poc_code else ['요청 전 payload 확인']),
-                steps=(['Console에 PoC 입력', 'CONFIRM_AUTHORIZED_TEST를 true로 변경', '응답 status/body 확인'] if method in {'POST', 'PUT', 'PATCH'} and poc_code else ['개발자도구 점검']),
+                description='브라우저 Console에 붙여넣으면 실제 UI에서 발생하는 fetch/XHR/axios 요청을 관찰하고, 승인된 테스트 환경에서 payload 변조 검증을 수행할 수 있는 PoC입니다.',
+                preconditions=['승인된 테스트 계정', '테스트 데이터 또는 테스트 주문', 'Console에서 [SSS PoC] 설치 완료 로그 확인', '변조 검증 전 window.SSS_POC.armMutation()을 명시적으로 실행'],
+                steps=['Console에 코드 전체 붙여넣기', '[SSS PoC] 설치 완료 로그 확인', '정상 UI에서 대상 기능 버튼 클릭', 'window.SSS_POC.list()로 캡처 요청 확인', '필요 시 window.SSS_POC.armMutation() 실행', '다시 버튼 클릭 후 payload 변조/응답 확인', 'window.SSS_POC.disarm()으로 종료'],
                 code=poc_code,
-                expected_result=('서버가 조작된 payload를 허용하는지 status/body로 확인' if method in {'POST', 'PUT', 'PATCH'} and poc_code else '변조 가능성 확인'),
+                expected_result='요청 캡처 로그 및 응답 정보를 통해 검증 포인트를 확인하고, armMutation 후 재실행 시 payload 변조 적용 여부를 확인',
                 safety=safety,
             ),
             attack_scenario=['파라미터 조작'],

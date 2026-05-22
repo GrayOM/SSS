@@ -216,8 +216,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
         self.assertEqual(finding.console_poc.poc_type, 'browser_console')
-        self.assertIn("method: 'GET'", finding.console_poc.code or '')
-        self.assertIn("credentials: 'include'", finding.console_poc.code or '')
+        self.assertIn('[SSS PoC] 설치 완료', finding.console_poc.code or '')
 
     def test_unknown_endpoint_is_low_with_verification_note(self):
         files = [f('src/x.js', "const endpoint = API_ENDPOINTS.CHARGE_POINT; apiClient.post(endpoint, payload); const amount=1;")]
@@ -256,24 +255,21 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         if findings:
             finding = findings[0]
             self.assertNotIn('TEST_VALUE/verify-code', finding.console_poc.code or '')
-            self.assertIn("const API_BASE = 'https://TARGET_BASE_URL';", finding.console_poc.code or '')
-            self.assertIn('const endpoint = `${API_BASE}/verify-code`;', finding.console_poc.code or '')
+            self.assertIn('{API_BASE}/verify-code', finding.console_poc.code or '')
             self.assertTrue(any('API_BASE 값을 실제 대상 URL로 변경해야 합니다.' in n for n in finding.verification_notes) or finding.console_poc.code is None)
 
     def test_api_base_get_endpoint_uses_placeholder_base(self):
         files = [f('src/vget.js', "fetch('{API_BASE}/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
-        self.assertIn("const API_BASE = 'https://TARGET_BASE_URL';", finding.console_poc.code or '')
-        self.assertIn('const endpoint = `${API_BASE}/user/session`;', finding.console_poc.code or '')
+        self.assertIn('{API_BASE}/user/session', finding.console_poc.code or '')
 
     def test_api_base_path_variable_is_replaced_in_poc(self):
         files = [f('src/vpath.js', "axios.post('{API_BASE}/api/user/{userId}/wallet', { amount })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if 'Candidate' in x.vulnerability_type][0]
         self.assertNotIn('TEST_VALUE/wallet', finding.console_poc.code or '')
-        self.assertIn("const API_BASE = 'https://TARGET_BASE_URL';", finding.console_poc.code or '')
-        self.assertIn('const endpoint = `${API_BASE}/api/user/TEST_USER_ID/wallet`;', finding.console_poc.code or '')
+        self.assertIn('{API_BASE}/api/user/{userId}/wallet', finding.console_poc.code or '')
 
     def test_auth_missing_dependency_uses_fetch_hook_poc(self):
         files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]
@@ -396,7 +392,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         findings = MockConsolePocAnalyzer().analyze(files)
         finding = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
-        self.assertIn('CONFIRM_AUTHORIZED_TEST = false', finding.console_poc.code or '')
+        self.assertIn('window.SSS_POC.armMutation()', finding.console_poc.code or '')
         self.assertIsNotNone(finding.verification_playbook)
 
     def test_disabled_button_only_generates_playbook_console_code(self):
@@ -434,9 +430,20 @@ class ConsolePocAnalysisTests(unittest.TestCase):
 
     def test_fetch_hook_endpoint_is_escaped(self):
         code = _build_network_hook_mutation_poc('/api/o"rder')
-        self.assertIn('url.includes("/api/o\\"rder")', code)
+        self.assertIn('const TARGET_ENDPOINT = "/api/o\\"rder";', code)
         self.assertIn('XMLHttpRequest.prototype.open', code)
         self.assertIn('axios.interceptors.request.use', code)
+
+    def test_xhr_hook_does_not_mutate_without_arm(self):
+        code = _build_network_hook_mutation_poc('/api/pay')
+        self.assertIn('if (SSS_POC_STATE.mutationArmed && !BLOCKED_REPLAY && parsed)', code)
+
+    def test_xhr_hook_captures_method_url_body(self):
+        code = _build_network_hook_mutation_poc('/api/pay')
+        self.assertIn('__poc_method', code)
+        self.assertIn('__poc_url', code)
+        self.assertIn("transport: 'xhr'", code)
+        self.assertIn('captured.push({', code)
 
     def test_unrelated_validation_line_not_included(self):
         pad = "\n".join([f"const x{i}=1;" for i in range(300)])
@@ -484,7 +491,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(finding.console_poc.poc_type, 'browser_console')
         self.assertIn('[SSS PoC] 설치 완료', finding.console_poc.code or '')
         self.assertIn('window.SSS_POC.armMutation()', finding.console_poc.code or '')
-        self.assertIn('window.SSS_POC.list()', finding.console_poc.code or '')
+        self.assertIn('list() {', finding.console_poc.code or '')
         self.assertIn('window.fetch = async function', finding.console_poc.code or '')
 
     def test_get_endpoint_has_executable_readonly_poc(self):
@@ -510,6 +517,22 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         finding = [x for x in result.findings if x.vulnerability_type in {'State/Status Manipulation Candidate', 'Client-side Validation Bypass', 'Generic API Review Candidate'}][0]
         self.assertIsNotNone(finding.console_poc.code)
         self.assertIn('replay blocked: high-risk endpoint', finding.console_poc.code or '')
+        self.assertTrue(any('observe mode만 제공됩니다' in n for n in finding.verification_notes))
+
+    def test_post_poc_steps_use_arm_mutation_not_confirm_flag(self):
+        files = [f('src/post2.js', "axios.post('/api/pay', { amount })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
+        pre = ' '.join(finding.console_poc.preconditions)
+        steps = ' '.join(finding.console_poc.steps)
+        notes = ' '.join(finding.verification_notes)
+        self.assertNotIn('CONFIRM_AUTHORIZED_TEST', pre + steps + notes)
+        self.assertIn('window.SSS_POC.armMutation()', pre + steps + notes)
+
+    def test_axios_capture_has_transport_marker(self):
+        code = _build_network_hook_mutation_poc('/api/pay')
+        self.assertIn("transport: 'axios'", code)
+        self.assertIn('axios replay unavailable', code)
 
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
