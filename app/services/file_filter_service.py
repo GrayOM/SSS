@@ -1,0 +1,130 @@
+import re
+from pathlib import Path
+
+from app.core.config import settings
+from app.models.schemas import InclusionDecision
+
+# priority: 1=source, 2=config/data, 3=markup/template
+PRIORITY_SOURCE = 1
+PRIORITY_CONFIG = 2
+PRIORITY_TEMPLATE = 3
+
+SOURCE_EXTENSIONS = {'.js', '.ts', '.jsx', '.tsx', '.vue', '.mjs', '.cjs'}
+TEMPLATE_EXTENSIONS = {'.html', '.htm', '.ejs', '.hbs', '.pug', '.jsp', '.do', '.php', '.asp', '.aspx'}
+CONFIG_EXTENSIONS = {'.json'}
+INCLUDE_FILENAMES = {'package.json', 'dockerfile', 'docker-compose.yml', 'docker-compose.yaml'}
+ALLOWED_ENV_FILES = {'.env.example', '.env.sample'}
+CONFIG_FILENAMES = {
+    'config.js',
+    'config.json',
+    'app.config.js',
+    'vite.config.js',
+    'webpack.config.js',
+    'next.config.js',
+    'nuxt.config.js',
+}
+EXCLUDED_DIRS = {'node_modules', 'vendor', 'dist', 'build', 'coverage', '.git', '__pycache__', 'libs', 'cdn'}
+EXCLUDED_PATTERNS = ('.min.js', '.bundle.js', '.chunk.js', 'bundle.js')
+THIRD_PARTY_LIBRARY_PATTERNS = (
+    re.compile(r'^jquery-ui\.js$', re.IGNORECASE),
+    re.compile(r'^jquery\.fullpage\.js$', re.IGNORECASE),
+    re.compile(r'^jquery\.selectbox\.js$', re.IGNORECASE),
+    re.compile(r'^jquery\.[^.]+\.js$', re.IGNORECASE),
+    re.compile(r'^(bootstrap|lodash|underscore|moment|slick|swiper|chart|d3)\.js$', re.IGNORECASE),
+)
+APPLIKE_BASENAMES = {'application.js', 'common.js', 'main.js'}
+
+BUILD_ARTIFACT_REGEXES = (
+    re.compile(r'^main\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^runtime-main\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^vendor\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^vendors\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^chunk-vendors\.[a-f0-9]{6,}\.js$'),
+    re.compile(r'^(app|commons|framework|webpack-runtime|runtime|polyfill|polyfills|vendors?|component---.+)-[a-f0-9]{8,}\.js$'),
+    re.compile(r'^[0-9]+-[a-f0-9]{8,}\.js$'),
+    re.compile(r'^[a-f0-9]{8,}-[a-f0-9]{8,}\.js$'),
+    re.compile(r'^.+-[a-f0-9]{12,}\.js$'),
+)
+
+BUILD_ARTIFACT_CONTENT_SIGNATURES = (
+    b'webpackChunk',
+    b'webpackJsonp',
+    b'__webpack_require__',
+    b'/*! For license information please see',
+    b'.LICENSE.txt',
+    b'sourceMappingURL=',
+    b'self.webpackChunk',
+)
+
+
+def _decision(include: bool, reason: str, reason_code: str, priority: int) -> InclusionDecision:
+    return InclusionDecision(include=include, reason=reason, reason_code=reason_code, priority=priority)
+
+
+def _is_binary(file_path: Path) -> bool:
+    try:
+        with file_path.open('rb') as f:
+            return b'\x00' in f.read(4096)
+    except OSError:
+        return True
+
+
+
+def _is_build_artifact_by_content(file_path: Path) -> bool:
+    try:
+        with file_path.open('rb') as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    return any(sig in head for sig in BUILD_ARTIFACT_CONTENT_SIGNATURES)
+
+
+def should_include_file(file_path: Path) -> InclusionDecision:
+    parts = {p.lower() for p in file_path.parts}
+    name = file_path.name.lower()
+
+    if parts & EXCLUDED_DIRS:
+        return _decision(False, 'excluded directory', 'EXCLUDED_DIR', 100)
+    if not file_path.is_file():
+        return _decision(False, 'not a regular file', 'EXCLUDED_EXTENSION', 100)
+    if file_path.stat().st_size > settings.MAX_FILE_SIZE_BYTES:
+        return _decision(False, 'file too large', 'EXCLUDED_TOO_LARGE', 100)
+    if _is_binary(file_path):
+        return _decision(False, 'binary file', 'EXCLUDED_BINARY', 100)
+    if any(p in name for p in EXCLUDED_PATTERNS):
+        return _decision(False, 'minified/build artifact', 'EXCLUDED_MINIFIED', 100)
+    if name.endswith('.js') and name not in APPLIKE_BASENAMES:
+        if any(rx.match(name) for rx in THIRD_PARTY_LIBRARY_PATTERNS):
+            return _decision(False, 'third-party library', 'EXCLUDED_THIRD_PARTY_LIBRARY', 100)
+        rel_l = '/'.join(x.lower() for x in file_path.parts)
+        if any(seg in rel_l for seg in ('/vendor/', '/vendors/', '/node_modules/', '/lib/', '/libs/', '/plugins/')):
+            return _decision(False, 'third-party library directory', 'EXCLUDED_THIRD_PARTY_LIBRARY', 100)
+    if name.endswith('.js') and name not in APPLIKE_BASENAMES:
+        if any(rx.match(name) for rx in BUILD_ARTIFACT_REGEXES):
+            return _decision(False, 'build artifact', 'EXCLUDED_MINIFIED', 100)
+        if _is_build_artifact_by_content(file_path):
+            return _decision(False, 'webpack build artifact', 'EXCLUDED_MINIFIED', 100)
+    rel = '/'.join(file_path.parts).lower()
+    if '/static/js/' in rel and name.endswith('.js'):
+        return _decision(False, 'react static build artifact', 'EXCLUDED_MINIFIED', 100)
+    if name.endswith('.license.txt') or name.endswith('.map'):
+        return _decision(False, 'build metadata artifact', 'EXCLUDED_MINIFIED', 100)
+
+    if name in ALLOWED_ENV_FILES:
+        return _decision(True, 'allowed env sample', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if name.endswith('.env'):
+        return _decision(False, 'real env excluded', 'EXCLUDED_EXTENSION', 100)
+
+    ext = file_path.suffix.lower()
+    if name in INCLUDE_FILENAMES:
+        return _decision(True, 'key filename', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if name in CONFIG_FILENAMES:
+        return _decision(True, 'config allowlist', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if ext in CONFIG_EXTENSIONS:
+        return _decision(True, 'data/config file', 'INCLUDED_CONFIG', PRIORITY_CONFIG)
+    if ext in SOURCE_EXTENSIONS:
+        return _decision(True, 'source file', 'INCLUDED_SOURCE', PRIORITY_SOURCE)
+    if ext in TEMPLATE_EXTENSIONS:
+        return _decision(True, 'template file', 'INCLUDED_TEMPLATE', PRIORITY_TEMPLATE)
+
+    return _decision(False, 'extension not allowed', 'EXCLUDED_EXTENSION', 100)
