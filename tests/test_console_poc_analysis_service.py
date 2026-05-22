@@ -548,24 +548,34 @@ class ConsolePocAnalysisTests(unittest.TestCase):
     def test_direct_axios_delete_still_rejected(self):
         self.assertFalse(_is_allowed_guarded_poc_code("axios.delete('/api/user/1')"))
 
-    def test_analysis_result_has_split_sections_and_unknown_goes_review(self):
+    def test_unknown_endpoint_goes_review_not_playbook(self):
+        files = [f('src/a.js', "const endpoint = API_ENDPOINTS.X; const amount = 1; apiClient.post(endpoint, { amount });")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        self.assertTrue(len(result.review_candidates) >= 1)
+
+    def test_disabled_loading_is_review_candidate_not_playbook(self):
         files = [f('src/a.js', "<button disabled={loading}>Pay</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        self.assertIsInstance(result.executive_findings, list)
-        self.assertIsInstance(result.verification_playbooks, list)
-        self.assertIsInstance(result.review_candidates, list)
-        self.assertTrue(len(result.review_candidates) >= 0)
+        self.assertEqual(len(result.verification_playbooks), 0)
 
     def test_page_and_action_hints_in_playbook(self):
         files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/123/complete-payment',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        self.assertTrue(any(p.page_hint == '결제 화면' for p in result.verification_playbooks))
-        self.assertTrue(any(p.user_action_hint == '결제/결제완료 버튼 클릭' for p in result.verification_playbooks))
+        p = result.verification_playbooks[0]
+        self.assertEqual(p.page_hint, '결제 화면')
+        self.assertEqual(p.user_action_hint, '결제/결제완료 버튼 클릭')
+        self.assertEqual(p.function_name, 'handlePayment')
+        self.assertIn('검증 화면', p.console_code or '')
+        self.assertIn('사용자 동작', p.console_code or '')
+        self.assertIn('대상 API', p.console_code or '')
 
     def test_playbook_contains_proof_and_criteria(self):
         files = [f('src/FindPassword.js', "function handleVerify(){axios.post('/verify-code',{code})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = result.verification_playbooks[0]
+        self.assertEqual(p.page_hint, '비밀번호 찾기/계정 복구 화면')
+        self.assertEqual(p.user_action_hint, '인증번호 확인 버튼 클릭')
         self.assertTrue(len(p.proof_steps) > 0)
         self.assertTrue(len(p.success_criteria) > 0)
         self.assertTrue(len(p.failure_criteria) > 0)
@@ -581,6 +591,23 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('list()', code)
         self.assertIn('enable(index)', code)
         self.assertIn('click(index)', code)
+
+    def test_load_dashboard_get_goes_review_candidate(self):
+        files = [f('src/AdminMypage.js', "function loadDashboardData(){fetch('/api/user/session')}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        self.assertTrue(len(result.review_candidates) >= 1)
+
+    def test_same_endpoint_different_function_creates_separate_playbooks(self):
+        files = [
+            f('src/PaymentPage.js', "function handlePay(){axios.post('/api/pay',{amount})}"),
+            f('src/PaymentPageRetry.js', "function handleRetryPayment(){axios.post('/api/pay',{amount})}"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertGreaterEqual(len(result.verification_playbooks), 2)
+        fnames = sorted([x.function_name for x in result.verification_playbooks if x.function_name])
+        self.assertIn('handlePay', fnames)
+        self.assertIn('handleRetryPayment', fnames)
 
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"

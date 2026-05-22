@@ -235,14 +235,19 @@ def _dedup_findings(findings: list[ReadableFinding]) -> list[ReadableFinding]:
         }
         if f.vulnerability_type in api_types and f.evidence:
             flows = f.evidence[0].data_flow
+            source_path = f.evidence[0].source_path
             endpoint = next((x.replace('endpoint: ', '') for x in flows if x.startswith('endpoint: ')), '')
             method = next((x.replace('method: ', '') for x in flows if x.startswith('method: ')), '')
             sink = next((x.replace('sink: ', '') for x in flows if x.startswith('sink: ')), '')
             parameters = tuple(sorted([x.replace('parameter: ', '') for x in flows if x.startswith('parameter: ')]))
+            function_name = next((x.replace('function: ', '') for x in flows if x.startswith('function: ')), '')
+        else:
+            source_path = ''
+            function_name = ''
         disabled_marker = ''
         if f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass':
             disabled_marker = ','.join(sorted(f.affected_files))
-        key = (f.vulnerability_type, method, endpoint, parameters, sink, f.root_cause, disabled_marker)
+        key = (f.vulnerability_type, source_path, function_name, method, endpoint, parameters, sink, f.root_cause, disabled_marker)
         if key not in grouped:
             grouped[key] = f
             continue
@@ -495,7 +500,7 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
   console.group('[SSS PoC] 설치 완료');
   console.log('mode:', 'observe');
   console.log('target:', TARGET_ENDPOINT);
-  console.log('다음 단계: 정상 UI에서 대상 버튼을 클릭하세요.');
+  console.log('다음 단계: 검증 안내 섹션의 사용자 동작을 수행하세요.');
   console.log('요청이 감지되면 URL/method/payload/status가 출력됩니다.');
   console.log('변조 검증은 window.SSS_POC.armMutation() 실행 후 다시 버튼을 클릭하세요.');
   console.log('재전송 검증은 window.SSS_POC.armReplay() 후 window.SSS_POC.replay(index, overrides)로 수행하세요.');
@@ -511,6 +516,9 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
   console.log('4) window.SSS_POC.list()로 캡처된 요청을 확인하세요.');
   console.log('5) 변조 검증은 window.SSS_POC.armMutation() 실행 후 같은 동작을 다시 수행하세요.');
   console.log('6) 완료 후 window.SSS_POC.disarm()을 실행하세요.');
+  if (ACTION_HINT === '대상 기능 버튼 클릭') {{
+    console.warn('정확한 버튼/화면을 자동 추론하지 못했습니다. source_path와 function_name을 기준으로 수동 확인하세요.');
+  }}
   console.groupEnd();
 }})();"""
 
@@ -543,7 +551,7 @@ def _find_enclosing_function_block(content: str, line_number: int) -> tuple[str 
     return None
 
 
-def _infer_page_action_hints(path: str, snippet: str) -> tuple[str, str, str | None]:
+def _infer_page_action_hints(path: str, snippet: str, function_name: str | None = None) -> tuple[str, str, str | None]:
     p = path.lower()
     s = snippet.lower()
     page_map = [
@@ -553,10 +561,11 @@ def _infer_page_action_hints(path: str, snippet: str) -> tuple[str, str, str | N
         ('nafalmypage', '마이페이지/관리 화면'), ('usermypage', '마이페이지/관리 화면'), ('adminmypage', '마이페이지/관리 화면'),
     ]
     page_hint = next((v for k, v in page_map if k in p), '해당 기능 화면')
-    fn = None
-    m = re.search(r'(handle[A-Za-z0-9_]+|loadDashboardData)', snippet)
-    if m:
-        fn = m.group(1)
+    fn = function_name
+    if not fn:
+        m = re.search(r'(handle[A-Za-z0-9_]+|loadDashboardData|fetchDashboard)', snippet)
+        if m:
+            fn = m.group(1)
     action = '대상 기능 버튼 클릭'
     f = (fn or '').lower()
     if 'handlepay' in f or 'handlepayment' in f:
@@ -575,7 +584,7 @@ def _infer_page_action_hints(path: str, snippet: str) -> tuple[str, str, str | N
         action = '구매 버튼 클릭'
     return page_hint, action, fn
 
-def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, auth: bool = False, disabled: bool = False) -> ConsoleVerificationPlaybook:
+def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, auth: bool = False, disabled: bool = False, page_hint: str | None = None, action_hint: str | None = None, function_name: str | None = None) -> ConsoleVerificationPlaybook:
     if auth:
         return ConsoleVerificationPlaybook(
             strategy='auth_route_guard',
@@ -606,7 +615,7 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
         strategy='breakpoint_payload_mutation',
         breakpoints=breakpoints,
         console_steps=['DevTools Sources에서 breakpoint 설정', '정상 UI 버튼 클릭', 'Scope에서 payload 값 확인', '테스트 값으로 변경', 'Resume 후 서버 응답 확인'],
-        console_code=(_build_network_hook_mutation_poc(endpoint) if endpoint != 'UNKNOWN' else None),
+        console_code=(_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or '해당 기능 화면', action_hint=action_hint or '대상 기능 버튼 클릭') if endpoint != 'UNKNOWN' else None),
         expected_observation='요청 직전 payload 변경이 전송 본문에 반영됨',
         limitations=(['endpoint가 UNKNOWN이라 자동 hook 코드는 생성하지 않았습니다.'] if endpoint == 'UNKNOWN' else []),
     )
@@ -985,7 +994,11 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         if sink in {'$.ajax', 'jQuery.ajax'} and endpoint == 'UNKNOWN' and any('generic ajax wrapper requires callsite tracing' in n for n in (candidate.notes or [])):
             return None
 
+        block = _find_enclosing_function_block(f.content, candidate.start_line)
+        function_name = block[0] if block else None
         flow = ['source -> state/storage -> sink', f'method: {method}', f'endpoint: {endpoint}']
+        if function_name:
+            flow.append(f'function: {function_name}')
         for k in parameters:
             flow.append(f'parameter: {k}')
         flow.append(f'sink: {sink}')
@@ -1004,7 +1017,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         poc_type = 'manual_check'
         poc_code = None
         safety = '실제 변경 요청을 수행하지 않는다.'
-        page_hint, action_hint, _ = _infer_page_action_hints(f.path, candidate.snippet)
+        page_hint, action_hint, function_name = _infer_page_action_hints(f.path, candidate.snippet, function_name=function_name)
 
         if endpoint == 'UNKNOWN':
             notes.append('endpoint variable requires manual review')
@@ -1061,7 +1074,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             root_cause=classification['root_cause'],
             remediation=classification['remediation'],
             verification_notes=notes,
-            verification_playbook=_build_playbook(f, candidate=candidate),
+            verification_playbook=_build_playbook(f, candidate=candidate, page_hint=page_hint, action_hint=action_hint, function_name=function_name),
         )
 
 
@@ -1181,26 +1194,28 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     verification_playbooks: list[ConsoleVerificationPlaybookSummary] = []
     executive_findings: list[ReadableFinding] = []
     review_candidates: list[ReadableFinding] = []
-    seen_flow: set[tuple[str, str, str, str, str]] = set()
+    seen_flow: set[tuple[str, str, str, str, str, str]] = set()
 
-    def _flow_and_meta(f: ReadableFinding) -> tuple[tuple[str, str, str, str, str], str, str]:
+    def _flow_and_meta(f: ReadableFinding) -> tuple[tuple[str, str, str, str, str, str], str, str, str]:
         source_path = f.evidence[0].source_path if f.evidence else (f.affected_files[0] if f.affected_files else '')
         flows = f.evidence[0].data_flow if f.evidence else []
         method = next((x.replace('method: ', '') for x in flows if x.startswith('method: ')), 'UNKNOWN')
         endpoint = next((x.replace('endpoint: ', '') for x in flows if x.startswith('endpoint: ')), 'UNKNOWN')
         sink = next((x.replace('sink: ', '') for x in flows if x.startswith('sink: ')), '')
-        return (f.vulnerability_type, source_path, method, endpoint, sink), method, endpoint
+        function_name = next((x.replace('function: ', '') for x in flows if x.startswith('function: ')), '')
+        return (f.vulnerability_type, source_path, function_name, method, endpoint, sink), method, endpoint, function_name
 
     for f in findings:
-        flow, method, endpoint = _flow_and_meta(f)
-        page_hint, action_hint, function_name = _infer_page_action_hints(flow[1], f.evidence[0].snippet if f.evidence else '')
+        flow, method, endpoint, function_name = _flow_and_meta(f)
+        page_hint, action_hint, function_name = _infer_page_action_hints(flow[1], f.evidence[0].snippet if f.evidence else '', function_name=function_name or None)
         is_low_conf = f.confidence == 'low'
         is_disabled_only = bool(f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass')
         is_unknown = endpoint == 'UNKNOWN'
         no_code = not (f.console_poc and f.console_poc.code)
         ux_disabled = any(x in ' '.join(f.evidence[0].data_flow).lower() for x in ('disabled_expression: loading', 'disabled_expression: submitting', 'disabled_expression: isloading')) if f.evidence else False
         top_import_like = bool(f.evidence and f.evidence[0].start_line <= 20 and 'import ' in (f.evidence[0].snippet or '').lower())
-        if is_disabled_only or is_unknown or is_low_conf or no_code or ux_disabled or top_import_like:
+        is_auto_fn = (function_name or '').lower() in {'loaddashboarddata', 'fetchdashboard'} or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
+        if is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type):
             if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
                 f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
             review_candidates.append(f)
@@ -1211,7 +1226,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     id=f.id,
                     title=f.title,
                     source_path=flow[1],
-                    function_name=function_name,
+                    function_name=(function_name or None),
                     endpoint=endpoint,
                     method=method,
                     page_hint=page_hint,
