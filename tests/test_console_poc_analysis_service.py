@@ -548,6 +548,40 @@ class ConsolePocAnalysisTests(unittest.TestCase):
     def test_direct_axios_delete_still_rejected(self):
         self.assertFalse(_is_allowed_guarded_poc_code("axios.delete('/api/user/1')"))
 
+    def test_analysis_result_has_split_sections_and_unknown_goes_review(self):
+        files = [f('src/a.js', "<button disabled={loading}>Pay</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertIsInstance(result.executive_findings, list)
+        self.assertIsInstance(result.verification_playbooks, list)
+        self.assertIsInstance(result.review_candidates, list)
+        self.assertTrue(len(result.review_candidates) >= 0)
+
+    def test_page_and_action_hints_in_playbook(self):
+        files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/123/complete-payment',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(p.page_hint == '결제 화면' for p in result.verification_playbooks))
+        self.assertTrue(any(p.user_action_hint == '결제/결제완료 버튼 클릭' for p in result.verification_playbooks))
+
+    def test_playbook_contains_proof_and_criteria(self):
+        files = [f('src/FindPassword.js', "function handleVerify(){axios.post('/verify-code',{code})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        p = result.verification_playbooks[0]
+        self.assertTrue(len(p.proof_steps) > 0)
+        self.assertTrue(len(p.success_criteria) > 0)
+        self.assertTrue(len(p.failure_criteria) > 0)
+        self.assertTrue(len(p.evidence_to_capture) > 0)
+
+    def test_disabled_console_code_no_auto_click_and_has_api(self):
+        files = [f('src/pay.js', "const handlePay=()=>{axios.post('/api/pay',{ amount })}; <button disabled={amount <= 0} onClick={handlePay}>Pay</button>")]
+        findings = MockConsolePocAnalyzer().analyze(files)
+        disabled = [x for x in findings if x.verification_playbook and x.verification_playbook.strategy == 'disabled_button_bypass'][0]
+        code = disabled.verification_playbook.console_code or ''
+        self.assertNotIn('const target = candidates[0]', code)
+        self.assertIn('window.SSS_DISABLED = {', code)
+        self.assertIn('list()', code)
+        self.assertIn('enable(index)', code)
+        self.assertIn('click(index)', code)
+
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))

@@ -161,10 +161,33 @@ class ReadableFinding(BaseModel):
     verification_playbook: ConsoleVerificationPlaybook | None = None
 
 
+class ConsoleVerificationPlaybookSummary(BaseModel):
+    id: str
+    title: str
+    source_path: str
+    function_name: str | None = None
+    endpoint: str | None = None
+    method: str | None = None
+    page_hint: str | None = None
+    user_action_hint: str | None = None
+    risk_type: str
+    confidence: str
+    console_code: str | None = None
+    setup_steps: list[str] = Field(default_factory=list)
+    proof_steps: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    failure_criteria: list[str] = Field(default_factory=list)
+    evidence_to_capture: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class ReadableAnalysisResult(BaseModel):
     finding_count: int
     findings: list[ReadableFinding]
     analyzed_focus: list[str] = Field(default_factory=list)
+    executive_findings: list[ReadableFinding] = Field(default_factory=list)
+    verification_playbooks: list[ConsoleVerificationPlaybookSummary] = Field(default_factory=list)
+    review_candidates: list[ReadableFinding] = Field(default_factory=list)
 
 
 class AnalysisDebugDropReason(BaseModel):

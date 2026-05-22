@@ -4,7 +4,7 @@ import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
-from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, BreakpointHint, ConsoleSafePoc, ConsoleVerificationPlaybook, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
+from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, BreakpointHint, ConsoleSafePoc, ConsoleVerificationPlaybook, ConsoleVerificationPlaybookSummary, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 from app.services.json_utils import extract_json_payload
@@ -311,26 +311,41 @@ def _has_storage_auth_evidence(files: list[FileContent], primary_file: FileConte
 
 
 def _build_disabled_console_code() -> str:
-    return """const candidates = [...document.querySelectorAll('button[disabled], input[disabled]')];
-console.table(candidates.map((el, i) => ({
-  index: i,
-  text: el.innerText || el.value,
-  disabled: el.disabled
-})));
-
-const target = candidates[0];
-if (target) {
-  target.disabled = false;
-  target.removeAttribute('disabled');
-  target.click();
-}
+    return """window.SSS_DISABLED = {
+  list() {
+    const candidates = [...document.querySelectorAll('button[disabled], input[disabled]')];
+    console.table(candidates.map((el, i) => ({
+      index: i,
+      text: el.innerText || el.value,
+      disabled: el.disabled
+    })));
+    return candidates;
+  },
+  enable(index) {
+    const target = this.list()[index];
+    if (!target) return console.warn('[SSS DISABLED] invalid index');
+    target.disabled = false;
+    target.removeAttribute('disabled');
+    return target;
+  },
+  click(index) {
+    const target = this.list()[index];
+    if (!target) return console.warn('[SSS DISABLED] invalid index');
+    target.click();
+  }
+};
+console.log('window.SSS_DISABLED.list()로 후보를 확인하고, 승인된 테스트에서만 enable(index)/click(index)를 실행하세요.');
 """
 
 
-def _build_network_hook_mutation_poc(endpoint: str) -> str:
+def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기능 화면', action_hint: str = '대상 기능 버튼 클릭') -> str:
     endpoint_js = json.dumps(endpoint)
+    page_js = json.dumps(page_hint)
+    action_js = json.dumps(action_hint)
     return f"""(() => {{
   const TARGET_ENDPOINT = {endpoint_js};
+  const PAGE_HINT = {page_js};
+  const ACTION_HINT = {action_js};
   const SSS_POC_STATE = {{ mutationArmed: false, replayArmed: false }};
   const BLOCKED_REPLAY = /(delete|refund|withdraw|transfer|bulk)/i.test(TARGET_ENDPOINT);
   const captured = [];
@@ -485,6 +500,18 @@ def _build_network_hook_mutation_poc(endpoint: str) -> str:
   console.log('변조 검증은 window.SSS_POC.armMutation() 실행 후 다시 버튼을 클릭하세요.');
   console.log('재전송 검증은 window.SSS_POC.armReplay() 후 window.SSS_POC.replay(index, overrides)로 수행하세요.');
   console.groupEnd();
+  console.group('[SSS PoC] 검증 안내');
+  console.log('검증 화면:', PAGE_HINT);
+  console.log('사용자 동작:', ACTION_HINT);
+  console.log('대상 API:', TARGET_ENDPOINT);
+  console.log('현재 모드: observe');
+  console.log('1) 이 화면으로 이동하세요:', PAGE_HINT);
+  console.log('2) Console에 PoC 설치 완료 로그가 보이는지 확인하세요.');
+  console.log('3) 사용자 동작을 수행하세요:', ACTION_HINT);
+  console.log('4) window.SSS_POC.list()로 캡처된 요청을 확인하세요.');
+  console.log('5) 변조 검증은 window.SSS_POC.armMutation() 실행 후 같은 동작을 다시 수행하세요.');
+  console.log('6) 완료 후 window.SSS_POC.disarm()을 실행하세요.');
+  console.groupEnd();
 }})();"""
 
 
@@ -514,6 +541,39 @@ def _find_enclosing_function_block(content: str, line_number: int) -> tuple[str 
             if opened and depth <= 0 and e >= idx:
                 return (m.group(1) if m.groups() else None, s + 1, e + 1, '\n'.join(lines[s:e + 1]))
     return None
+
+
+def _infer_page_action_hints(path: str, snippet: str) -> tuple[str, str, str | None]:
+    p = path.lower()
+    s = snippet.lower()
+    page_map = [
+        ('paymentpage', '결제 화면'), ('purchasepage', '구매 화면'),
+        ('findpassword', '비밀번호 찾기/계정 복구 화면'), ('loginpage', '로그인 화면'),
+        ('signuppage', '회원가입 화면'), ('itemdetailpage', '상품 상세/입찰 화면'),
+        ('nafalmypage', '마이페이지/관리 화면'), ('usermypage', '마이페이지/관리 화면'), ('adminmypage', '마이페이지/관리 화면'),
+    ]
+    page_hint = next((v for k, v in page_map if k in p), '해당 기능 화면')
+    fn = None
+    m = re.search(r'(handle[A-Za-z0-9_]+|loadDashboardData)', snippet)
+    if m:
+        fn = m.group(1)
+    action = '대상 기능 버튼 클릭'
+    f = (fn or '').lower()
+    if 'handlepay' in f or 'handlepayment' in f:
+        action = '결제/결제완료 버튼 클릭'
+    elif 'handlecharge' in f:
+        action = '포인트 충전 버튼 클릭'
+    elif 'handleverify' in f:
+        action = '인증번호 확인 버튼 클릭'
+    elif 'handleresetpassword' in f:
+        action = '비밀번호 재설정 버튼 클릭'
+    elif 'handlesubmit' in f:
+        action = '현재 폼 제출 버튼 클릭'
+    elif 'handlebid' in f:
+        action = '입찰 버튼 클릭'
+    elif 'handlepurchase' in f:
+        action = '구매 버튼 클릭'
+    return page_hint, action, fn
 
 def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, auth: bool = False, disabled: bool = False) -> ConsoleVerificationPlaybook:
     if auth:
@@ -944,6 +1004,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         poc_type = 'manual_check'
         poc_code = None
         safety = '실제 변경 요청을 수행하지 않는다.'
+        page_hint, action_hint, _ = _infer_page_action_hints(f.path, candidate.snippet)
 
         if endpoint == 'UNKNOWN':
             notes.append('endpoint variable requires manual review')
@@ -955,7 +1016,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         )
         if method == 'GET' and endpoint != 'UNKNOWN' and important_get:
             poc_type = 'browser_console'
-            poc_code = self._build_readonly_get_poc(endpoint)
+            poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
             conf = 'medium'
             safety = '조회형 요청으로 응답 status/body만 확인한다.'
         elif method == 'GET' and not important_get:
@@ -963,7 +1024,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         elif method in {'POST', 'PUT', 'PATCH'}:
             if endpoint != 'UNKNOWN':
                 poc_type = 'browser_console'
-                poc_code = self._build_guarded_mutation_poc(method, endpoint, parameters)
+                poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
                 conf = 'medium'
                 notes.append('변조 검증은 window.SSS_POC.armMutation() 실행 후 진행하세요.')
                 safety = '기본값 false guard로 즉시 실행되지 않으며, 승인된 테스트 계정/테스트 데이터에서만 실행해야 한다.'
@@ -972,7 +1033,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):
             if endpoint != 'UNKNOWN':
                 poc_type = 'browser_console'
-                poc_code = _build_network_hook_mutation_poc(endpoint)
+                poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
                 conf = 'medium'
             notes.append('고위험 요청은 replay/mutation이 차단되며 observe mode만 제공됩니다.')
 
@@ -1117,8 +1178,61 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     selected = select_console_relevant_files(files)
     analyzer = analyzer or get_console_poc_analyzer()
     findings = analyzer.analyze(selected)
+    verification_playbooks: list[ConsoleVerificationPlaybookSummary] = []
+    executive_findings: list[ReadableFinding] = []
+    review_candidates: list[ReadableFinding] = []
+    seen_flow: set[tuple[str, str, str, str, str]] = set()
+
+    def _flow_and_meta(f: ReadableFinding) -> tuple[tuple[str, str, str, str, str], str, str]:
+        source_path = f.evidence[0].source_path if f.evidence else (f.affected_files[0] if f.affected_files else '')
+        flows = f.evidence[0].data_flow if f.evidence else []
+        method = next((x.replace('method: ', '') for x in flows if x.startswith('method: ')), 'UNKNOWN')
+        endpoint = next((x.replace('endpoint: ', '') for x in flows if x.startswith('endpoint: ')), 'UNKNOWN')
+        sink = next((x.replace('sink: ', '') for x in flows if x.startswith('sink: ')), '')
+        return (f.vulnerability_type, source_path, method, endpoint, sink), method, endpoint
+
+    for f in findings:
+        flow, method, endpoint = _flow_and_meta(f)
+        page_hint, action_hint, function_name = _infer_page_action_hints(flow[1], f.evidence[0].snippet if f.evidence else '')
+        is_low_conf = f.confidence == 'low'
+        is_disabled_only = bool(f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass')
+        is_unknown = endpoint == 'UNKNOWN'
+        no_code = not (f.console_poc and f.console_poc.code)
+        ux_disabled = any(x in ' '.join(f.evidence[0].data_flow).lower() for x in ('disabled_expression: loading', 'disabled_expression: submitting', 'disabled_expression: isloading')) if f.evidence else False
+        top_import_like = bool(f.evidence and f.evidence[0].start_line <= 20 and 'import ' in (f.evidence[0].snippet or '').lower())
+        if is_disabled_only or is_unknown or is_low_conf or no_code or ux_disabled or top_import_like:
+            if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
+                f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
+            review_candidates.append(f)
+        else:
+            if flow not in seen_flow:
+                seen_flow.add(flow)
+                verification_playbooks.append(ConsoleVerificationPlaybookSummary(
+                    id=f.id,
+                    title=f.title,
+                    source_path=flow[1],
+                    function_name=function_name,
+                    endpoint=endpoint,
+                    method=method,
+                    page_hint=page_hint,
+                    user_action_hint=action_hint,
+                    risk_type=f.vulnerability_type,
+                    confidence=f.confidence,
+                    console_code=(f.console_poc.code if f.console_poc else None),
+                    setup_steps=(f.console_poc.steps if f.console_poc else []),
+                    proof_steps=['Console에 PoC 붙여넣기', '[SSS PoC] 설치 완료 확인', f'{page_hint} 화면으로 이동', f'{action_hint} 수행', 'window.SSS_POC.list() 실행', '캡처된 요청 endpoint/method/payload 확인', 'window.SSS_POC.armMutation() 실행', '동일 동작 재수행', '변조 전/후 payload와 서버 응답 비교'],
+                    success_criteria=['요청 payload가 Console에 캡처됨', 'armMutation 후 지정 필드가 변조됨', '서버가 변조된 값에 대해 200/201 또는 상태 변경을 허용함', '또는 권한 없는 객체 조회가 200으로 응답함'],
+                    failure_criteria=['서버가 400/401/403으로 차단함', 'payload 변조가 서버 반영 전에 정규화됨', 'endpoint가 호출되지 않음', 'HTML fallback이 반환됨'],
+                    evidence_to_capture=['Console 캡처 로그', 'Network 요청 URL/method', '변조 전 payload', '변조 후 payload', '서버 응답 status/body', '화면 상태 변화'],
+                    limitations=(f.verification_playbook.limitations if f.verification_playbook else []),
+                ))
+            if (f.severity in {'high', 'medium'} and f.confidence != 'low') or any(x in f.vulnerability_type for x in ('Payment', 'Account Recovery', 'IDOR', 'Authorization')):
+                executive_findings.append(f)
     return ReadableAnalysisResult(
         finding_count=len(findings),
         findings=findings,
         analyzed_focus=['authorization', 'storage manipulation', 'dom xss', 'client-side validation bypass', 'api call tampering'],
+        executive_findings=executive_findings,
+        verification_playbooks=verification_playbooks,
+        review_candidates=review_candidates,
     )
