@@ -604,9 +604,16 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(len(result.review_candidates) >= 1)
 
     def test_generic_api_review_candidate_not_promoted_to_playbook(self):
-        files = [f('src/x.js', "fetch('/api/random-open-endpoint')")]
+        files = [f('src/x.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertFalse(any(p.risk_type == 'Generic API Review Candidate' for p in result.verification_playbooks))
+        self.assertTrue(any('일반 API 후보라 자동 검증 Playbook에서 제외하고 수동 검토 후보로 분류했습니다.' in ' '.join(x.verification_notes) for x in result.review_candidates))
+
+    def test_session_endpoint_with_query_goes_review(self):
+        files = [f('src/s.js', "fetch('/api/user/session?refresh=true')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        self.assertTrue(len(result.review_candidates) >= 1)
 
     def test_compressed_library_like_evidence_goes_review(self):
         snippet = "function M(){const constants='x'; return wa; /* gzip deflate */}"
@@ -637,6 +644,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/PaymentPage.js', src)]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertLessEqual(len(result.verification_playbooks), 7)
+
+    def test_auction_page_bid_has_page_and_action_hint(self):
+        files = [f('src/AuctionPage.js', "function handleBid(){axios.post('/api/auction/1/bid',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(len(result.verification_playbooks) >= 1)
+        p = result.verification_playbooks[0]
+        self.assertEqual(p.page_hint, '경매/입찰 화면')
+        self.assertEqual(p.user_action_hint, '입찰 버튼 클릭')
 
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"

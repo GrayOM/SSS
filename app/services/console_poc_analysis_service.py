@@ -556,6 +556,7 @@ def _infer_page_action_hints(path: str, snippet: str, function_name: str | None 
     s = snippet.lower()
     page_map = [
         ('paymentpage', '결제 화면'), ('purchasepage', '구매 화면'),
+        ('auctionpage', '경매/입찰 화면'),
         ('findpassword', '비밀번호 찾기/계정 복구 화면'), ('loginpage', '로그인 화면'),
         ('signuppage', '회원가입 화면'), ('itemdetailpage', '상품 상세/입찰 화면'),
         ('nafalmypage', '마이페이지/관리 화면'), ('usermypage', '마이페이지/관리 화면'), ('adminmypage', '마이페이지/관리 화면'),
@@ -1253,7 +1254,12 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         } or fn_low.startswith(('load', 'fetch', 'get', 'init', 'initialize', 'request')) or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
         is_generic_action = action_hint == '대상 기능 버튼 클릭'
         is_generic_page = page_hint == '해당 기능 화면'
-        is_session_get = method == 'GET' and endpoint.lower() in {'/api/user/session', '/api/auth/me', '/api/me', '/api/profile/me'}
+        endpoint_norm = endpoint.lower().split('?', 1)[0].rstrip('/')
+        endpoint_norm = re.sub(r'^\{api_base\}', '', endpoint_norm)
+        is_session_get = method == 'GET' and (
+            endpoint_norm in {'/api/user/session', '/api/auth/me', '/api/me', '/api/profile/me'}
+            or endpoint_norm.endswith('/api/user/session')
+        )
         is_generic_type = f.vulnerability_type == 'Generic API Review Candidate'
         is_compressed = _is_compressed_or_library_evidence(f, function_name)
         should_review = (
@@ -1270,6 +1276,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 f.verification_notes.append('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.')
             if is_compressed:
                 f.verification_notes.append('압축/라이브러리성 코드로 판단되어 수동 검토 후보로 분류했습니다.')
+            if is_generic_type:
+                f.verification_notes.append('일반 API 후보라 자동 검증 Playbook에서 제외하고 수동 검토 후보로 분류했습니다.')
             review_candidates.append(f)
         else:
             if flow not in seen_flow:
