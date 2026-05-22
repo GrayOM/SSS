@@ -1395,11 +1395,12 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         is_generic_type = f.vulnerability_type == 'Generic API Review Candidate'
         is_compressed = _is_compressed_or_library_evidence(f, function_name)
         score = 0
-        score += 3 if function_name else -3
         score_reasons: list[str] = []
-        score += 3 if function_name else -3
         if function_name:
+            score += 3
             score_reasons.append('function_block')
+        else:
+            score -= 3
         if api_match and api_match.ui_event_handler:
             score += 3
             score_reasons.append('ui_event_connected')

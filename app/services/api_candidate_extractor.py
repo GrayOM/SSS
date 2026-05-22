@@ -266,6 +266,14 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
     btn_text_re = re.compile(r'<button[^>]*>([^<]{1,80})</button>|<(?:input)[^>]*value="([^"]{1,80})"', re.IGNORECASE)
     title_re = re.compile(r'<h[1-3][^>]*>([^<]{1,120})</h[1-3]>', re.IGNORECASE)
     fn_hint = re.compile(r'\b((?:handle|submit|process|do|pay|checkout|place|verify|confirm|validate|reset|change|send|request)[A-Za-z0-9_]*)\b')
+    def nearby_button_text(all_lines: list[str], idx0: int) -> str | None:
+        s = max(0, idx0 - 5)
+        e = min(len(all_lines) - 1, idx0 + 5)
+        buf = '\n'.join(all_lines[s:e + 1])
+        m = re.search(r'<button[^>]*>\s*([^<]{1,80})\s*</button>', buf, re.IGNORECASE | re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        return None
     for file in files:
         lines = file.content.splitlines() or ['']
         for i, line in enumerate(lines, start=1):
@@ -274,11 +282,12 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
             tm_line = btn_text_re.search(line)
             line_text = ((tm_line.group(1) or tm_line.group(2)).strip() if tm_line else None)
             for m in react_ev_re.finditer(line):
+                et = line_text or nearby_button_text(lines, i - 1)
                 out.append({
                     'handler_name': m.group(2),
                     'ui_event': f"on{m.group(1)}",
                     'disabled_expression': None,
-                    'element_text': line_text,
+                    'element_text': et,
                     'nearby_title': title_text,
                     'source_path': file.path,
                     'start_line': i,
@@ -288,11 +297,12 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
             for m in vue_ev_re.finditer(line):
                 handler = m.group(1) or m.group(2)
                 if handler:
+                    et = line_text or nearby_button_text(lines, i - 1)
                     out.append({
                         'handler_name': handler,
                         'ui_event': 'onClick',
                         'disabled_expression': None,
-                        'element_text': line_text,
+                        'element_text': et,
                         'nearby_title': title_text,
                         'source_path': file.path,
                         'start_line': i,
@@ -301,11 +311,12 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
                     })
             hm = html_onclick_re.search(line)
             if hm:
+                et = line_text or nearby_button_text(lines, i - 1)
                 out.append({
                     'handler_name': hm.group(1),
                     'ui_event': 'onClick',
                     'disabled_expression': None,
-                    'element_text': line_text,
+                    'element_text': et,
                     'nearby_title': title_text,
                     'source_path': file.path,
                     'start_line': i,

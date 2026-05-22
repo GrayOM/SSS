@@ -736,6 +736,28 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any(r.path == '/payment' for r in pu.routes))
         self.assertTrue(any(a.endpoint == '/api/orders/123/pay' for a in pu.api_inventory))
 
+    def test_payment_with_ui_event_promotes_playbook_and_score_notes(self):
+        files = [f('src/OrderFlow.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(p.endpoint == '/api/orders/123/pay' for p in result.verification_playbooks))
+        rel = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
+        notes = ' '.join(rel.verification_notes)
+        self.assertIn('playbook_score=', notes)
+        self.assertTrue(('ui_event_connected' in notes) or ('endpoint_category=payment' in notes))
+
+    def test_payment_endpoint_without_ui_event_stays_review(self):
+        files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/api/orders/123/pay' for p in result.verification_playbooks))
+        self.assertTrue(any('playbook_score=' in ' '.join(x.verification_notes) for x in result.review_candidates))
+
+    def test_multiline_jsx_button_text_is_connected(self):
+        files = [f('src/Pay.jsx', "<button\n  disabled={loading}\n  onClick={submitOrder}\n>\n  Pay now\n</button>\nfunction submitOrder(){axios.post('/api/orders/123/pay',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pu = result.project_understanding
+        ev = [x for x in pu.ui_events if x.handler_name == 'submitOrder'][0]
+        self.assertEqual(ev.element_text, 'Pay now')
+
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))
