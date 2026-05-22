@@ -534,6 +534,20 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn("transport: 'axios'", code)
         self.assertIn('axios replay unavailable', code)
 
+    def test_sss_poc_hook_code_allowed_by_filter(self):
+        code = _build_network_hook_mutation_poc('/api/pay')
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_high_risk_observer_hook_allowed_by_filter(self):
+        code = _build_network_hook_mutation_poc('/api/admin/delete-user/{userId}')
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_direct_delete_still_rejected(self):
+        self.assertFalse(_is_allowed_guarded_poc_code("fetch('/api/user/1', { method: 'DELETE' })"))
+
+    def test_direct_axios_delete_still_rejected(self):
+        self.assertFalse(_is_allowed_guarded_poc_code("axios.delete('/api/user/1')"))
+
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))

@@ -263,23 +263,33 @@ def _is_allowed_guarded_poc_code(code: str) -> bool:
             return False
         return True
 
-    if any(x in low for x in ('refund', 'transfer', 'withdraw', 'delete', 'remove', 'bulk')):
-        return False
     if re.search(r'\b(exec|execsync|execfile)\s*\(', low):
         return False
+    if 'navigator.sendbeacon' in low:
+        return False
+
+    has_legacy_guard = 'confirm_authorized_test = false' in low and 'if (!confirm_authorized_test)' in low
+    has_sss_poc_guard = all(x in low for x in ('sss_poc_state', 'mutationarmed', 'armmutation', 'disarm'))
+    has_high_risk_observer_guard = all(x in low for x in ('blocked_replay', 'replay blocked: high-risk endpoint', 'captured'))
+    is_sss_hook = 'window.sss_poc' in low and ('window.fetch = async function' in low or 'xmlhttprequest.prototype.send' in low or 'axios.interceptors.request.use' in low)
+
+    if is_sss_hook and (has_sss_poc_guard or has_high_risk_observer_guard):
+        return True
+
     if re.search(r'axios\.delete\s*\(', low):
         return False
     if re.search(r"method\s*:\s*['\"]delete['\"]", low):
         return False
-    if 'navigator.sendbeacon' in low:
+    if any(x in low for x in ('refund', 'transfer', 'withdraw', 'delete', 'remove', 'bulk')):
         return False
+
     is_mutation = bool(
         re.search(r"method\s*:\s*['\"](post|put|patch)['\"]", low)
         or re.search(r'axios\.(post|put|patch)\s*\(', low)
         or re.search(r'\.open\s*\(\s*[\'"](post|put|patch)[\'"]', low)
     )
     if is_mutation:
-        return 'confirm_authorized_test = false' in low and 'if (!confirm_authorized_test)' in low
+        return has_legacy_guard or has_sss_poc_guard
     return True
 
 
