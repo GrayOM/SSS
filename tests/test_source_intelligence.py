@@ -43,6 +43,19 @@ class SourceIntelligenceTests(unittest.TestCase):
         self.assertEqual(rv.framework, 'Vanilla')
         self.assertTrue(any(x.flow_type == 'wallet_point' for x in rv.business_flows))
 
+    def test_jquery_selector_text_and_identity_category(self):
+        files = [f(
+            'templates/mypage.html',
+            "<button id=\"sendSms\">인증번호 발송</button>\n<script>\n$('#sendSms').on('click', function(){ $.ajax({ url:'/user/chkMobiSendAjax', type:'POST', data:{ phoneNo } }); });\n</script>",
+        )]
+        r = build_project_understanding(files)
+        self.assertEqual(r.framework, 'jQuery')
+        ev = [x for x in r.ui_events if x.ui_event == 'onClick' and x.element_text][0]
+        self.assertEqual(ev.element_text, '인증번호 발송')
+        inv = [x for x in r.api_inventory if x.endpoint == '/user/chkMobiSendAjax'][0]
+        self.assertIn(inv.risk_category, {'identity_verification', 'account_recovery'})
+        self.assertIn(inv.interaction_confidence, {'medium', 'high'})
+
 
 if __name__ == '__main__':
     unittest.main()

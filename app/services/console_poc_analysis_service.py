@@ -616,7 +616,7 @@ def infer_interaction_context(source_path: str, function_name: str | None, snipp
         page_hint, reasons = '결제/주문 화면', reasons + ['endpoint category: payment/order']
     elif any(k in low_endpoint for k in ('auction', 'bid')):
         page_hint, reasons = '경매/입찰 화면', reasons + ['endpoint category: auction/bid']
-    elif any(k in low_endpoint for k in ('password', 'reset', 'verify-code', 'send-verification', 'verify')):
+    elif any(k in low_endpoint for k in ('password', 'reset', 'verify-code', 'send-verification', 'verify', 'chkmobi', 'chgmobi', 'mobile', 'sms', 'cert', 'authno')):
         page_hint, reasons = '계정 복구/인증 화면', reasons + ['endpoint category: recovery/verify']
     elif any(k in low_endpoint for k in ('wallet', 'point', 'charge')):
         page_hint, reasons = '지갑/포인트 화면', reasons + ['endpoint category: wallet/point']
@@ -634,11 +634,11 @@ def infer_interaction_context(source_path: str, function_name: str | None, snipp
         action_hint = '인증번호 확인 버튼 클릭'; reasons.append('ui text indicates verify')
     elif any(k in low_text for k in ('reset password', '비밀번호 재설정')):
         action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('ui text indicates reset')
-    elif any(k in low_endpoint for k in ('verify-code',)):
+    elif any(k in low_endpoint for k in ('verify-code', 'authno', 'verify')):
         action_hint = '인증번호 확인 버튼 클릭'; reasons.append('endpoint indicates verify-code')
     elif any(k in low_endpoint for k in ('reset-password',)):
         action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('endpoint indicates reset-password')
-    elif any(k in low_endpoint for k in ('send-verification',)):
+    elif any(k in low_endpoint for k in ('send-verification', 'chkmobisendajax', 'chgmobisendajax', 'sendsms', 'sms')):
         action_hint = '인증번호 발송 버튼 클릭'; reasons.append('endpoint indicates send-verification')
     elif 'create-checkout-session' in low_endpoint:
         action_hint = 'Stripe 결제 버튼 클릭'; reasons.append('endpoint indicates stripe checkout session')
@@ -1394,6 +1394,12 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         )
         is_generic_type = f.vulnerability_type == 'Generic API Review Candidate'
         is_compressed = _is_compressed_or_library_evidence(f, function_name)
+        is_jq_html_promotable = bool(
+            api_match and
+            method in {'POST', 'PUT', 'PATCH'} and
+            (api_match.ui_event_type or api_match.ui_event_handler or api_match.ui_event_text) and
+            api_match.risk_category in {'identity_verification', 'account_recovery', 'payment', 'authorization', 'wallet_point'}
+        )
         score = 0
         score_reasons: list[str] = []
         if function_name:
@@ -1401,7 +1407,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             score_reasons.append('function_block')
         else:
             score -= 3
-        if api_match and api_match.ui_event_handler:
+        if api_match and (api_match.ui_event_handler or api_match.ui_event_type):
             score += 3
             score_reasons.append('ui_event_connected')
         if api_match and api_match.ui_event_text and action_hint != '대상 기능 버튼 클릭':
@@ -1422,7 +1428,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         score += -2 if is_auto_fn else 0
         should_review = (
             is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
-            is_generic_action or is_generic_page or function_name is None or is_session_get or is_compressed or
+            is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable) or is_session_get or is_compressed or
             score < 5 or
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
@@ -1434,6 +1440,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 f.verification_notes.append('사용자 동작을 자동 추론하지 못해 수동 검토 후보로 분류했습니다.')
             if is_session_get:
                 f.verification_notes.append('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.')
+            elif api_match and api_match.risk_category == 'search_recommend':
+                f.verification_notes.append('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.')
             elif is_auto_fn:
                 f.verification_notes.append('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.')
             if is_compressed:

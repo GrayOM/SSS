@@ -261,11 +261,37 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
     vue_ev_re = re.compile(r'@(?:click|submit(?:\.prevent)?)\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"|v-on:(?:click|submit(?:\.prevent)?)\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"')
     dis_re = re.compile(r'(?:disabled\s*=\s*\{([^}]+)\}|:disabled\s*=\s*"([^"]+)")')
     html_onclick_re = re.compile(r'onclick\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)\(')
-    jq_on_re = re.compile(r'\.on\(\s*[\'"](click|submit|change)[\'"]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)')
+    jq_on_re = re.compile(r'(\$\([^)]+\)|[\'"][#.][^\'"]+[\'"])?\s*\.on\(\s*[\'"](click|submit|change)[\'"]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)')
+    jq_on_inline_re = re.compile(r'(\$\([^)]+\)|[\'"][#.][^\'"]+[\'"])?\s*\.on\(\s*[\'"](click|submit|change)[\'"]\s*,\s*function\s*\(')
+    jq_click_re = re.compile(r'(\$\([^)]+\)|[\'"][#.][^\'"]+[\'"])?\s*\.click\(\s*([A-Za-z_][A-Za-z0-9_]*)')
+    jq_submit_re = re.compile(r'(\$\([^)]+\)|[\'"][#.][^\'"]+[\'"])?\s*\.submit\(\s*([A-Za-z_][A-Za-z0-9_]*)')
     add_ev_re = re.compile(r'addEventListener\(\s*[\'"](click|submit|change)[\'"]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)')
     btn_text_re = re.compile(r'<button[^>]*>([^<]{1,80})</button>|<(?:input)[^>]*value="([^"]{1,80})"', re.IGNORECASE)
     title_re = re.compile(r'<h[1-3][^>]*>([^<]{1,120})</h[1-3]>', re.IGNORECASE)
     fn_hint = re.compile(r'\b((?:handle|submit|process|do|pay|checkout|place|verify|confirm|validate|reset|change|send|request)[A-Za-z0-9_]*)\b')
+    def selector_text(all_lines: list[str], selector_expr: str | None) -> str | None:
+        if not selector_expr:
+            return None
+        m = re.search(r'[\'"]([#.][^\'"]+)[\'"]', selector_expr)
+        if not m:
+            return None
+        sel = m.group(1)
+        if sel.startswith('#'):
+            attr, val = 'id', re.escape(sel[1:])
+        elif sel.startswith('.'):
+            attr, val = 'class', re.escape(sel[1:])
+        else:
+            return None
+        blob = '\n'.join(all_lines)
+        pat = re.compile(
+            rf'<(?:button|a)[^>]*\b{attr}\s*=\s*["\'][^"\']*\b{val}\b[^"\']*["\'][^>]*>\s*([^<]{{1,120}})\s*</(?:button|a)>'
+            rf'|<(?:input)[^>]*\b{attr}\s*=\s*["\'][^"\']*\b{val}\b[^"\']*["\'][^>]*\bvalue="([^"]{{1,120}})"',
+            re.IGNORECASE | re.DOTALL,
+        )
+        mm = pat.search(blob)
+        if mm:
+            return (mm.group(1) or mm.group(2) or '').strip() or None
+        return None
     def nearby_button_text(all_lines: list[str], idx0: int) -> str | None:
         s = max(0, idx0 - 5)
         e = min(len(all_lines) - 1, idx0 + 5)
@@ -323,20 +349,68 @@ def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
                     'end_line': i,
                     'snippet': line.strip(),
                 })
-            for rg in (jq_on_re, add_ev_re):
-                m = rg.search(line)
-                if m:
+            m = jq_on_re.search(line)
+            if m:
+                selector = m.group(1)
+                et = line_text or selector_text(lines, selector) or nearby_button_text(lines, i - 1)
+                out.append({
+                    'handler_name': m.group(3),
+                    'ui_event': f"on{m.group(2).capitalize()}",
+                    'disabled_expression': None,
+                    'element_text': et,
+                    'selector': selector,
+                    'nearby_title': title_text,
+                    'source_path': file.path,
+                    'start_line': i,
+                    'end_line': i,
+                    'snippet': line.strip(),
+                })
+            m_inline = jq_on_inline_re.search(line)
+            if m_inline:
+                selector = m_inline.group(1)
+                et = line_text or selector_text(lines, selector) or nearby_button_text(lines, i - 1)
+                out.append({
+                    'handler_name': None,
+                    'ui_event': f"on{m_inline.group(2).capitalize()}",
+                    'disabled_expression': None,
+                    'element_text': et,
+                    'selector': selector,
+                    'nearby_title': title_text,
+                    'source_path': file.path,
+                    'start_line': i,
+                    'end_line': i,
+                    'snippet': line.strip(),
+                })
+            for rg, evt in ((jq_click_re, 'Click'), (jq_submit_re, 'Submit')):
+                m2 = rg.search(line)
+                if m2:
+                    selector = m2.group(1)
+                    et = line_text or selector_text(lines, selector) or nearby_button_text(lines, i - 1)
                     out.append({
-                        'handler_name': m.group(2),
-                        'ui_event': f"on{m.group(1).capitalize()}",
+                        'handler_name': m2.group(2),
+                        'ui_event': f"on{evt}",
                         'disabled_expression': None,
-                        'element_text': None,
+                        'element_text': et,
+                        'selector': selector,
                         'nearby_title': title_text,
                         'source_path': file.path,
                         'start_line': i,
                         'end_line': i,
                         'snippet': line.strip(),
                     })
+            m = add_ev_re.search(line)
+            if m:
+                out.append({
+                    'handler_name': m.group(2),
+                    'ui_event': f"on{m.group(1).capitalize()}",
+                    'disabled_expression': None,
+                    'element_text': line_text or nearby_button_text(lines, i - 1),
+                    'nearby_title': title_text,
+                    'source_path': file.path,
+                    'start_line': i,
+                    'end_line': i,
+                    'snippet': line.strip(),
+                })
             dm = dis_re.search(line)
             if dm:
                 out.append({

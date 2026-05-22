@@ -758,6 +758,29 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         ev = [x for x in pu.ui_events if x.handler_name == 'submitOrder'][0]
         self.assertEqual(ev.element_text, 'Pay now')
 
+    def test_jquery_send_sms_post_promotes_playbook(self):
+        files = [f('templates/mypage.html', "<button id=\"sendSms\">인증번호 발송</button>\n<script>$('#sendSms').on('click', function(){ $.ajax({ url:'/user/chkMobiSendAjax', type:'POST', data:{ phoneNo } }); });</script>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(p.endpoint == '/user/chkMobiSendAjax' for p in result.verification_playbooks))
+        p = [x for x in result.verification_playbooks if x.endpoint == '/user/chkMobiSendAjax'][0]
+        self.assertEqual(p.user_action_hint, '인증번호 발송 버튼 클릭')
+        self.assertNotEqual(p.page_hint, '해당 기능 화면')
+        notes = ' '.join([n for x in result.findings for n in x.verification_notes])
+        self.assertIn('playbook_score=', notes)
+        self.assertTrue(('ui_event_connected' in notes) or ('endpoint_category=' in notes))
+
+    def test_jquery_recommend_search_get_stays_review(self):
+        files = [f('templates/nls.html', "<button id='reco'>추천검색</button><script>$('#reco').on('click', function(){ $.ajax({ url:'/header/recommend_search.do', type:'GET' }); });</script>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        notes = ' '.join(result.review_candidates[0].verification_notes)
+        self.assertIn('조회/추천검색성 API', notes)
+
+    def test_mypage_get_review_candidate(self):
+        files = [f('templates/mypage.html', "function loadMyPage(){fetch('/myPage/myPageNewAjax')}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/myPage/myPageNewAjax' for p in result.verification_playbooks))
+
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))

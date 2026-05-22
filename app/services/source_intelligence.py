@@ -53,8 +53,14 @@ def _risk_category(method: str, endpoint: str, params: list[str]) -> str | None:
         return 'auction'
     if any(k in low for k in ('verify-code', 'send-verification', 'reset-password', 'password')):
         return 'account_recovery'
+    if any(k in low for k in ('chkmobi', 'chgmobi', 'mobi', 'mobile', 'phone', 'sms', 'cert', 'authno', 'verify', 'verification')):
+        return 'identity_verification'
     if any(k in low for k in ('wallet', 'point', 'charge')):
         return 'wallet_point'
+    if any(k in low for k in ('search', 'recommend', 'recommend_search')):
+        return 'search_recommend'
+    if any(k in low for k in ('mypage', 'member', 'profile', 'notc', 'notice', 'alarm', 'info')):
+        return 'notification_user_info'
     if any(k in low for k in ('/session', '/auth/me', '/api/me', '/profile/me')) and method == 'GET':
         return 'session_check'
     if any(k in p for k in ('userid', 'memberid', 'orderid')) or re.search(r'\{[^}]+id\}', endpoint, re.I):
@@ -124,7 +130,7 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
         ui_handler = linked[0].get('handler_name') if linked and linked[0].get('handler_name') else (fn if any(u.get('handler_name') == fn and u.get('source_path') == c.source_path for u in ui_raw) else None)
         ui_event_text = next((u.get('element_text') for u in linked if u.get('element_text')), None)
         ui_event_type = next((u.get('ui_event') for u in linked if u.get('ui_event') not in {'function_hint', 'element_text'}), None)
-        interaction_confidence = 'high' if (ui_handler and ui_event_type) else ('medium' if ui_handler else 'low')
+        interaction_confidence = 'high' if (ui_handler and ui_event_type and ui_event_text) else ('medium' if (ui_handler or ui_event_type or ui_event_text) else 'low')
         inv.append(ApiInventoryItem(
             source_path=c.source_path, function_name=fn, method=c.method, endpoint=c.endpoint, sink=c.sink,
             parameters=c.parameters, start_line=c.start_line, end_line=c.end_line, ui_event_handler=ui_handler,
