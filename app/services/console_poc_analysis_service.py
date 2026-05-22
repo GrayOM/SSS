@@ -603,6 +603,65 @@ def _format_page_step(page_hint: str) -> str:
     return f'{page_hint}으로 이동' if page_hint.endswith('화면') else f'{page_hint} 화면으로 이동'
 
 
+def infer_interaction_context(source_path: str, function_name: str | None, snippet: str, endpoint: str, method: str, parameters: list[str], surrounding_block: str = '', ui_candidates: list[dict] | None = None) -> tuple[str, str, str, list[str]]:
+    low_endpoint = (endpoint or '').lower()
+    low_text = ' '.join(filter(None, [snippet, surrounding_block] + [c.get('element_text', '') for c in (ui_candidates or [])])).lower()
+    low_fn = (function_name or '').lower()
+    reasons: list[str] = []
+    page_hint = '해당 기능 화면'
+    action_hint = '대상 기능 버튼 클릭'
+    confidence = 'low'
+    if any(k in low_endpoint for k in ('payment', 'order', 'checkout', 'pay', 'billing')):
+        page_hint, reasons = '결제/주문 화면', reasons + ['endpoint category: payment/order']
+    elif any(k in low_endpoint for k in ('auction', 'bid')):
+        page_hint, reasons = '경매/입찰 화면', reasons + ['endpoint category: auction/bid']
+    elif any(k in low_endpoint for k in ('password', 'reset', 'verify-code', 'send-verification', 'verify')):
+        page_hint, reasons = '계정 복구/인증 화면', reasons + ['endpoint category: recovery/verify']
+    elif any(k in low_endpoint for k in ('wallet', 'point', 'charge')):
+        page_hint, reasons = '지갑/포인트 화면', reasons + ['endpoint category: wallet/point']
+    elif any(k in low_endpoint for k in ('iamport',)):
+        page_hint, reasons = '결제/주문 화면', reasons + ['endpoint category: iamport payment']
+    elif any(k in low_endpoint for k in ('login', 'auth/token')):
+        page_hint, reasons = '로그인/인증 화면', reasons + ['endpoint category: login/auth']
+    if any(k in low_text for k in ('pay now', 'checkout', '결제하기', '결제 완료')):
+        action_hint = '결제 버튼 클릭'; reasons.append('ui text indicates payment')
+    elif any(k in low_text for k in ('입찰', 'bid')):
+        action_hint = '입찰 버튼 클릭'; reasons.append('ui text indicates bid')
+    elif any(k in low_text for k in ('인증번호 발송', 'send code')):
+        action_hint = '인증번호 발송 버튼 클릭'; reasons.append('ui text indicates send code')
+    elif any(k in low_text for k in ('인증 확인', 'verify')):
+        action_hint = '인증번호 확인 버튼 클릭'; reasons.append('ui text indicates verify')
+    elif any(k in low_text for k in ('reset password', '비밀번호 재설정')):
+        action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('ui text indicates reset')
+    elif any(k in low_endpoint for k in ('verify-code',)):
+        action_hint = '인증번호 확인 버튼 클릭'; reasons.append('endpoint indicates verify-code')
+    elif any(k in low_endpoint for k in ('reset-password',)):
+        action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('endpoint indicates reset-password')
+    elif any(k in low_endpoint for k in ('send-verification',)):
+        action_hint = '인증번호 발송 버튼 클릭'; reasons.append('endpoint indicates send-verification')
+    elif 'create-checkout-session' in low_endpoint:
+        action_hint = 'Stripe 결제 버튼 클릭'; reasons.append('endpoint indicates stripe checkout session')
+    elif any(k in low_endpoint for k in ('iamport/prepare', 'iamport/verify')):
+        action_hint = '결제 승인/검증 버튼 클릭'; reasons.append('endpoint indicates iamport verification')
+    elif any(k in low_endpoint for k in ('wallet/charge', '/charge')):
+        action_hint = '포인트 충전 버튼 클릭'; reasons.append('endpoint indicates charge')
+    elif any(k in low_fn for k in ('payment', 'checkout', 'pay', 'submitorder', 'process')):
+        action_hint = '결제 버튼 클릭'; reasons.append('function fallback indicates payment')
+    elif any(k in low_fn for k in ('bid', 'placebid')):
+        action_hint = '입찰 버튼 클릭'; reasons.append('function fallback indicates bid')
+    elif any(k in low_fn for k in ('verifycode', 'confirmcode', 'validatecode')):
+        action_hint = '인증번호 확인 버튼 클릭'; reasons.append('function fallback indicates verify')
+    elif any(k in low_fn for k in ('resetpassword', 'changepassword')):
+        action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('function fallback indicates reset')
+    elif any(k in low_fn for k in ('sendverificationcode', 'requestcode')):
+        action_hint = '인증번호 발송 버튼 클릭'; reasons.append('function fallback indicates send-code')
+    if action_hint != '대상 기능 버튼 클릭' and page_hint != '해당 기능 화면':
+        confidence = 'high'
+    elif action_hint != '대상 기능 버튼 클릭' or page_hint != '해당 기능 화면':
+        confidence = 'medium'
+    return page_hint, action_hint, confidence, reasons
+
+
 def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, auth: bool = False, disabled: bool = False, page_hint: str | None = None, action_hint: str | None = None, function_name: str | None = None) -> ConsoleVerificationPlaybook:
     if auth:
         return ConsoleVerificationPlaybook(
@@ -1046,6 +1105,16 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         poc_code = None
         safety = '실제 변경 요청을 수행하지 않는다.'
         page_hint, action_hint, function_name = _infer_page_action_hints(f.path, candidate.snippet, function_name=function_name)
+        page_hint, action_hint, _, _ = infer_interaction_context(
+            source_path=f.path,
+            function_name=function_name,
+            snippet=candidate.snippet or '',
+            endpoint=endpoint,
+            method=method,
+            parameters=parameters,
+            surrounding_block=block[3] if block else '',
+            ui_candidates=None,
+        )
 
         if endpoint == 'UNKNOWN':
             notes.append('endpoint variable requires manual review')
@@ -1268,6 +1337,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     for f in findings:
         flow, method, endpoint, function_name = _flow_and_meta(f)
         page_hint, action_hint, function_name = _infer_page_action_hints(flow[1], f.evidence[0].snippet if f.evidence else '', function_name=function_name or None)
+        page_hint, action_hint, _, _ = infer_interaction_context(flow[1], function_name or None, f.evidence[0].snippet if f.evidence else '', endpoint, method, [], '', None)
         is_low_conf = f.confidence == 'low'
         is_disabled_only = bool(f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass')
         is_unknown = endpoint == 'UNKNOWN'
@@ -1297,9 +1367,19 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         )
         is_generic_type = f.vulnerability_type == 'Generic API Review Candidate'
         is_compressed = _is_compressed_or_library_evidence(f, function_name)
+        score = 0
+        score += 3 if function_name else -3
+        score += 2 if action_hint != '대상 기능 버튼 클릭' else -2
+        score += 1 if page_hint != '해당 기능 화면' else -2
+        score += 2 if endpoint != 'UNKNOWN' else -2
+        score += -3 if is_generic_type else 0
+        score += -3 if is_session_get else 0
+        score += -3 if is_compressed else 0
+        score += -2 if is_auto_fn else 0
         should_review = (
             is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
             is_generic_action or is_generic_page or function_name is None or is_session_get or is_compressed or
+            score < 5 or
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
         if should_review:

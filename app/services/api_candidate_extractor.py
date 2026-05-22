@@ -257,39 +257,109 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
 
 def extract_ui_handler_candidates(files: list[FileContent]) -> list[dict]:
     out: list[dict] = []
-    ev_re = re.compile(r'on(Click|Submit|Change)\s*=\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}')
-    dis_re = re.compile(r'disabled\s*=\s*\{([^}]+)\}')
-    fn_hint = re.compile(r'\b(handle(?:Payment|Submit|Order|Bid|Verify|Login|Signup|Charge|Purchase)[A-Za-z0-9_]*)\b')
+    react_ev_re = re.compile(r'on(Click|Submit|Change)\s*=\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}')
+    vue_ev_re = re.compile(r'@(?:click|submit(?:\.prevent)?)\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"|v-on:(?:click|submit(?:\.prevent)?)\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"')
+    dis_re = re.compile(r'(?:disabled\s*=\s*\{([^}]+)\}|:disabled\s*=\s*"([^"]+)")')
+    html_onclick_re = re.compile(r'onclick\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)\(')
+    jq_on_re = re.compile(r'\.on\(\s*[\'"](click|submit|change)[\'"]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)')
+    add_ev_re = re.compile(r'addEventListener\(\s*[\'"](click|submit|change)[\'"]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)')
+    btn_text_re = re.compile(r'<button[^>]*>([^<]{1,80})</button>|<(?:input)[^>]*value="([^"]{1,80})"', re.IGNORECASE)
+    title_re = re.compile(r'<h[1-3][^>]*>([^<]{1,120})</h[1-3]>', re.IGNORECASE)
+    fn_hint = re.compile(r'\b((?:handle|submit|process|do|pay|checkout|place|verify|confirm|validate|reset|change|send|request)[A-Za-z0-9_]*)\b')
     for file in files:
         lines = file.content.splitlines() or ['']
-        for i,line in enumerate(lines, start=1):
-            for m in ev_re.finditer(line):
+        for i, line in enumerate(lines, start=1):
+            title_m = title_re.search(line)
+            title_text = title_m.group(1).strip() if title_m else None
+            for m in react_ev_re.finditer(line):
                 out.append({
                     'handler_name': m.group(2),
                     'ui_event': f"on{m.group(1)}",
                     'disabled_expression': None,
+                    'element_text': None,
+                    'nearby_title': title_text,
                     'source_path': file.path,
                     'start_line': i,
                     'end_line': i,
                     'snippet': line.strip(),
                 })
+            for m in vue_ev_re.finditer(line):
+                handler = m.group(1) or m.group(2)
+                if handler:
+                    out.append({
+                        'handler_name': handler,
+                        'ui_event': 'onClick',
+                        'disabled_expression': None,
+                        'element_text': None,
+                        'nearby_title': title_text,
+                        'source_path': file.path,
+                        'start_line': i,
+                        'end_line': i,
+                        'snippet': line.strip(),
+                    })
+            hm = html_onclick_re.search(line)
+            if hm:
+                out.append({
+                    'handler_name': hm.group(1),
+                    'ui_event': 'onClick',
+                    'disabled_expression': None,
+                    'element_text': None,
+                    'nearby_title': title_text,
+                    'source_path': file.path,
+                    'start_line': i,
+                    'end_line': i,
+                    'snippet': line.strip(),
+                })
+            for rg in (jq_on_re, add_ev_re):
+                m = rg.search(line)
+                if m:
+                    out.append({
+                        'handler_name': m.group(2),
+                        'ui_event': f"on{m.group(1).capitalize()}",
+                        'disabled_expression': None,
+                        'element_text': None,
+                        'nearby_title': title_text,
+                        'source_path': file.path,
+                        'start_line': i,
+                        'end_line': i,
+                        'snippet': line.strip(),
+                    })
             dm = dis_re.search(line)
             if dm:
                 out.append({
                     'handler_name': None,
                     'ui_event': 'disabled',
-                    'disabled_expression': dm.group(1).strip(),
+                    'disabled_expression': (dm.group(1) or dm.group(2) or '').strip(),
+                    'element_text': None,
+                    'nearby_title': title_text,
                     'source_path': file.path,
                     'start_line': i,
                     'end_line': i,
                     'snippet': line.strip(),
                 })
+            tm = btn_text_re.search(line)
+            if tm:
+                txt = (tm.group(1) or tm.group(2) or '').strip()
+                if txt:
+                    out.append({
+                        'handler_name': None,
+                        'ui_event': 'element_text',
+                        'disabled_expression': None,
+                        'element_text': txt,
+                        'nearby_title': title_text,
+                        'source_path': file.path,
+                        'start_line': i,
+                        'end_line': i,
+                        'snippet': line.strip(),
+                    })
             fm = fn_hint.search(line)
             if fm:
                 out.append({
                     'handler_name': fm.group(1),
                     'ui_event': 'function_hint',
                     'disabled_expression': None,
+                    'element_text': None,
+                    'nearby_title': title_text,
                     'source_path': file.path,
                     'start_line': i,
                     'end_line': i,

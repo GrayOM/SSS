@@ -564,22 +564,22 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/123/complete-payment',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = result.verification_playbooks[0]
-        self.assertEqual(p.page_hint, '결제 화면')
-        self.assertEqual(p.user_action_hint, '결제/결제완료 버튼 클릭')
+        self.assertEqual(p.page_hint, '결제/주문 화면')
+        self.assertEqual(p.user_action_hint, '결제 버튼 클릭')
         self.assertEqual(p.function_name, 'handlePayment')
         self.assertIn('검증 화면', p.console_code or '')
         self.assertIn('사용자 동작', p.console_code or '')
         self.assertIn('대상 API', p.console_code or '')
         finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
         steps = ' '.join(finding.console_poc.steps if finding.console_poc else [])
-        self.assertIn('결제 화면', steps)
-        self.assertIn('결제/결제완료 버튼 클릭', steps)
+        self.assertIn('결제/주문 화면', steps)
+        self.assertIn('결제 버튼 클릭', steps)
 
     def test_playbook_contains_proof_and_criteria(self):
         files = [f('src/FindPassword.js', "function handleVerify(){axios.post('/verify-code',{code})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = result.verification_playbooks[0]
-        self.assertEqual(p.page_hint, '비밀번호 찾기/계정 복구 화면')
+        self.assertEqual(p.page_hint, '계정 복구/인증 화면')
         self.assertEqual(p.user_action_hint, '인증번호 확인 버튼 클릭')
         self.assertTrue(len(p.proof_steps) > 0)
         self.assertTrue(len(p.success_criteria) > 0)
@@ -684,8 +684,8 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         iamport_result = analyze_console_exploitability(iamport_files, analyzer=MockConsolePocAnalyzer())
         iamport = [p for p in iamport_result.verification_playbooks if p.endpoint == '/api/iamport/prepare'][0]
 
-        self.assertEqual(stripe.user_action_hint, 'Stripe 결제 버튼 클릭')
-        self.assertEqual(iamport.user_action_hint, '아임포트 결제 요청 버튼 클릭')
+        self.assertEqual(stripe.user_action_hint, '결제 버튼 클릭')
+        self.assertEqual(iamport.user_action_hint, '결제 승인/검증 버튼 클릭')
 
     def test_steps_do_not_repeat_screen_word(self):
         files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/1/complete-payment',{amount})}")]
@@ -707,6 +707,26 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         notes = ' '.join(result.review_candidates[0].verification_notes)
         self.assertIn('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.', notes)
         self.assertNotIn('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.', notes)
+
+    def test_react_generic_submit_order_infers_payment_hints(self):
+        files = [f('src/OrderFlow.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        p = [x for x in result.verification_playbooks if x.endpoint == '/api/orders/123/pay'][0]
+        self.assertEqual(p.page_hint, '결제/주문 화면')
+        self.assertEqual(p.user_action_hint, '결제 버튼 클릭')
+
+    def test_vue_generic_place_bid_infers_auction_hints(self):
+        files = [f('src/BidWidget.vue', "@click=\"placeBid\"\nfunction placeBid(){axios.post('/api/auction/1/bid',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        p = [x for x in result.verification_playbooks if x.endpoint == '/api/auction/1/bid'][0]
+        self.assertEqual(p.page_hint, '경매/입찰 화면')
+        self.assertEqual(p.user_action_hint, '입찰 버튼 클릭')
+
+    def test_vanilla_charge_infers_wallet_hint(self):
+        files = [f('src/Wallet.js', "document.querySelector('#charge').addEventListener('click', chargeWallet)\nfunction chargeWallet(){fetch('/api/wallet/charge',{method:'POST',body:JSON.stringify({amount})})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        p = [x for x in result.verification_playbooks if x.endpoint == '/api/wallet/charge'][0]
+        self.assertEqual(p.page_hint, '지갑/포인트 화면')
 
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"

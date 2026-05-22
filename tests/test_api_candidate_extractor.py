@@ -240,6 +240,23 @@ apiClient.post('/api/pay', payload2);
         self.assertIn('amount', pay.parameters)
         self.assertIn('orderId', pay.parameters)
 
+    def test_extract_ui_handler_candidates_react_vue_jquery_vanilla_html(self):
+        files = [
+            FileContent(path='src/A.jsx', extension='.jsx', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='<h1>Checkout</h1><button onClick={submitOrder}>Pay now</button>'),
+            FileContent(path='src/B.vue', extension='.vue', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='<button @click="placeBid">Bid</button>'),
+            FileContent(path='src/C.js', extension='.js', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content="$('#verifyBtn').on('click', verifyCode)"),
+            FileContent(path='src/D.js', extension='.js', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content="document.querySelector('#charge').addEventListener('click', chargeWallet)"),
+            FileContent(path='src/E.html', extension='.html', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='<input type="button" value="Reset password" onclick="resetPassword()">'),
+        ]
+        cands = extract_ui_handler_candidates(files)
+        handlers = {c.get('handler_name') for c in cands if c.get('handler_name')}
+        self.assertIn('submitOrder', handlers)
+        self.assertIn('placeBid', handlers)
+        self.assertIn('verifyCode', handlers)
+        self.assertIn('chargeWallet', handlers)
+        self.assertIn('resetPassword', handlers)
+        self.assertTrue(any(c.get('element_text') == 'Pay now' for c in cands))
+
 
 if __name__ == '__main__':
     unittest.main()
