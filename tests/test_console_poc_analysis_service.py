@@ -482,20 +482,18 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         finding = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
         self.assertEqual(finding.console_poc.poc_type, 'browser_console')
-        self.assertIn('CONFIRM_AUTHORIZED_TEST = false', finding.console_poc.code or '')
-        self.assertIn('fetch(endpoint', finding.console_poc.code or '')
-        self.assertIn("'orderId': 'TEST_ORDER_ID'", finding.console_poc.code or '')
-        self.assertIn("'userId': 'TEST_USER_ID'", finding.console_poc.code or '')
-        self.assertIn("'amount': 1", finding.console_poc.code or '')
-        self.assertIn('Guarded PoC: CONFIRM_AUTHORIZED_TEST 값을 true로 변경해야 실행됩니다.', finding.verification_notes)
+        self.assertIn('[SSS PoC] 설치 완료', finding.console_poc.code or '')
+        self.assertIn('window.SSS_POC.armMutation()', finding.console_poc.code or '')
+        self.assertIn('window.SSS_POC.list()', finding.console_poc.code or '')
+        self.assertIn('window.fetch = async function', finding.console_poc.code or '')
 
     def test_get_endpoint_has_executable_readonly_poc(self):
         files = [f('src/get2.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
-        self.assertIn("method: 'GET'", finding.console_poc.code or '')
-        self.assertIn("credentials: 'include'", finding.console_poc.code or '')
+        self.assertIn('[SSS PoC] 설치 완료', finding.console_poc.code or '')
+        self.assertIn('API JSON이 아니라 HTML이 반환되었습니다', finding.console_poc.code or '')
 
     def test_complete_payment_and_charge_are_guarded_not_blocked(self):
         files = [
@@ -504,14 +502,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         pocs = [x.console_poc.code or '' for x in result.findings if 'Manipulation Candidate' in x.vulnerability_type]
-        self.assertTrue(any('CONFIRM_AUTHORIZED_TEST = false' in c for c in pocs))
+        self.assertTrue(any('window.SSS_POC.armMutation()' in c for c in pocs))
 
     def test_delete_endpoint_manual_check_with_reason(self):
         files = [f('src/del.js', "axios.delete('/api/admin/delete-user/{userId}')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type in {'State/Status Manipulation Candidate', 'Client-side Validation Bypass', 'Generic API Review Candidate'}][0]
-        self.assertIsNone(finding.console_poc.code)
-        self.assertTrue(any('비가역/고위험 요청은 실행형 Console PoC를 생성하지 않았습니다.' in n for n in finding.verification_notes))
+        self.assertIsNotNone(finding.console_poc.code)
+        self.assertIn('replay blocked: high-risk endpoint', finding.console_poc.code or '')
 
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"

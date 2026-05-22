@@ -320,21 +320,100 @@ if (target) {
 def _build_network_hook_mutation_poc(endpoint: str) -> str:
     endpoint_js = json.dumps(endpoint)
     return f"""(() => {{
-  const CONFIRM_AUTHORIZED_TEST = false;
-  if (!CONFIRM_AUTHORIZED_TEST) {{
-    throw new Error('승인된 테스트 환경에서만 true로 변경 후 실행하세요.');
+  const TARGET_ENDPOINT = {endpoint_js};
+  const SSS_POC_STATE = {{ mutationArmed: false, replayArmed: false }};
+  const BLOCKED_REPLAY = /(delete|refund|withdraw|transfer|bulk)/i.test(TARGET_ENDPOINT);
+  const captured = [];
+
+  const isHtmlFallback = (contentType, text) => {{
+    const ct = String(contentType || '').toLowerCase();
+    const body = String(text || '').trim().toLowerCase();
+    return ct.includes('text/html') || body.startsWith('<!doctype html') || body.startsWith('<html') || body.includes('id="root"') || body.includes('create-react-app');
+  }};
+
+  const logCapturedResponse = async (resp) => {{
+    const ct = resp.headers?.get?.('content-type') || '';
+    const body = await resp.clone().text().catch(() => '');
+    console.log('response status:', resp.status);
+    console.log('response content-type:', ct || '(none)');
+    console.log('response body preview:', String(body).slice(0, 300));
+    if (isHtmlFallback(ct, body)) {{
+      console.warn('[SSS PoC] API JSON이 아니라 HTML이 반환되었습니다. 프론트엔드 라우팅 fallback 가능성이 있습니다.');
+      console.warn('직접 endpoint 호출 대신 실제 UI 버튼 클릭 후 캡처된 요청을 확인하세요.');
+    }}
+  }};
+
+  window.SSS_POC = {{
+    captured,
+    armMutation() {{
+      SSS_POC_STATE.mutationArmed = true;
+      console.warn('[SSS PoC] mutation mode armed. 승인된 테스트 환경에서만 진행하세요.');
+    }},
+    armReplay() {{
+      if (BLOCKED_REPLAY) {{
+        console.warn('[SSS PoC] replay blocked: high-risk endpoint');
+        return;
+      }}
+      SSS_POC_STATE.replayArmed = true;
+      console.warn('[SSS PoC] replay mode armed. 승인된 테스트 환경에서만 진행하세요.');
+    }},
+    disarm() {{
+      SSS_POC_STATE.mutationArmed = false;
+      SSS_POC_STATE.replayArmed = false;
+      console.log('[SSS PoC] disarmed.');
+    }},
+    list() {{
+      console.table(captured.map((x, i) => ({{ index: i, method: x.method, url: x.url }})));
+    }},
+    async replay(index, overrides = {{}}) {{
+      if (BLOCKED_REPLAY) {{
+        console.warn('[SSS PoC] replay blocked: high-risk endpoint');
+        return null;
+      }}
+      if (!SSS_POC_STATE.replayArmed) {{
+        console.warn('[SSS PoC] replayArmed=false. window.SSS_POC.armReplay() 후 실행하세요.');
+        return null;
+      }}
+      const item = captured[index];
+      if (!item) {{
+        console.warn('[SSS PoC] invalid capture index');
+        return null;
+      }}
+      const init = Object.assign({{}}, item.init || {{}}, overrides || {{}});
+      const resp = await originalFetch(item.url, init);
+      await logCapturedResponse(resp);
+      return resp;
+    }},
+  }};
+
+  if (/test_order_id|test_user_id|test_value/i.test(TARGET_ENDPOINT)) {{
+    console.warn('이 endpoint에는 placeholder가 포함되어 있어 직접 호출 대신 실제 UI 요청 캡처를 사용합니다.');
   }}
   const originalFetch = window.fetch;
   window.fetch = async function(input, init = {{}}) {{
     const url = String(input);
-    if (url.includes({endpoint_js}) && init?.body) {{
-      const payload = JSON.parse(init.body);
-      if ('amount' in payload) payload.amount = 1;
-      if ('status' in payload) payload.status = 'TEST_STATUS';
-      init.body = JSON.stringify(payload);
-      debugger;
+    if (url.includes(TARGET_ENDPOINT)) {{
+      const method = String(init?.method || 'GET').toUpperCase();
+      let parsed = null;
+      if (init?.body) {{
+        try {{ parsed = JSON.parse(init.body); }} catch (e) {{}}
+      }}
+      if (SSS_POC_STATE.mutationArmed && parsed && !BLOCKED_REPLAY) {{
+        if ('amount' in parsed) parsed.amount = 1;
+        if ('status' in parsed) parsed.status = 'TEST_STATUS';
+        init.body = JSON.stringify(parsed);
+      }}
+      captured.push({{ method, url, init }});
+      console.group('[SSS PoC] request captured');
+      console.log('url:', url);
+      console.log('method:', method);
+      console.log('request body:', init?.body || null);
+      console.log('parsed payload:', parsed);
+      console.groupEnd();
     }}
-    return originalFetch.call(this, input, init);
+    const response = await originalFetch.call(this, input, init);
+    if (url.includes(TARGET_ENDPOINT)) await logCapturedResponse(response);
+    return response;
   }};
   const originalXHROpen = XMLHttpRequest.prototype.open;
   const originalXHRSend = XMLHttpRequest.prototype.send;
@@ -356,15 +435,24 @@ def _build_network_hook_mutation_poc(endpoint: str) -> str:
   }};
   if (window.axios && axios.interceptors && axios.interceptors.request) {{
     axios.interceptors.request.use((config) => {{
-      if (String(config?.url || '').includes({endpoint_js}) && config?.data && typeof config.data === 'object') {{
-        if ('amount' in config.data) config.data.amount = 1;
-        if ('status' in config.data) config.data.status = 'TEST_STATUS';
-        debugger;
+      if (String(config?.url || '').includes(TARGET_ENDPOINT)) {{
+        if (SSS_POC_STATE.mutationArmed && config?.data && typeof config.data === 'object' && !BLOCKED_REPLAY) {{
+          if ('amount' in config.data) config.data.amount = 1;
+          if ('status' in config.data) config.data.status = 'TEST_STATUS';
+        }}
+        captured.push({{ method: String(config?.method || 'GET').toUpperCase(), url: String(config?.url || ''), init: config }});
       }}
       return config;
     }});
   }}
-  console.log('[PoC] fetch/XHR/axios hook installed. 정상 UI 버튼을 눌러 요청을 발생시키세요.');
+  console.group('[SSS PoC] 설치 완료');
+  console.log('mode:', 'observe');
+  console.log('target:', TARGET_ENDPOINT);
+  console.log('다음 단계: 정상 UI에서 대상 버튼을 클릭하세요.');
+  console.log('요청이 감지되면 URL/method/payload/status가 출력됩니다.');
+  console.log('변조 검증은 window.SSS_POC.armMutation() 실행 후 다시 버튼을 클릭하세요.');
+  console.log('재전송 검증은 window.SSS_POC.armReplay() 후 window.SSS_POC.replay(index, overrides)로 수행하세요.');
+  console.groupEnd();
 }})();"""
 
 
@@ -603,70 +691,12 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         return payload
 
     def _build_readonly_get_poc(self, endpoint: str) -> str:
-        base_var = self._is_base_variable_endpoint(endpoint)
         endpoint = self._replace_endpoint_placeholders(endpoint)
-        endpoint_decl = (
-            f"  const API_BASE = 'https://TARGET_BASE_URL';\n  const endpoint = `${{API_BASE}}{self._strip_base_variable(endpoint)}`;"
-            if base_var
-            else f"  const endpoint = '{endpoint}';"
-        )
-        return f"""(async () => {{
-{endpoint_decl}
-
-  const res = await fetch(endpoint, {{
-    method: 'GET',
-    credentials: 'include'
-  }});
-
-  const text = await res.text();
-
-  console.log('[PoC] read-only check:', {{
-    endpoint,
-    status: res.status,
-    body: text
-  }});
-}})();"""
+        return _build_network_hook_mutation_poc(endpoint)
 
     def _build_guarded_mutation_poc(self, method: str, endpoint: str, parameters: list[str]) -> str:
-        base_var = self._is_base_variable_endpoint(endpoint)
         endpoint = self._replace_endpoint_placeholders(endpoint)
-        endpoint_decl = (
-            f"  const API_BASE = 'https://TARGET_BASE_URL';\n  const endpoint = `${{API_BASE}}{self._strip_base_variable(endpoint)}`;"
-            if base_var
-            else f"  const endpoint = '{endpoint}';"
-        )
-        payload = self._build_payload_from_parameters(parameters)
-        payload_lines = '\n'.join([f"    {repr(k)}: {repr(v)}," for k, v in payload.items()])
-        return f"""(async () => {{
-  const CONFIRM_AUTHORIZED_TEST = false;
-  if (!CONFIRM_AUTHORIZED_TEST) {{
-    throw new Error('승인된 테스트 환경에서만 true로 변경 후 실행하세요.');
-  }}
-
-{endpoint_decl}
-
-  const payload = {{
-{payload_lines}
-  }};
-
-  const res = await fetch(endpoint, {{
-    method: '{method}',
-    credentials: 'include',
-    headers: {{
-      'Content-Type': 'application/json'
-    }},
-    body: JSON.stringify(payload)
-  }});
-
-  const text = await res.text();
-
-  console.log('[PoC] guarded request check:', {{
-    endpoint,
-    payload,
-    status: res.status,
-    body: text
-  }});
-}})();"""
+        return _build_network_hook_mutation_poc(endpoint)
 
     def _is_irreversible_or_high_risk(self, method: str, endpoint: str, parameters: list[str]) -> bool:
         if method.upper() == 'DELETE':
