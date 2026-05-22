@@ -9,6 +9,7 @@ from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 from app.services.json_utils import extract_json_payload
 from app.services.prompt_builder import build_candidate_analysis_prompt, build_console_poc_analysis_prompt
+from app.services.source_intelligence import build_project_understanding
 
 KEYWORDS = [
     'login', 'auth', 'session', 'token', 'jwt', 'cookie', 'localStorage', 'sessionStorage', 'userType', 'role',
@@ -1307,6 +1308,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     review_candidates: list[ReadableFinding] = []
     seen_flow: set[tuple[str, str, str, str, str, str]] = set()
     playbook_candidates: list[tuple[int, ConsoleVerificationPlaybookSummary]] = []
+    project_map = build_project_understanding(selected)
 
     def _is_compressed_or_library_evidence(finding: ReadableFinding, function_name: str | None) -> bool:
         if not finding.evidence:
@@ -1369,6 +1371,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         is_compressed = _is_compressed_or_library_evidence(f, function_name)
         score = 0
         score += 3 if function_name else -3
+        score += 3 if any(x.ui_event_handler == function_name and x.endpoint == endpoint and x.source_path == flow[1] for x in project_map.api_inventory) else 0
         score += 2 if action_hint != '대상 기능 버튼 클릭' else -2
         score += 1 if page_hint != '해당 기능 화면' else -2
         score += 2 if endpoint != 'UNKNOWN' else -2
@@ -1446,4 +1449,5 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         executive_findings=executive_findings,
         verification_playbooks=verification_playbooks,
         review_candidates=review_candidates,
+        project_understanding=project_map,
     )

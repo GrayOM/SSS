@@ -728,6 +728,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         p = [x for x in result.verification_playbooks if x.endpoint == '/api/wallet/charge'][0]
         self.assertEqual(p.page_hint, '지갑/포인트 화면')
 
+    def test_result_contains_project_understanding(self):
+        files = [f('src/App.jsx', "<Route path='/payment' element={<PaymentPage />} />"), f('src/PaymentPage.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertIsNotNone(result.project_understanding)
+        pu = result.project_understanding
+        self.assertTrue(any(r.path == '/payment' for r in pu.routes))
+        self.assertTrue(any(a.endpoint == '/api/orders/123/pay' for a in pu.api_inventory))
+
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))

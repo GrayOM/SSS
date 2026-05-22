@@ -181,6 +181,66 @@ class ConsoleVerificationPlaybookSummary(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class ProjectRoute(BaseModel):
+    path: str | None = None
+    component: str | None = None
+    source_path: str
+    line: int | None = None
+
+
+class ProjectPage(BaseModel):
+    source_path: str
+    component_name: str | None = None
+    route_paths: list[str] = Field(default_factory=list)
+    page_hint: str | None = None
+    title_texts: list[str] = Field(default_factory=list)
+
+
+class UiEventCandidate(BaseModel):
+    source_path: str
+    handler_name: str | None = None
+    ui_event: str
+    element_text: str | None = None
+    disabled_expression: str | None = None
+    nearby_title: str | None = None
+    start_line: int
+    end_line: int
+
+
+class ApiInventoryItem(BaseModel):
+    source_path: str
+    function_name: str | None = None
+    method: str
+    endpoint: str
+    sink: str
+    parameters: list[str] = Field(default_factory=list)
+    start_line: int
+    end_line: int
+    ui_event_handler: str | None = None
+    risk_category: str | None = None
+
+
+class BusinessFlow(BaseModel):
+    flow_type: str
+    source_paths: list[str] = Field(default_factory=list)
+    handlers: list[str] = Field(default_factory=list)
+    endpoints: list[str] = Field(default_factory=list)
+    confidence: str = 'medium'
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ProjectUnderstandingResult(BaseModel):
+    framework: str | None = None
+    routes: list[ProjectRoute] = Field(default_factory=list)
+    pages: list[ProjectPage] = Field(default_factory=list)
+    ui_events: list[UiEventCandidate] = Field(default_factory=list)
+    api_inventory: list[ApiInventoryItem] = Field(default_factory=list)
+    business_flows: list[BusinessFlow] = Field(default_factory=list)
+    auth_sources: list[str] = Field(default_factory=list)
+    storage_keys: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+
+
 class ReadableAnalysisResult(BaseModel):
     finding_count: int
     findings: list[ReadableFinding]
@@ -188,6 +248,7 @@ class ReadableAnalysisResult(BaseModel):
     executive_findings: list[ReadableFinding] = Field(default_factory=list)
     verification_playbooks: list[ConsoleVerificationPlaybookSummary] = Field(default_factory=list)
     review_candidates: list[ReadableFinding] = Field(default_factory=list)
+    project_understanding: ProjectUnderstandingResult | None = None
 
 
 class AnalysisDebugDropReason(BaseModel):
