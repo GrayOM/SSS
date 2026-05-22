@@ -568,7 +568,7 @@ def _infer_page_action_hints(path: str, snippet: str, function_name: str | None 
             fn = m.group(1)
     action = '대상 기능 버튼 클릭'
     f = (fn or '').lower()
-    if 'handlepay' in f or 'handlepayment' in f:
+    if 'handlepay' in f or 'handlepayment' in f or 'handleretrypayment' in f:
         action = '결제/결제완료 버튼 클릭'
     elif 'handlecharge' in f:
         action = '포인트 충전 버튼 클릭'
@@ -1209,6 +1209,24 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     executive_findings: list[ReadableFinding] = []
     review_candidates: list[ReadableFinding] = []
     seen_flow: set[tuple[str, str, str, str, str, str]] = set()
+    playbook_candidates: list[tuple[int, ConsoleVerificationPlaybookSummary]] = []
+
+    def _is_compressed_or_library_evidence(finding: ReadableFinding, function_name: str | None) -> bool:
+        if not finding.evidence:
+            return False
+        snippet = finding.evidence[0].snippet or ''
+        lines = snippet.splitlines() or [snippet]
+        avg_len = sum(len(x) for x in lines) / max(1, len(lines))
+        if any(len(x) >= 800 for x in lines):
+            return True
+        low = snippet.lower()
+        signals = ('deflate', 'gzip', 'crypto', 'webpack', '__webpack_require__', 'sourcemappingurl', 'function(', 'return wa', 'constants')
+        if sum(1 for s in signals if s in low) >= 2:
+            return True
+        fn = (function_name or '').strip()
+        if 1 <= len(fn) <= 2:
+            return True
+        return avg_len > 240
 
     def _flow_and_meta(f: ReadableFinding) -> tuple[tuple[str, str, str, str, str, str], str, str, str]:
         source_path = f.evidence[0].source_path if f.evidence else (f.affected_files[0] if f.affected_files else '')
@@ -1228,18 +1246,35 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         no_code = not (f.console_poc and f.console_poc.code)
         ux_disabled = any(x in ' '.join(f.evidence[0].data_flow).lower() for x in ('disabled_expression: loading', 'disabled_expression: submitting', 'disabled_expression: isloading')) if f.evidence else False
         top_import_like = bool(f.evidence and f.evidence[0].start_line <= 20 and 'import ' in (f.evidence[0].snippet or '').lower())
-        is_auto_fn = (function_name or '').lower() in {
+        fn_low = (function_name or '').lower()
+        is_auto_fn = fn_low in {
             'loaddashboarddata', 'fetchdashboard', 'loaduser', 'loaduserinfo', 'fetchuser', 'fetchme', 'fetchsession',
             'getsession', 'initdata', 'initialize', 'loadorders', 'fetchorders'
-        } or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
-        if is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type):
+        } or fn_low.startswith(('load', 'fetch', 'get', 'init', 'initialize', 'request')) or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
+        is_generic_action = action_hint == '대상 기능 버튼 클릭'
+        is_generic_page = page_hint == '해당 기능 화면'
+        is_session_get = method == 'GET' and endpoint.lower() in {'/api/user/session', '/api/auth/me', '/api/me', '/api/profile/me'}
+        is_generic_type = f.vulnerability_type == 'Generic API Review Candidate'
+        is_compressed = _is_compressed_or_library_evidence(f, function_name)
+        should_review = (
+            is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
+            is_generic_action or is_generic_page or function_name is None or is_session_get or is_compressed or
+            (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
+        )
+        if should_review:
             if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
                 f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
+            if is_generic_action:
+                f.verification_notes.append('사용자 동작을 자동 추론하지 못해 수동 검토 후보로 분류했습니다.')
+            if is_session_get or is_auto_fn:
+                f.verification_notes.append('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.')
+            if is_compressed:
+                f.verification_notes.append('압축/라이브러리성 코드로 판단되어 수동 검토 후보로 분류했습니다.')
             review_candidates.append(f)
         else:
             if flow not in seen_flow:
                 seen_flow.add(flow)
-                verification_playbooks.append(ConsoleVerificationPlaybookSummary(
+                pb = ConsoleVerificationPlaybookSummary(
                     id=f.id,
                     title=f.title,
                     source_path=flow[1],
@@ -1257,9 +1292,28 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     failure_criteria=['서버가 400/401/403으로 차단함', 'payload 변조가 서버 반영 전에 정규화됨', 'endpoint가 호출되지 않음', 'HTML fallback이 반환됨'],
                     evidence_to_capture=['Console 캡처 로그', 'Network 요청 URL/method', '변조 전 payload', '변조 후 payload', '서버 응답 status/body', '화면 상태 변화'],
                     limitations=(f.verification_playbook.limitations if f.verification_playbook else []),
-                ))
+                )
+                pri = {
+                    'Payment/Point Manipulation Candidate': 1,
+                    'Account Recovery Flow Abuse Candidate': 2,
+                    'IDOR / Unauthorized Data Access Candidate': 3,
+                    'State/Status Manipulation Candidate': 4,
+                    'Client-side Validation Bypass': 5,
+                }.get(f.vulnerability_type, 99)
+                playbook_candidates.append((pri, pb))
             if (f.severity in {'high', 'medium'} and f.confidence != 'low') or any(x in f.vulnerability_type for x in ('Payment', 'Account Recovery', 'IDOR', 'Authorization')):
                 executive_findings.append(f)
+    # sort, dedup, cap playbooks
+    playbook_candidates.sort(key=lambda x: x[0])
+    seen_pb: set[tuple[str, str, str]] = set()
+    for _, pb in playbook_candidates:
+        key = (pb.source_path, pb.endpoint or '', pb.function_name or '')
+        if key in seen_pb:
+            continue
+        seen_pb.add(key)
+        verification_playbooks.append(pb)
+        if len(verification_playbooks) >= 7:
+            break
     return ReadableAnalysisResult(
         finding_count=len(findings),
         findings=findings,

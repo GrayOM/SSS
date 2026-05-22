@@ -553,6 +553,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertTrue(len(result.review_candidates) >= 1)
+        self.assertTrue(any('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' in ' '.join(x.verification_notes) for x in result.review_candidates))
 
     def test_disabled_loading_is_review_candidate_not_playbook(self):
         files = [f('src/a.js', "<button disabled={loading}>Pay</button>")]
@@ -602,6 +603,18 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertTrue(len(result.review_candidates) >= 1)
 
+    def test_generic_api_review_candidate_not_promoted_to_playbook(self):
+        files = [f('src/x.js', "fetch('/api/random-open-endpoint')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.risk_type == 'Generic API Review Candidate' for p in result.verification_playbooks))
+
+    def test_compressed_library_like_evidence_goes_review(self):
+        snippet = "function M(){const constants='x'; return wa; /* gzip deflate */}"
+        files = [f('src/verification.js', snippet + " axios.post('/api/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        self.assertTrue(any('압축/라이브러리성 코드' in ' '.join(x.verification_notes) for x in result.review_candidates))
+
     def test_generic_action_hint_adds_manual_verification_note(self):
         files = [f('src/unknown.js', "function doRequest(){axios.post('/api/pay',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
@@ -618,6 +631,12 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         fnames = sorted([x.function_name for x in result.verification_playbooks if x.function_name])
         self.assertIn('handlePay', fnames)
         self.assertIn('handleRetryPayment', fnames)
+
+    def test_playbooks_are_capped_to_seven(self):
+        src = "\n".join([f"function handlePay{i}(){{axios.post('/api/pay/{i}',{{amount}})}}" for i in range(12)])
+        files = [f('src/PaymentPage.js', src)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertLessEqual(len(result.verification_playbooks), 7)
 
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
