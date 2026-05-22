@@ -1050,7 +1050,21 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 conf = 'medium'
             notes.append('고위험 요청은 replay/mutation이 차단되며 observe mode만 제공됩니다.')
 
+        if action_hint == '대상 기능 버튼 클릭':
+            notes.append('정확한 버튼/화면을 자동 추론하지 못했습니다. source_path/function_name 기준 수동 확인 필요.')
+
         classification = self._classify_api_candidate(candidate)
+        steps = [
+            'Console에 코드 전체 붙여넣기',
+            '[SSS PoC] 설치 완료 로그 확인',
+            f'{page_hint} 화면으로 이동',
+            f'{action_hint} 수행',
+            'window.SSS_POC.list()로 캡처 요청 확인',
+            '필요 시 window.SSS_POC.armMutation() 실행',
+            f'{action_hint} 다시 수행',
+            '변조 전/후 payload와 서버 응답 비교',
+            'window.SSS_POC.disarm()으로 종료',
+        ]
         return ReadableFinding(
             id=self._id(f"{f.path}:{method}:{endpoint}:{sink}:{','.join(sorted(parameters))}:{classification['vulnerability_type']}"),
             title=classification['title'],
@@ -1064,7 +1078,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 poc_type=poc_type,
                 description='브라우저 Console에 붙여넣으면 실제 UI에서 발생하는 fetch/XHR/axios 요청을 관찰하고, 승인된 테스트 환경에서 payload 변조 검증을 수행할 수 있는 PoC입니다.',
                 preconditions=['승인된 테스트 계정', '테스트 데이터 또는 테스트 주문', 'Console에서 [SSS PoC] 설치 완료 로그 확인', '변조 검증 전 window.SSS_POC.armMutation()을 명시적으로 실행'],
-                steps=['Console에 코드 전체 붙여넣기', '[SSS PoC] 설치 완료 로그 확인', '정상 UI에서 대상 기능 버튼 클릭', 'window.SSS_POC.list()로 캡처 요청 확인', '필요 시 window.SSS_POC.armMutation() 실행', '다시 버튼 클릭 후 payload 변조/응답 확인', 'window.SSS_POC.disarm()으로 종료'],
+                steps=steps,
                 code=poc_code,
                 expected_result='요청 캡처 로그 및 응답 정보를 통해 검증 포인트를 확인하고, armMutation 후 재실행 시 payload 변조 적용 여부를 확인',
                 safety=safety,
@@ -1214,7 +1228,10 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         no_code = not (f.console_poc and f.console_poc.code)
         ux_disabled = any(x in ' '.join(f.evidence[0].data_flow).lower() for x in ('disabled_expression: loading', 'disabled_expression: submitting', 'disabled_expression: isloading')) if f.evidence else False
         top_import_like = bool(f.evidence and f.evidence[0].start_line <= 20 and 'import ' in (f.evidence[0].snippet or '').lower())
-        is_auto_fn = (function_name or '').lower() in {'loaddashboarddata', 'fetchdashboard'} or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
+        is_auto_fn = (function_name or '').lower() in {
+            'loaddashboarddata', 'fetchdashboard', 'loaduser', 'loaduserinfo', 'fetchuser', 'fetchme', 'fetchsession',
+            'getsession', 'initdata', 'initialize', 'loadorders', 'fetchorders'
+        } or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
         if is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type):
             if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
                 f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')

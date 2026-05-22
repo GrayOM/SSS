@@ -569,6 +569,10 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('검증 화면', p.console_code or '')
         self.assertIn('사용자 동작', p.console_code or '')
         self.assertIn('대상 API', p.console_code or '')
+        finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
+        steps = ' '.join(finding.console_poc.steps if finding.console_poc else [])
+        self.assertIn('결제 화면', steps)
+        self.assertIn('결제/결제완료 버튼 클릭', steps)
 
     def test_playbook_contains_proof_and_criteria(self):
         files = [f('src/FindPassword.js', "function handleVerify(){axios.post('/verify-code',{code})}")]
@@ -593,10 +597,16 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn('click(index)', code)
 
     def test_load_dashboard_get_goes_review_candidate(self):
-        files = [f('src/AdminMypage.js', "function loadDashboardData(){fetch('/api/user/session')}")]
+        files = [f('src/AdminMypage.js', "function fetchSession(){fetch('/api/user/session')}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertTrue(len(result.review_candidates) >= 1)
+
+    def test_generic_action_hint_adds_manual_verification_note(self):
+        files = [f('src/unknown.js', "function doRequest(){axios.post('/api/pay',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
+        self.assertTrue(any('수동 확인 필요' in n for n in finding.verification_notes))
 
     def test_same_endpoint_different_function_creates_separate_playbooks(self):
         files = [
