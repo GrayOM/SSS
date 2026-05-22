@@ -653,6 +653,61 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(p.page_hint, '경매/입찰 화면')
         self.assertEqual(p.user_action_hint, '입찰 버튼 클릭')
 
+
+    def test_findpassword_send_verification_promoted_with_action_hint(self):
+        files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE}/send-verification',{email})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(p.endpoint == '{API_BASE}/send-verification' for p in result.verification_playbooks))
+        pbook = [p for p in result.verification_playbooks if p.endpoint == '{API_BASE}/send-verification'][0]
+        self.assertEqual(pbook.user_action_hint, '인증번호 발송 버튼 클릭')
+        finding = [x for x in result.findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
+        self.assertTrue(any('API_BASE 값을 실제 대상 URL로 변경해야 합니다.' in n for n in finding.verification_notes))
+
+    def test_findpassword_verify_code_promoted_with_action_hint(self):
+        files = [f('src/FindPassword.js', "function verifyCode(){axios.post('{API_BASE}/verify-code',{code})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pbook = [p for p in result.verification_playbooks if p.endpoint == '{API_BASE}/verify-code'][0]
+        self.assertEqual(pbook.user_action_hint, '인증번호 확인 버튼 클릭')
+
+    def test_findpassword_reset_password_promoted_with_action_hint(self):
+        files = [f('src/FindPassword.js', "function resetPassword(){axios.put('{API_BASE}/reset-password',{password})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pbook = [p for p in result.verification_playbooks if p.endpoint == '{API_BASE}/reset-password'][0]
+        self.assertEqual(pbook.user_action_hint, '비밀번호 재설정 버튼 클릭')
+
+    def test_purchase_stripe_and_iamport_action_hints(self):
+        stripe_files = [f('src/PurchasePage.js', "function handleStripeCheckout(){axios.post('/api/stripe/create-checkout-session',{amount})}")]
+        stripe_result = analyze_console_exploitability(stripe_files, analyzer=MockConsolePocAnalyzer())
+        stripe = [p for p in stripe_result.verification_playbooks if p.endpoint == '/api/stripe/create-checkout-session'][0]
+
+        iamport_files = [f('src/PurchasePage.js', "function requestIamportPay(){axios.post('/api/iamport/prepare',{amount})}")]
+        iamport_result = analyze_console_exploitability(iamport_files, analyzer=MockConsolePocAnalyzer())
+        iamport = [p for p in iamport_result.verification_playbooks if p.endpoint == '/api/iamport/prepare'][0]
+
+        self.assertEqual(stripe.user_action_hint, 'Stripe 결제 버튼 클릭')
+        self.assertEqual(iamport.user_action_hint, '아임포트 결제 요청 버튼 클릭')
+
+    def test_steps_do_not_repeat_screen_word(self):
+        files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/1/complete-payment',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if x.console_poc and x.console_poc.code and x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
+        self.assertFalse(any('화면 화면으로 이동' in step for step in finding.console_poc.steps))
+
+    def test_verify_identity_classification_for_non_findpassword(self):
+        files = [f('src/ItemDetailPage.js', "function handleVerifyCode(){axios.post('/api/user/verify-identity',{code})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        finding = [x for x in result.findings if '/api/user/verify-identity' in (x.console_poc.code or '')][0]
+        self.assertEqual(finding.vulnerability_type, 'Identity Verification / Action Authorization Bypass Candidate')
+
+    def test_generic_get_recommend_note_not_session_note(self):
+        files = [f('src/nls.js', "function getRecommendSearch(){fetch('/header/recommend_search.do')}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        self.assertTrue(len(result.review_candidates) >= 1)
+        notes = ' '.join(result.review_candidates[0].verification_notes)
+        self.assertIn('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.', notes)
+        self.assertNotIn('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.', notes)
+
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))

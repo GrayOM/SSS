@@ -571,8 +571,22 @@ def _infer_page_action_hints(path: str, snippet: str, function_name: str | None 
     f = (fn or '').lower()
     if 'handlepay' in f or 'handlepayment' in f or 'handleretrypayment' in f:
         action = '결제/결제완료 버튼 클릭'
+    elif 'handlestripecheckout' in f:
+        action = 'Stripe 결제 버튼 클릭'
+    elif 'requestiamportpay' in f:
+        action = '아임포트 결제 요청 버튼 클릭'
+    elif 'handleiamportquick' in f:
+        action = '간편결제/포인트 충전 버튼 클릭'
+    elif 'handlepointcharge' in f:
+        action = '포인트 충전 버튼 클릭'
     elif 'handlecharge' in f:
         action = '포인트 충전 버튼 클릭'
+    elif 'sendverificationcode' in f:
+        action = '인증번호 발송 버튼 클릭'
+    elif 'verifycode' in f:
+        action = '인증번호 확인 버튼 클릭'
+    elif 'resetpassword' in f:
+        action = '비밀번호 재설정 버튼 클릭'
     elif 'handleverify' in f:
         action = '인증번호 확인 버튼 클릭'
     elif 'handleresetpassword' in f:
@@ -584,6 +598,10 @@ def _infer_page_action_hints(path: str, snippet: str, function_name: str | None 
     elif 'handlepurchase' in f:
         action = '구매 버튼 클릭'
     return page_hint, action, fn
+
+def _format_page_step(page_hint: str) -> str:
+    return f'{page_hint}으로 이동' if page_hint.endswith('화면') else f'{page_hint} 화면으로 이동'
+
 
 def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, auth: bool = False, disabled: bool = False, page_hint: str | None = None, action_hint: str | None = None, function_name: str | None = None) -> ConsoleVerificationPlaybook:
     if auth:
@@ -916,7 +934,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation='안전한 DOM API 사용',
         )
 
-    def _classify_api_candidate(self, candidate: ApiCallCandidate) -> dict[str, str]:
+    def _classify_api_candidate(self, candidate: ApiCallCandidate, source_path: str = '') -> dict[str, str]:
         endpoint_l = (candidate.endpoint or '').lower()
         method = (candidate.method or 'UNKNOWN').upper()
         params_l = [p.lower() for p in (candidate.parameters or [])]
@@ -953,6 +971,15 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 'impact': '권한/상태 값 위변조 가능성',
                 'root_cause': '클라이언트 제어 값에 대한 서버 검증 불확실',
                 'remediation': '상태/권한 변경 API 서버 검증 및 감사 로깅 강화',
+                'severity': 'high',
+            }
+        if 'verify-identity' in endpoint_l and 'findpassword' not in source_path.lower():
+            return {
+                'vulnerability_type': 'Identity Verification / Action Authorization Bypass Candidate',
+                'title': '본인 인증/행위 검증 흐름 우회 가능성 검증 필요',
+                'impact': '인증/행위 검증 우회 시 권한 없는 작업 가능성',
+                'root_cause': '본인 인증/행위 검증 흐름의 서버 검증 불확실',
+                'remediation': '행위 승인/본인인증 검증을 서버에서 강제하고 토큰 재검증 적용',
                 'severity': 'high',
             }
         if recovery_keys & endpoint_tokens:
@@ -1054,11 +1081,11 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         if action_hint == '대상 기능 버튼 클릭':
             notes.append('정확한 버튼/화면을 자동 추론하지 못했습니다. source_path/function_name 기준 수동 확인 필요.')
 
-        classification = self._classify_api_candidate(candidate)
+        classification = self._classify_api_candidate(candidate, source_path=f.path)
         steps = [
             'Console에 코드 전체 붙여넣기',
             '[SSS PoC] 설치 완료 로그 확인',
-            f'{page_hint} 화면으로 이동',
+            _format_page_step(page_hint),
             f'{action_hint} 수행',
             'window.SSS_POC.list()로 캡처 요청 확인',
             '필요 시 window.SSS_POC.armMutation() 실행',
@@ -1248,10 +1275,18 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         ux_disabled = any(x in ' '.join(f.evidence[0].data_flow).lower() for x in ('disabled_expression: loading', 'disabled_expression: submitting', 'disabled_expression: isloading')) if f.evidence else False
         top_import_like = bool(f.evidence and f.evidence[0].start_line <= 20 and 'import ' in (f.evidence[0].snippet or '').lower())
         fn_low = (function_name or '').lower()
-        is_auto_fn = fn_low in {
-            'loaddashboarddata', 'fetchdashboard', 'loaduser', 'loaduserinfo', 'fetchuser', 'fetchme', 'fetchsession',
-            'getsession', 'initdata', 'initialize', 'loadorders', 'fetchorders'
-        } or fn_low.startswith(('load', 'fetch', 'get', 'init', 'initialize', 'request')) or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
+        explicit_action_fn = {
+            'sendverificationcode', 'verifycode', 'resetpassword',
+            'handlestripecheckout', 'requestiamportpay', 'handleiamportquick', 'handlepointcharge',
+        }
+        is_auto_fn = (
+            fn_low in {
+                'loaddashboarddata', 'fetchdashboard', 'loaduser', 'loaduserinfo', 'fetchuser', 'fetchme', 'fetchsession',
+                'getsession', 'initdata', 'initialize', 'loadorders', 'fetchorders'
+            }
+            or (fn_low.startswith(('load', 'fetch', 'get', 'init', 'initialize', 'request')) and fn_low not in explicit_action_fn)
+            or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
+        )
         is_generic_action = action_hint == '대상 기능 버튼 클릭'
         is_generic_page = page_hint == '해당 기능 화면'
         endpoint_norm = endpoint.lower().split('?', 1)[0].rstrip('/')
@@ -1272,8 +1307,10 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
             if is_generic_action:
                 f.verification_notes.append('사용자 동작을 자동 추론하지 못해 수동 검토 후보로 분류했습니다.')
-            if is_session_get or is_auto_fn:
+            if is_session_get:
                 f.verification_notes.append('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.')
+            elif is_auto_fn:
+                f.verification_notes.append('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.')
             if is_compressed:
                 f.verification_notes.append('압축/라이브러리성 코드로 판단되어 수동 검토 후보로 분류했습니다.')
             if is_generic_type:
@@ -1295,7 +1332,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     confidence=f.confidence,
                     console_code=(f.console_poc.code if f.console_poc else None),
                     setup_steps=(f.console_poc.steps if f.console_poc else []),
-                    proof_steps=['Console에 PoC 붙여넣기', '[SSS PoC] 설치 완료 확인', f'{page_hint} 화면으로 이동', f'{action_hint} 수행', 'window.SSS_POC.list() 실행', '캡처된 요청 endpoint/method/payload 확인', 'window.SSS_POC.armMutation() 실행', '동일 동작 재수행', '변조 전/후 payload와 서버 응답 비교'],
+                    proof_steps=['Console에 PoC 붙여넣기', '[SSS PoC] 설치 완료 확인', _format_page_step(page_hint), f'{action_hint} 수행', 'window.SSS_POC.list() 실행', '캡처된 요청 endpoint/method/payload 확인', 'window.SSS_POC.armMutation() 실행', '동일 동작 재수행', '변조 전/후 payload와 서버 응답 비교'],
                     success_criteria=['요청 payload가 Console에 캡처됨', 'armMutation 후 지정 필드가 변조됨', '서버가 변조된 값에 대해 200/201 또는 상태 변경을 허용함', '또는 권한 없는 객체 조회가 200으로 응답함'],
                     failure_criteria=['서버가 400/401/403으로 차단함', 'payload 변조가 서버 반영 전에 정규화됨', 'endpoint가 호출되지 않음', 'HTML fallback이 반환됨'],
                     evidence_to_capture=['Console 캡처 로그', 'Network 요청 URL/method', '변조 전 payload', '변조 후 payload', '서버 응답 status/body', '화면 상태 변화'],
