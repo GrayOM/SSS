@@ -159,6 +159,10 @@ class ReadableFinding(BaseModel):
     verification_notes: list[str] = Field(default_factory=list)
     related_cwe: list[str] = Field(default_factory=list)
     verification_playbook: ConsoleVerificationPlaybook | None = None
+    poc_generation_status: str | None = None
+    poc_generation_reason: str | None = None
+    observational_poc: ConsoleSafePoc | None = None
+    manual_poc_plan: list[str] = Field(default_factory=list)
 
 
 class ConsoleVerificationPlaybookSummary(BaseModel):

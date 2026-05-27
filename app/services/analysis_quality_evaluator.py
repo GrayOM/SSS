@@ -83,6 +83,13 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
     session_get_playbook_count = sum(1 for e, m in zip(pb_endpoints, pb_methods) if _is_session_endpoint(e, m))
     compressed_library_playbook_count = sum(1 for p in playbooks if 'compressed' in _norm(' '.join(p.get('limitations') or []) + ' ' + ' '.join(p.get('verification_notes') or [])))
     api_ui_linked_count = sum(1 for a in api_inv if a.get('ui_event_handler') or a.get('ui_event_type') or a.get('ui_event_text'))
+    review_observational_poc_count = sum(1 for r in review if (r.get('observational_poc') or (r.get('console_poc') and r.get('console_poc', {}).get('code'))))
+    manual_poc_plan_count = sum(1 for r in review if (r.get('manual_poc_plan') or []))
+    promoted_without_console_code_count = sum(1 for p in playbooks if not p.get('console_code'))
+    poc_generated_count = sum(1 for p in playbooks if p.get('console_code')) + review_observational_poc_count + manual_poc_plan_count
+    candidates_without_any_poc_count = sum(1 for r in review if not (r.get('observational_poc') or r.get('manual_poc_plan') or (r.get('console_poc') and r.get('console_poc', {}).get('code'))))
+    total_candidates = len(playbooks) + len(review)
+    poc_generation_rate = (poc_generated_count / total_candidates) if total_candidates else 0.0
 
     metrics = {
         'verification_playbooks_count': len(playbooks),
@@ -98,6 +105,13 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
         'ui_event_count': len(ui_events),
         'api_ui_linked_count': api_ui_linked_count,
         'business_flow_count': len(flows),
+        'poc_generated_count': poc_generated_count,
+        'poc_missing_count': candidates_without_any_poc_count,
+        'review_observational_poc_count': review_observational_poc_count,
+        'manual_poc_plan_count': manual_poc_plan_count,
+        'poc_generation_rate': poc_generation_rate,
+        'promoted_without_console_code_count': promoted_without_console_code_count,
+        'candidates_without_any_poc_count': candidates_without_any_poc_count,
         'promoted_endpoint_patterns': pb_endpoints,
         'reviewed_endpoint_patterns': rv_endpoints,
     }
@@ -115,6 +129,8 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
         failures.append('endpoint UNKNOWN found in verification_playbooks')
     if missing_console_code_playbook_count > 0:
         failures.append('missing console_code in verification_playbooks')
+    if expectation.get('require_poc_for_promoted', False) and promoted_without_console_code_count > 0:
+        failures.append('promoted_without_console_code detected')
 
     generic_action_rate = (generic_action_count / len(playbooks)) if playbooks else 0.0
     generic_page_rate = (generic_page_count / len(playbooks)) if playbooks else 0.0
@@ -122,6 +138,14 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
         failures.append(f'generic action rate high: {generic_action_rate:.2f}')
     if generic_page_rate > expectation.get('max_generic_page_rate', expectation.get('max_generic_action_rate', 1.0)):
         failures.append(f'generic page rate high: {generic_page_rate:.2f}')
+    min_poc_rate = float(expectation.get('min_poc_generation_rate', 0.0))
+    if poc_generation_rate < min_poc_rate:
+        failures.append(f'poc_generation_rate below threshold: {poc_generation_rate:.2f} < {min_poc_rate:.2f}')
+    if expectation.get('require_observational_poc_for_review', False):
+        high_med_review_missing = sum(1 for r in review if _norm(r.get('severity')) in {'high', 'medium'} and not (r.get('observational_poc') or r.get('manual_poc_plan') or (r.get('console_poc') and r.get('console_poc', {}).get('code'))))
+        if high_med_review_missing > 0:
+            msg = f'candidates_without_any_poc high/medium reviews: {high_med_review_missing}'
+            (failures if strict else warnings).append(msg)
 
     must_not = set(expectation.get('must_not_promote') or [])
     for p in playbooks:

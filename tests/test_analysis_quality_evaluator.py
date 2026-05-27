@@ -97,3 +97,19 @@ def test_should_promote_any_min_count_failure_when_strict():
     r = evaluate_analysis_quality(data, exp)
     assert not r.passed
     assert any('should_promote_any matches too low' in x for x in r.failures)
+
+
+def test_promoted_without_console_code_fail_gate():
+    data = _base()
+    exp = copy.deepcopy(_load('expectations/ebs_expectation.json'))
+    data['readable_analysis']['verification_playbooks'][0]['console_code'] = None
+    r = evaluate_analysis_quality(data, exp)
+    assert any('promoted_without_console_code' in x or 'missing console_code' in x for x in r.failures)
+
+
+def test_poc_generation_rate_threshold_fail():
+    data = _base()
+    exp = copy.deepcopy(_load('expectations/ebs_expectation.json'))
+    data['readable_analysis']['review_candidates'] = [{"severity": "medium"}]
+    r = evaluate_analysis_quality(data, exp)
+    assert any('poc_generation_rate below threshold' in x for x in r.failures)

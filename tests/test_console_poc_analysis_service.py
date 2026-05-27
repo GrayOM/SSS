@@ -781,6 +781,23 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertFalse(any(p.endpoint == '/myPage/myPageNewAjax' for p in result.verification_playbooks))
 
+    def test_promoted_playbook_must_have_console_code(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        assert all((p.console_code is not None and p.console_code != '') for p in result.verification_playbooks)
+
+    def test_review_with_endpoint_method_gets_observational_poc(self):
+        files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        rel = [x for x in result.review_candidates if '/api/orders/123/pay' in '\\n'.join(sum([e.data_flow for e in x.evidence], []))]
+        self.assertTrue(len(rel) >= 1)
+        self.assertIn(rel[0].poc_generation_status, {'observational', 'manual_plan'})
+
+    def test_unknown_endpoint_review_has_manual_plan(self):
+        files = [f('src/service.js', "axios.post(apiUrl,{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any((x.poc_generation_status == 'manual_plan' and len(x.manual_poc_plan) > 0) for x in result.review_candidates))
+
     def test_guarded_post_code_allowed_by_filter(self):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))

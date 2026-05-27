@@ -10,7 +10,9 @@
         "vulnerability_type": "Generic API Review Candidate",
         "severity": "low",
         "confidence": "medium",
-        "affected_files": ["nls/main.do"],
+        "affected_files": [
+          "nls/main.do"
+        ],
         "summary": "manual",
         "evidence": [
           {
@@ -28,19 +30,39 @@
           }
         ],
         "console_poc": null,
-        "attack_scenario": ["manual review"],
+        "attack_scenario": [
+          "manual review"
+        ],
         "impact": "...",
         "root_cause": "...",
         "remediation": "...",
-        "verification_notes": ["자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다."]
+        "verification_notes": [
+          "자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다."
+        ],
+        "manual_poc_plan": [
+          "manual"
+        ]
       }
     ],
     "project_understanding": {
       "framework": "jQuery",
       "pages": [],
-      "ui_events": [{"ui_event": "onClick"}],
-      "api_inventory": [{"endpoint": "/header/recommend_search.do", "method": "GET"}],
-      "business_flows": [{"flow_type": "search_recommend"}]
+      "ui_events": [
+        {
+          "ui_event": "onClick"
+        }
+      ],
+      "api_inventory": [
+        {
+          "endpoint": "/header/recommend_search.do",
+          "method": "GET"
+        }
+      ],
+      "business_flows": [
+        {
+          "flow_type": "search_recommend"
+        }
+      ]
     }
   }
 }

@@ -700,6 +700,16 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
     )
 
 
+def _build_manual_poc_plan(source_path: str, function_name: str | None, endpoint: str, method: str) -> list[str]:
+    return [
+        f'파일 확인: {source_path}',
+        f'함수 확인: {function_name or "UNKNOWN"}',
+        f'요청 정보 확인: {method or "UNKNOWN"} {endpoint or "UNKNOWN"}',
+        '요청 직전 payload 변수/검증 분기(if return/throw) 라인에 breakpoint 설정',
+        '브라우저 Network 탭에서 실제 요청 URL/method/status를 확인',
+    ]
+
+
 def _find_validation_return_breakpoints(f: FileContent, candidate: ApiCallCandidate | None = None) -> list[BreakpointHint]:
     keys = ('amount', 'price', 'status', 'userid', 'orderid', 'code', 'email', 'password', 'role', 'usertype')
     hints: list[BreakpointHint] = []
@@ -1187,6 +1197,18 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation=classification['remediation'],
             verification_notes=notes,
             verification_playbook=_build_playbook(f, candidate=candidate, page_hint=page_hint, action_hint=action_hint, function_name=function_name),
+            poc_generation_status=('manual_plan' if endpoint == 'UNKNOWN' else 'observational'),
+            poc_generation_reason=('endpoint unknown' if endpoint == 'UNKNOWN' else 'endpoint/method available with safe observer PoC'),
+            observational_poc=(None if endpoint == 'UNKNOWN' else ConsoleSafePoc(
+                poc_type='browser_console',
+                description='관찰형 PoC: 요청 캡처/응답 확인',
+                preconditions=['승인된 테스트 환경'],
+                steps=['Console 코드 실행', '정상 UI 동작 수행', 'window.SSS_POC.list() 확인'],
+                code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint),
+                expected_result='요청 URL/method/payload/status 캡처',
+                safety='mutation/replay는 arm 호출 전 비활성',
+            )),
+            manual_poc_plan=(_build_manual_poc_plan(f.path, function_name, endpoint, method) if endpoint == 'UNKNOWN' else []),
         )
 
 
@@ -1433,6 +1455,17 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
         if should_review:
+            if f.console_poc and f.console_poc.code and endpoint != 'UNKNOWN':
+                f.poc_generation_status = 'observational'
+                f.poc_generation_reason = 'review candidate with safe observational PoC'
+                f.observational_poc = f.console_poc
+            elif endpoint == 'UNKNOWN' or method == 'UNKNOWN':
+                f.poc_generation_status = 'manual_plan'
+                f.poc_generation_reason = 'endpoint/method unknown'
+                f.manual_poc_plan = _build_manual_poc_plan(flow[1], function_name, endpoint, method)
+            else:
+                f.poc_generation_status = 'not_possible'
+                f.poc_generation_reason = 'insufficient evidence/snippet for safe PoC'
             f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'no_strong_signals'}")
             if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
                 f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
@@ -1450,6 +1483,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 f.verification_notes.append('일반 API 후보라 자동 검증 Playbook에서 제외하고 수동 검토 후보로 분류했습니다.')
             review_candidates.append(f)
         else:
+            f.poc_generation_status = 'executable'
+            f.poc_generation_reason = 'promoted playbook with executable verification PoC'
             f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'baseline'}")
             if flow not in seen_flow:
                 seen_flow.add(flow)
