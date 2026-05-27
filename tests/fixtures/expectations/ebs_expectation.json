@@ -1,0 +1,14 @@
+{
+  "sample": "ebs",
+  "max_verification_playbooks": 7,
+  "min_verification_playbooks": 1,
+  "must_not_promote": ["session_check", "search_recommend_get", "compressed_library", "generic_api_review", "read_only_get"],
+  "must_review_endpoint_patterns": ["recommend", "search", "myPageNewAjax", "myNotcListAjax"],
+  "should_promote_any_endpoint_patterns": ["chkMobi", "chgMobi", "SendAjax", "Verify", "messages"],
+  "min_should_promote_matches": 1,
+  "max_generic_action_rate": 0.15,
+  "min_poc_generation_rate": 0.7,
+  "require_poc_for_promoted": true,
+  "require_observational_poc_for_review": true,
+  "required_project_understanding": {"framework": "jQuery", "min_api_inventory": 2, "min_business_flows": 2}
+}
