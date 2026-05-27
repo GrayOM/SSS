@@ -10,7 +10,7 @@ a = p.parse_args()
 res = json.load(open(a.result))
 exp = json.load(open(a.expectation))
 r = evaluate_analysis_quality(res, exp)
-print(f"[{'PASS' if r.passed else 'FAIL'}] {exp.get('sample', 'sample')}")
+print(f"[{'PASS' if r.passed else 'FAIL'}] {exp.get('sample_id', 'sample')}")
 print('score:', r.score)
 print('failures:')
 if r.failures:

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def build_generalization_learning_report(sample_name: str, analysis_result: dict[str, Any], quality_report: dict[str, Any]) -> dict[str, Any]:
+def build_generalization_learning_report(sample_id: str, analysis_result: dict[str, Any], quality_report: dict[str, Any]) -> dict[str, Any]:
     ra = analysis_result.get('readable_analysis', {})
     pu = ra.get('project_understanding', {})
     metrics = quality_report.get('metrics', {})
@@ -22,7 +22,8 @@ def build_generalization_learning_report(sample_name: str, analysis_result: dict
         'Expand endpoint token categories without project-specific hardcoding',
     ]
     return {
-        'sample_name': sample_name,
+        'sample_id': sample_id,
+        'sample_kind': 'analysis_result_corpus',
         'framework': pu.get('framework'),
         'api_inventory_count': metrics.get('api_inventory_count', 0),
         'ui_event_count': metrics.get('ui_event_count', 0),
