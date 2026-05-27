@@ -1,0 +1,24 @@
+{
+  "readable_analysis": {
+    "finding_count": 5,
+    "executive_findings": [],
+    "verification_playbooks": [
+      {"endpoint": "/user/chkMobiSendAjax", "method": "POST", "user_action_hint": "인증번호 발송 버튼 클릭", "page_hint": "계정 복구/인증 화면", "console_code": "console.log('ok')"}
+    ],
+    "review_candidates": [
+      {"endpoint": "/myPage/myPageNewAjax", "method": "GET"},
+      {"endpoint": "/myPage/myNotcListAjax", "method": "GET"},
+      {"endpoint": "/header/recommend_search.do", "method": "GET"}
+    ],
+    "project_understanding": {
+      "framework": "jQuery",
+      "pages": [{"source_path": "templates/mypage.html"}],
+      "ui_events": [{"ui_event": "onClick"}, {"ui_event": "onSubmit"}],
+      "api_inventory": [
+        {"endpoint": "/user/chkMobiSendAjax", "method": "POST", "ui_event_type": "onClick"},
+        {"endpoint": "/myPage/myPageNewAjax", "method": "GET"}
+      ],
+      "business_flows": [{"flow_type": "identity_verification"}, {"flow_type": "notification_user_info"}]
+    }
+  }
+}
