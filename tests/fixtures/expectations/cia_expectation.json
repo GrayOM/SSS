@@ -1,0 +1,8 @@
+{
+  "sample": "cia",
+  "min_verification_playbooks": 0,
+  "max_verification_playbooks": 0,
+  "must_not_promote": ["compressed_library"],
+  "max_generic_action_rate": 1.0,
+  "required_project_understanding": {"min_api_inventory": 1, "min_business_flows": 1}
+}

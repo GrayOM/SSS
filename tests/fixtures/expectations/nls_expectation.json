@@ -1,0 +1,8 @@
+{
+  "sample": "nls",
+  "min_verification_playbooks": 0,
+  "max_verification_playbooks": 1,
+  "must_review_endpoint_patterns": ["recommend_search"],
+  "max_generic_action_rate": 1.0,
+  "required_project_understanding": {"framework": "jQuery", "min_api_inventory": 1, "min_business_flows": 1}
+}
