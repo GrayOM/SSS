@@ -700,13 +700,43 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
     )
 
 
+
+
+def _build_observational_network_poc(endpoint: str, method: str, source_path: str, function_name: str | None, page_hint: str, action_hint: str) -> ConsoleSafePoc:
+    return ConsoleSafePoc(
+        poc_type='browser_console',
+        description='관찰형 PoC: 네트워크 요청 캡처/관찰',
+        preconditions=['승인된 테스트 환경', '브라우저 DevTools Console 접근 가능'],
+        steps=[
+            'Console에 관찰형 Hook 코드를 붙여넣고 실행',
+            _format_page_step(page_hint or '해당 기능 화면'),
+            f'{action_hint or "대상 기능 버튼 클릭"} 수행',
+            'window.SSS_POC.list()로 캡처된 요청을 확인',
+        ],
+        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or '해당 기능 화면', action_hint=action_hint or '대상 기능 버튼 클릭'),
+        expected_result=f'요청 URL/method/payload/status가 캡처됨 (target: {method} {endpoint})',
+        safety='관찰형 PoC이며 기본 상태에서는 요청 변조/재전송을 수행하지 않음. armMutation()을 명시적으로 호출하기 전 mutation 비활성.',
+    )
+
+
+def _is_external_or_static_endpoint(endpoint: str) -> bool:
+    ep = (endpoint or '').lower().strip()
+    if not ep:
+        return False
+    if ep.startswith(('http://', 'https://')) and not any(h in ep for h in ('localhost', '127.0.0.1')):
+        return True
+    return any(k in ep for k in ('analytics', 'google-analytics', 'gtag', 'doubleclick', '/static/', '/assets/', '.js', '.css', '.png', '.jpg', '.gif', '.svg'))
+
 def _build_manual_poc_plan(source_path: str, function_name: str | None, endpoint: str, method: str) -> list[str]:
     return [
         f'파일 확인: {source_path}',
         f'함수 확인: {function_name or "UNKNOWN"}',
         f'요청 정보 확인: {method or "UNKNOWN"} {endpoint or "UNKNOWN"}',
+        'data_flow(method/endpoint/function/sink) 항목을 evidence에서 재확인',
         '요청 직전 payload 변수/검증 분기(if return/throw) 라인에 breakpoint 설정',
-        '브라우저 Network 탭에서 실제 요청 URL/method/status를 확인',
+        '브라우저 Network 탭에서 URL/method/payload/status/response를 확인',
+        'Console hook 적용 가능 여부를 확인(UNKNOWN endpoint 또는 압축/라이브러리 코드는 제한될 수 있음)',
+        'executable/observational PoC 제한 사유를 검토 노트에 기록',
     ]
 
 
@@ -1455,17 +1485,26 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
         if should_review:
-            if f.console_poc and f.console_poc.code and endpoint != 'UNKNOWN':
+            has_snippet = bool(f.evidence and (f.evidence[0].snippet or '').strip())
+            disallow_observational = is_compressed or _is_external_or_static_endpoint(endpoint)
+            if endpoint != 'UNKNOWN' and method != 'UNKNOWN' and has_snippet and not disallow_observational:
                 f.poc_generation_status = 'observational'
-                f.poc_generation_reason = 'review candidate with safe observational PoC'
-                f.observational_poc = f.console_poc
-            elif endpoint == 'UNKNOWN' or method == 'UNKNOWN':
+                f.poc_generation_reason = 'review candidate with generated safe observational PoC'
+                f.observational_poc = _build_observational_network_poc(
+                    endpoint=endpoint,
+                    method=method,
+                    source_path=flow[1],
+                    function_name=function_name,
+                    page_hint=page_hint,
+                    action_hint=action_hint,
+                )
+            elif endpoint == 'UNKNOWN' or method == 'UNKNOWN' or is_compressed or not has_snippet:
                 f.poc_generation_status = 'manual_plan'
-                f.poc_generation_reason = 'endpoint/method unknown'
+                f.poc_generation_reason = 'manual verification required due to unknown/compressed/insufficient evidence'
                 f.manual_poc_plan = _build_manual_poc_plan(flow[1], function_name, endpoint, method)
             else:
                 f.poc_generation_status = 'not_possible'
-                f.poc_generation_reason = 'insufficient evidence/snippet for safe PoC'
+                f.poc_generation_reason = 'third-party/static/analytics endpoint or insufficient safe context'
             f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'no_strong_signals'}")
             if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
                 f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
@@ -1488,6 +1527,15 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'baseline'}")
             if flow not in seen_flow:
                 seen_flow.add(flow)
+                executable_poc = f.console_poc
+                if (not executable_poc or not executable_poc.code) and endpoint != 'UNKNOWN' and method != 'UNKNOWN':
+                    executable_poc = _build_safe_network_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
+                if not executable_poc or not executable_poc.code:
+                    f.poc_generation_status = 'manual_plan'
+                    f.poc_generation_reason = 'playbook promotion blocked: missing console code'
+                    f.manual_poc_plan = _build_manual_poc_plan(flow[1], function_name, endpoint, method)
+                    review_candidates.append(f)
+                    continue
                 pb = ConsoleVerificationPlaybookSummary(
                     id=f.id,
                     title=f.title,
@@ -1499,8 +1547,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     user_action_hint=action_hint,
                     risk_type=f.vulnerability_type,
                     confidence=f.confidence,
-                    console_code=(f.console_poc.code if f.console_poc else None),
-                    setup_steps=(f.console_poc.steps if f.console_poc else []),
+                    console_code=executable_poc.code,
+                    setup_steps=executable_poc.steps,
                     proof_steps=['Console에 PoC 붙여넣기', '[SSS PoC] 설치 완료 확인', _format_page_step(page_hint), f'{action_hint} 수행', 'window.SSS_POC.list() 실행', '캡처된 요청 endpoint/method/payload 확인', 'window.SSS_POC.armMutation() 실행', '동일 동작 재수행', '변조 전/후 payload와 서버 응답 비교'],
                     success_criteria=['요청 payload가 Console에 캡처됨', 'armMutation 후 지정 필드가 변조됨', '서버가 변조된 값에 대해 200/201 또는 상태 변경을 허용함', '또는 권한 없는 객체 조회가 200으로 응답함'],
                     failure_criteria=['서버가 400/401/403으로 차단함', 'payload 변조가 서버 반영 전에 정규화됨', 'endpoint가 호출되지 않음', 'HTML fallback이 반환됨'],
