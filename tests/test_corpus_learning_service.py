@@ -8,7 +8,7 @@ ROOT = Path(__file__).parent / 'fixtures'
 
 
 def _load(p):
-    return json.loads((ROOT / p).read_text())
+    return json.loads((ROOT / p).read_text(encoding="utf-8"))
 
 
 def test_corpus_learning_report_contains_taxonomy_and_suggestions():

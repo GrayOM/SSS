@@ -8,7 +8,7 @@ ROOT = Path(__file__).parent / 'fixtures'
 
 
 def _load(rel):
-    return json.loads((ROOT / rel).read_text())
+    return json.loads((ROOT / rel).read_text(encoding="utf-8"))
 
 
 def _base():

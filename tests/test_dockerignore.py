@@ -4,7 +4,7 @@ from pathlib import Path
 
 class DockerignoreTests(unittest.TestCase):
     def test_dockerignore_exists_and_blocks_env(self):
-        content = Path('.dockerignore').read_text()
+        content = Path('.dockerignore').read_text(encoding='utf-8')
         self.assertIn('.env', content)
 
 
