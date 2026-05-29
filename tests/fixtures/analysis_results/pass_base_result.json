@@ -1,6 +1,67 @@
 {
   "readable_analysis": {
     "finding_count": 2,
+    "findings": [
+      {
+        "id": "pb1",
+        "title": "Identity flow",
+        "vulnerability_type": "Identity Verification Flow Candidate",
+        "severity": "medium",
+        "confidence": "medium",
+        "affected_files": [
+          "templates/mypage.html"
+        ],
+        "summary": "POST identity verification flow is evidence-backed.",
+        "source_path": "templates/mypage.html",
+        "start_line": 10,
+        "end_line": 12,
+        "function_name": "sendSms",
+        "why_exploitable": "Browser-side request parameters can be observed before POST /user/chkMobiSendAjax.",
+        "data_flow": {
+          "user_action": "인증번호 발송 버튼 클릭",
+          "handler": "sendSms",
+          "api_call_or_sink": "POST /user/chkMobiSendAjax",
+          "missing_guard_or_validation": "server validation cannot be proven from frontend source"
+        },
+        "evidence": [
+          {
+            "source_path": "templates/mypage.html",
+            "start_line": 10,
+            "end_line": 12,
+            "snippet": "sendSms() posts to /user/chkMobiSendAjax",
+            "reason": "handler and endpoint are present in the same flow",
+            "data_flow": [
+              "source -> state/storage -> sink",
+              "method: POST",
+              "endpoint: /user/chkMobiSendAjax",
+              "function: sendSms",
+              "sink: $.ajax"
+            ]
+          }
+        ],
+        "console_poc": {
+          "poc_type": "browser_console",
+          "description": "observe request",
+          "preconditions": [
+            "approved test environment"
+          ],
+          "steps": [
+            "install hook",
+            "click send"
+          ],
+          "code": "console.log('ok')",
+          "expected_result": "request is observed",
+          "safety": "observe only"
+        },
+        "attack_scenario": [
+          "parameter observation"
+        ],
+        "impact": "business flow can be verified for missing server validation",
+        "root_cause": "server-side validation is not visible in frontend source",
+        "remediation": "enforce validation server-side",
+        "verification_notes": []
+      }
+    ],
     "executive_findings": [],
     "verification_playbooks": [
       {

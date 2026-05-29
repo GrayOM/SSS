@@ -47,9 +47,164 @@ def test_unknown_endpoint_playbook_fails_with_reason():
     data = _base()
     exp = _load('expectations/sample_jquery_template_large_expectation.json')
     data['readable_analysis']['verification_playbooks'][0]['endpoint'] = 'UNKNOWN'
+    data['readable_analysis']['verification_playbooks'][0]['data_flow']['api_call_or_sink'] = 'UNKNOWN'
     r = evaluate_analysis_quality(data, exp)
     assert not r.passed
     assert any('endpoint UNKNOWN' in x for x in r.failures)
+
+
+def test_promoted_source_path_unknown_fails():
+    data = _base()
+    exp = _load('expectations/sample_jquery_template_large_expectation.json')
+    data['readable_analysis']['verification_playbooks'][0]['source_path'] = 'UNKNOWN'
+    r = evaluate_analysis_quality(data, exp)
+    assert not r.passed
+    assert any('promoted_without_source_location' in x for x in r.failures)
+
+
+def test_promoted_fallback_location_without_evidence_fails():
+    data = _base()
+    exp = _load('expectations/sample_jquery_template_large_expectation.json')
+    data['readable_analysis']['verification_playbooks'][0]['source_path'] = 'src/fallback.js'
+    data['readable_analysis']['verification_playbooks'][0]['start_line'] = 1
+    data['readable_analysis']['verification_playbooks'][0]['end_line'] = 1
+    data['readable_analysis']['findings'] = []
+    r = evaluate_analysis_quality(data, exp)
+    assert not r.passed
+    assert any('promoted_without_evidence_backed_source_location' in x for x in r.failures)
+
+
+def test_valid_evidence_backed_source_location_passes():
+    r = evaluate_analysis_quality(_base(), _load('expectations/sample_jquery_template_large_expectation.json'))
+    assert r.passed
+
+
+def test_get_unknown_promoted_playbook_fails():
+    data = _base()
+    exp = _load('expectations/sample_jquery_template_large_expectation.json')
+    pb = data['readable_analysis']['verification_playbooks'][0]
+    pb['method'] = 'GET'
+    pb['endpoint'] = 'GET UNKNOWN'
+    pb['data_flow']['api_call_or_sink'] = 'GET UNKNOWN'
+    r = evaluate_analysis_quality(data, exp)
+    assert not r.passed
+    assert any('endpoint UNKNOWN' in x for x in r.failures)
+
+
+def test_real_api_endpoint_promoted_playbook_passes():
+    r = evaluate_analysis_quality(_base(), _load('expectations/sample_jquery_template_large_expectation.json'))
+    assert r.passed
+
+
+def test_generic_fetch_target_without_endpoint_fails():
+    data = _base()
+    exp = _load('expectations/sample_jquery_template_large_expectation.json')
+    pb = data['readable_analysis']['verification_playbooks'][0]
+    pb['endpoint'] = ''
+    pb['data_flow']['api_call_or_sink'] = 'fetch'
+    r = evaluate_analysis_quality(data, exp)
+    assert not r.passed
+    assert any('promoted_without_endpoint_or_sink' in x for x in r.failures)
+
+
+def test_generic_ajax_target_without_endpoint_fails():
+    data = _base()
+    exp = _load('expectations/sample_jquery_template_large_expectation.json')
+    pb = data['readable_analysis']['verification_playbooks'][0]
+    pb['endpoint'] = ''
+    pb['data_flow']['api_call_or_sink'] = '$.ajax'
+    r = evaluate_analysis_quality(data, exp)
+    assert not r.passed
+    assert any('promoted_without_endpoint_or_sink' in x for x in r.failures)
+
+
+def test_dom_sink_requires_source_to_sink_evidence():
+    data = _base()
+    exp = _load('expectations/sample_jquery_template_large_expectation.json')
+    pb = data['readable_analysis']['verification_playbooks'][0]
+    pb.update({
+        'source_path': 'src/dom.js',
+        'start_line': 5,
+        'end_line': 8,
+        'method': 'DOM',
+        'endpoint': '',
+        'function_name': 'renderProfile',
+        'root_cause': 'unsafe DOM assignment',
+        'why_exploitable': 'attacker-controlled input reaches innerHTML',
+        'data_flow': {
+            'user_action': 'open crafted URL',
+            'handler': 'renderProfile',
+            'api_call_or_sink': 'innerHTML',
+            'missing_guard_or_validation': 'no sanitizer',
+        },
+        'breakpoint_plan': {
+            'file': 'src/dom.js',
+            'line': 7,
+            'function': 'renderProfile',
+            'when_to_pause': 'before DOM assignment',
+            'what_variable_or_request_to_check': 'input value before innerHTML',
+        },
+    })
+    data['readable_analysis']['findings'] = [{
+        'id': 'pb1',
+        'evidence': [{
+            'source_path': 'src/dom.js',
+            'start_line': 5,
+            'end_line': 8,
+            'snippet': 'input is assigned to innerHTML',
+            'reason': 'sink is present',
+            'data_flow': ['sink: innerHTML'],
+        }],
+    }]
+    r = evaluate_analysis_quality(data, exp)
+    assert not r.passed
+    assert any('promoted_without_endpoint_or_sink' in x for x in r.failures)
+
+    data['readable_analysis']['findings'][0]['evidence'][0]['data_flow'].insert(0, 'source -> state/storage -> sink')
+    r = evaluate_analysis_quality(data, exp)
+    assert r.passed
+
+
+def test_dom_sink_with_source_to_sink_evidence_passes():
+    data = _base()
+    exp = _load('expectations/sample_jquery_template_large_expectation.json')
+    pb = data['readable_analysis']['verification_playbooks'][0]
+    pb.update({
+        'source_path': 'src/dom.js',
+        'start_line': 5,
+        'end_line': 8,
+        'method': 'DOM',
+        'endpoint': '',
+        'function_name': 'renderProfile',
+        'root_cause': 'unsafe DOM assignment',
+        'why_exploitable': 'attacker-controlled input reaches innerHTML',
+        'data_flow': {
+            'user_action': 'open crafted URL',
+            'handler': 'renderProfile',
+            'api_call_or_sink': 'innerHTML',
+            'missing_guard_or_validation': 'no sanitizer',
+        },
+        'breakpoint_plan': {
+            'file': 'src/dom.js',
+            'line': 7,
+            'function': 'renderProfile',
+            'when_to_pause': 'before DOM assignment',
+            'what_variable_or_request_to_check': 'input value before innerHTML',
+        },
+    })
+    data['readable_analysis']['findings'] = [{
+        'id': 'pb1',
+        'evidence': [{
+            'source_path': 'src/dom.js',
+            'start_line': 5,
+            'end_line': 8,
+            'snippet': 'input is assigned to innerHTML',
+            'reason': 'source-to-sink flow reaches innerHTML',
+            'data_flow': ['source -> state/storage -> sink', 'sink: innerHTML'],
+        }],
+    }]
+    r = evaluate_analysis_quality(data, exp)
+    assert r.passed
 
 
 def test_missing_console_code_playbook_fails_with_reason():

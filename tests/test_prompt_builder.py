@@ -1,6 +1,6 @@
 import unittest
 
-from app.models.schemas import ApiCallCandidate, CodeChunk, FileContent
+from app.models.schemas import ApiCallCandidate, CodeChunk, FileContent, ProjectUnderstandingResult, SourceFileManifest
 from app.services.prompt_builder import build_analysis_prompt, build_candidate_analysis_prompt, build_console_poc_analysis_prompt
 
 
@@ -90,6 +90,76 @@ class PromptBuilderTests(unittest.TestCase):
         prompt2 = build_candidate_analysis_prompt(files, multiline)
         self.assertIn('<candidate_snippet lines="10-14">', prompt2)
         self.assertIn('axios.post(\n  "/api/x",', prompt2)
+
+    def test_candidate_prompt_includes_compact_normalized_manifest_summary(self):
+        files = [FileContent(path='src/page.html', extension='.html', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='RAW_SOURCE_SHOULD_NOT_APPEAR')]
+        candidates = [ApiCallCandidate(source_path='src/page.html', method='POST', endpoint='/api/pay', parameters=['amount'], start_line=20, end_line=22, snippet='fetch("/api/pay", { method: "POST" })', sink='fetch', confidence='high', notes=[])]
+        project = ProjectUnderstandingResult(
+            framework='Vanilla',
+            normalized_manifest=[SourceFileManifest(
+                source_path='src/page.html',
+                framework_hint='Vanilla',
+                pages=[{'route_path': '/checkout', 'page_hint': 'checkout'}],
+                forms=[{'line': 3, 'id': 'pay-form', 'method': 'POST'}],
+                buttons=[{'line': 4, 'id': 'pay-btn', 'text': 'Pay'}],
+                event_handlers=[{'handler_name': 'submitPayment', 'ui_event': 'submit', 'start_line': 10, 'end_line': 30}],
+                api_calls=[{'method': 'POST', 'endpoint': '/api/pay', 'sink': 'fetch', 'start_line': 20, 'end_line': 22}],
+                storage_usage=[{'line': 8, 'storage': 'localStorage', 'operation': 'getItem', 'key': 'token'}],
+                dangerous_sinks=[{'line': 12, 'sink': 'innerHTML'}],
+                validation_guard_hints=[{'line': 18, 'hint': 'if (amount <= 0)'}],
+                linked_script_references=[{'line': 1, 'src': '/static/app.js'}],
+                inline_script_blocks=[{'start_line': 9, 'end_line': 40}],
+            )],
+        )
+        prompt = build_candidate_analysis_prompt(files, candidates, project)
+        self.assertIn('<normalized_manifest>', prompt)
+        for expected in [
+            '"framework_hint": "Vanilla"',
+            '"route_path": "/checkout"',
+            '"forms"',
+            '"buttons"',
+            '"event_handlers"',
+            '"api_calls"',
+            '"storage_usage"',
+            '"dangerous_sinks"',
+            '"validation_guard_hints"',
+            '"linked_script_references"',
+            '"inline_script_blocks"',
+            '"/api/pay"',
+            '"innerHTML"',
+        ]:
+            self.assertIn(expected, prompt)
+        self.assertNotIn('RAW_SOURCE_SHOULD_NOT_APPEAR', prompt)
+
+    def test_candidate_prompt_strips_raw_code_like_manifest_keys(self):
+        files = [FileContent(path='src/page.html', extension='.html', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='x')]
+        candidates = [ApiCallCandidate(source_path='src/page.html', method='POST', endpoint='/api/pay', parameters=['amount'], start_line=20, end_line=22, snippet='fetch("/api/pay")', sink='fetch', confidence='high', notes=[])]
+        project = ProjectUnderstandingResult(
+            framework='Vanilla',
+            normalized_manifest=[SourceFileManifest(
+                source_path='src/page.html',
+                framework_hint='Vanilla',
+                pages=[{'route_path': '/checkout', 'content': 'SECRET_PAGE_CONTENT'}],
+                forms=[{'id': 'pay-form', 'raw_content': 'SECRET_RAW_FORM', 'body': 'SECRET_BODY'}],
+                buttons=[{'id': 'pay-btn', 'snippet': 'SECRET_BUTTON_SNIPPET'}],
+                event_handlers=[{'handler_name': 'submitPayment', 'source': 'SECRET_HANDLER_SOURCE'}],
+                api_calls=[{'method': 'POST', 'endpoint': '/api/pay', 'code': 'SECRET_API_CODE'}],
+                dangerous_sinks=[{'line': 12, 'sink': 'innerHTML', 'snippet': 'SECRET_SINK_SNIPPET'}],
+            )],
+        )
+        prompt = build_candidate_analysis_prompt(files, candidates, project)
+        for forbidden in [
+            'SECRET_PAGE_CONTENT',
+            'SECRET_RAW_FORM',
+            'SECRET_BODY',
+            'SECRET_BUTTON_SNIPPET',
+            'SECRET_HANDLER_SOURCE',
+            'SECRET_API_CODE',
+            'SECRET_SINK_SNIPPET',
+        ]:
+            self.assertNotIn(forbidden, prompt)
+        for expected in ['"route_path": "/checkout"', '"id": "pay-form"', '"handler_name": "submitPayment"', '"/api/pay"', '"sink": "innerHTML"']:
+            self.assertIn(expected, prompt)
 
     def test_candidate_prompt_escapes_candidate_snippet(self):
         files = [FileContent(path='src/a.js', extension='.js', size=10, priority=1, reason_code='INCLUDED', content_hash='h', content='x')]

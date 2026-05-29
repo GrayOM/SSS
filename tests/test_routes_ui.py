@@ -23,6 +23,30 @@ class RoutesUiTests(unittest.TestCase):
         response = self.client.get('/static/app.js')
         self.assertEqual(response.status_code, 200)
 
+    def test_static_app_js_renders_sss_v1_fields_without_raw_source_snippet(self):
+        response = self.client.get('/static/app.js')
+        self.assertEqual(response.status_code, 200)
+        js = response.text
+        for field in [
+            '${path}:${start}-${end}',
+            'Console verification code was not generated.',
+            'Source location:',
+            'Risk:',
+            'Confidence:',
+            'function_name',
+            'root_cause',
+            'why_exploitable',
+            'data_flow',
+            'breakpoint_plan',
+            'poc_injection_plan',
+            'verification_playbook.console_code',
+            'success_criteria',
+            'failure_criteria',
+        ]:
+            self.assertIn(field, js)
+        self.assertNotIn('ev.snippet', js)
+        self.assertNotIn('근거 snippet', js)
+
     def test_static_styles_css_served(self):
         response = self.client.get('/static/styles.css')
         self.assertEqual(response.status_code, 200)

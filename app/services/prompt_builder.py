@@ -78,6 +78,48 @@ CONSOLE_KEYS = [
 ]
 
 
+def _limit_items(items: list[dict], limit: int = 12) -> list[dict]:
+    return items[:limit] if isinstance(items, list) else []
+
+
+RAW_CODE_MANIFEST_KEYS = {'content', 'raw_content', 'snippet', 'code', 'source', 'body'}
+
+
+def _strip_raw_code_keys(value):
+    if isinstance(value, dict):
+        return {
+            key: _strip_raw_code_keys(inner)
+            for key, inner in value.items()
+            if str(key).lower() not in RAW_CODE_MANIFEST_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_raw_code_keys(item) for item in value]
+    return value
+
+
+def _compact_normalized_manifest(project_understanding: ProjectUnderstandingResult | None) -> list[dict]:
+    if project_understanding is None:
+        return []
+    compact: list[dict] = []
+    for manifest in project_understanding.normalized_manifest[:20]:
+        data = manifest.model_dump(mode='json')
+        compact.append({
+            'source_path': data.get('source_path'),
+            'framework_hint': data.get('framework_hint'),
+            'pages': _strip_raw_code_keys(_limit_items(data.get('pages') or [])),
+            'forms': _strip_raw_code_keys(_limit_items(data.get('forms') or [])),
+            'buttons': _strip_raw_code_keys(_limit_items(data.get('buttons') or [])),
+            'event_handlers': _strip_raw_code_keys(_limit_items(data.get('event_handlers') or [])),
+            'api_calls': _strip_raw_code_keys(_limit_items(data.get('api_calls') or [])),
+            'storage_usage': _strip_raw_code_keys(_limit_items(data.get('storage_usage') or [])),
+            'dangerous_sinks': _strip_raw_code_keys(_limit_items(data.get('dangerous_sinks') or [])),
+            'validation_guard_hints': _strip_raw_code_keys(_limit_items(data.get('validation_guard_hints') or [])),
+            'linked_script_references': _strip_raw_code_keys(_limit_items(data.get('linked_script_references') or [])),
+            'inline_script_blocks': _strip_raw_code_keys(_limit_items(data.get('inline_script_blocks') or [])),
+        })
+    return compact
+
+
 def _keyword_snippets(content: str, max_snippets: int = 5, context_lines: int = 6) -> list[dict]:
     lines = content.splitlines() or ['']
     snippets: list[dict] = []
@@ -137,9 +179,7 @@ def build_console_poc_analysis_prompt(files: list[FileContent]) -> str:
 
 def build_candidate_analysis_prompt(files: list[FileContent], candidates: list[ApiCallCandidate], project_understanding: ProjectUnderstandingResult | None = None) -> str:
     file_sections = [f'<source_file path="{html.escape(f.path, quote=True)}"></source_file>' for f in files[:20]]
-    manifest = []
-    if project_understanding is not None:
-        manifest = [m.model_dump(mode='json') for m in project_understanding.normalized_manifest]
+    manifest = _compact_normalized_manifest(project_understanding)
     manifest_json = html.escape(json.dumps(manifest, ensure_ascii=False), quote=False)
     candidate_sections = []
     for idx, c in enumerate(candidates[:200], 1):

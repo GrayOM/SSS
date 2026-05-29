@@ -21,6 +21,10 @@ def _norm(x: Any) -> str:
     return str(x or '').lower()
 
 
+def _compact(x: Any) -> str:
+    return ' '.join(str(x or '').strip().lower().split())
+
+
 def _extract_from_data_flow(item: dict[str, Any], key: str) -> str:
     for ev in item.get('evidence') or []:
         for df in ev.get('data_flow') or []:
@@ -47,12 +51,74 @@ def _extract_method(item: dict[str, Any]) -> str:
     )
 
 
+def _extract_data_flow_object_value(item: dict[str, Any], key: str) -> str:
+    flow = item.get('data_flow') or {}
+    if isinstance(flow, dict):
+        return str(flow.get(key) or '').strip()
+    return ''
+
+
+def _extract_sink(item: dict[str, Any]) -> str:
+    endpoint = str(_extract_endpoint(item) or '').strip()
+    if endpoint.lower().startswith('dom sink:'):
+        return endpoint.split(':', 1)[1].strip()
+    return (
+        item.get('sink')
+        or _extract_from_data_flow(item, 'sink')
+        or _extract_data_flow_object_value(item, 'api_call_or_sink')
+        or ''
+    )
+
+
 def _extract_risk_type(item: dict[str, Any]) -> str:
     return str(item.get('risk_type') or item.get('vulnerability_type') or '')
 
 
 def _has_source_location(item: dict[str, Any]) -> bool:
-    return bool(item.get('source_path')) and isinstance(item.get('start_line'), int) and isinstance(item.get('end_line'), int)
+    source_path = _compact(item.get('source_path'))
+    start_line = item.get('start_line')
+    end_line = item.get('end_line')
+    return (
+        source_path not in {'', 'unknown'}
+        and type(start_line) is int
+        and start_line > 0
+        and type(end_line) is int
+        and end_line >= start_line
+    )
+
+
+def _evidence_for_item(item: dict[str, Any], findings_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    evidence = item.get('evidence')
+    if isinstance(evidence, list) and evidence:
+        return [ev for ev in evidence if isinstance(ev, dict)]
+    item_id = str(item.get('id') or '')
+    matched = findings_by_id.get(item_id) if item_id else None
+    matched_evidence = matched.get('evidence') if matched else None
+    if isinstance(matched_evidence, list):
+        return [ev for ev in matched_evidence if isinstance(ev, dict)]
+    return []
+
+
+def _has_evidence_backed_source_location(item: dict[str, Any], evidence: list[dict[str, Any]]) -> bool:
+    if not _has_source_location(item):
+        return False
+    source_path = str(item.get('source_path') or '').strip()
+    start_line = item.get('start_line')
+    end_line = item.get('end_line')
+    for ev in evidence:
+        if _compact(ev.get('source_path')) != _compact(source_path):
+            continue
+        ev_start = ev.get('start_line')
+        ev_end = ev.get('end_line')
+        if type(ev_start) is not int or ev_start <= 0:
+            continue
+        if type(ev_end) is not int or ev_end < ev_start:
+            continue
+        overlaps = ev_start <= end_line and ev_end >= start_line
+        has_evidence_body = bool(str(ev.get('snippet') or ev.get('reason') or '').strip() or ev.get('data_flow'))
+        if overlaps and has_evidence_body:
+            return True
+    return False
 
 
 def _has_breakpoint_plan(item: dict[str, Any]) -> bool:
@@ -69,10 +135,90 @@ def _has_why_exploitable(item: dict[str, Any]) -> bool:
     return bool(str(item.get('why_exploitable') or '').strip())
 
 
-def _has_api_call_or_sink(item: dict[str, Any]) -> bool:
-    flow = item.get('data_flow') or {}
-    value = str(flow.get('api_call_or_sink') or item.get('endpoint') or '').strip().lower()
-    return value not in {'', 'unknown'}
+def _is_unknown_endpoint(endpoint: str) -> bool:
+    value = _compact(endpoint)
+    if value in {'', 'unknown', 'unknown endpoint'}:
+        return True
+    if value.startswith('unknown endpoint'):
+        return True
+    return bool(re.fullmatch(r'(get|post|put|patch|delete|head|options)\s+unknown', value))
+
+
+GENERIC_TRANSPORT_TARGETS = {
+    'fetch',
+    '$.ajax',
+    'ajax',
+    'axios',
+    'xmlhttprequest',
+    'xhr',
+    'function_call',
+    'request',
+    'client',
+    'httpclient',
+}
+
+
+def _target_without_method(value: str) -> str:
+    return re.sub(r'^(get|post|put|patch|delete|head|options)\s+', '', str(value or '').strip(), flags=re.I)
+
+
+def _is_generic_transport_target(value: str) -> bool:
+    stripped = _target_without_method(value)
+    normalized = _compact(stripped).replace(' ', '')
+    return normalized in GENERIC_TRANSPORT_TARGETS
+
+
+def _is_real_endpoint_path(value: str) -> bool:
+    target = _target_without_method(value)
+    if _is_unknown_endpoint(target) or _is_generic_transport_target(target):
+        return False
+    if target.lower().startswith('dom sink:'):
+        return False
+    return bool(re.match(r'^(https?://|/|\{?[A-Za-z_][A-Za-z0-9_.]*\}?/)', target))
+
+
+def _dangerous_dom_sink(sink: str) -> str:
+    value = _compact(sink).replace('dom sink:', '').strip()
+    aliases = {
+        'innerhtml': 'innerhtml',
+        '.innerhtml': 'innerhtml',
+        'document.write': 'document.write',
+        'document.write()': 'document.write',
+        'eval': 'eval',
+        'eval()': 'eval',
+    }
+    return aliases.get(value, '')
+
+
+def _has_source_to_sink_evidence(evidence: list[dict[str, Any]], sink: str) -> bool:
+    sink_key = _dangerous_dom_sink(sink)
+    if not sink_key:
+        return False
+    for ev in evidence:
+        flows = [str(x).lower() for x in (ev.get('data_flow') or []) if isinstance(x, str)]
+        joined = ' '.join(flows + [str(ev.get('reason') or '').lower()])
+        has_source_sink_flow = (
+            ('source' in joined and 'sink' in joined)
+            or 'source-to-sink' in joined
+            or 'source ->' in joined
+        )
+        has_sink = sink_key in joined or sink_key in str(ev.get('snippet') or '').lower()
+        if has_source_sink_flow and has_sink:
+            return True
+    return False
+
+
+def _has_api_call_or_sink(item: dict[str, Any], evidence: list[dict[str, Any]]) -> bool:
+    endpoint = str(_extract_endpoint(item) or '').strip()
+    api_or_sink = _extract_data_flow_object_value(item, 'api_call_or_sink')
+    sink = _extract_sink(item)
+    if endpoint and _is_real_endpoint_path(endpoint):
+        return True
+    if api_or_sink and _is_real_endpoint_path(api_or_sink):
+        return True
+    if _dangerous_dom_sink(sink or endpoint or api_or_sink):
+        return _has_source_to_sink_evidence(evidence, sink or endpoint or api_or_sink)
+    return False
 
 
 def _is_session_endpoint(endpoint: str, method: str) -> bool:
@@ -90,6 +236,7 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
     ra = (analysis_result or {}).get('readable_analysis', {})
     playbooks = ra.get('verification_playbooks') or []
     review = ra.get('review_candidates') or []
+    findings = ra.get('findings') or []
     executive = ra.get('executive_findings') or []
     pu = ra.get('project_understanding') or {}
     api_inv = pu.get('api_inventory') or []
@@ -102,7 +249,13 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
 
     generic_action_count = sum(1 for p in playbooks if p.get('user_action_hint') == '대상 기능 버튼 클릭')
     generic_page_count = sum(1 for p in playbooks if p.get('page_hint') == '해당 기능 화면')
-    endpoint_unknown_playbook_count = sum(1 for e in pb_endpoints if _norm(e) in {'', 'unknown'})
+    findings_by_id = {str(f.get('id')): f for f in findings if isinstance(f, dict) and f.get('id')}
+    playbook_evidence = [_evidence_for_item(p, findings_by_id) for p in playbooks]
+
+    endpoint_unknown_playbook_count = sum(
+        1 for p, ev in zip(playbooks, playbook_evidence)
+        if _is_unknown_endpoint(_extract_endpoint(p)) and not _has_api_call_or_sink(p, ev)
+    )
     missing_console_code_playbook_count = sum(1 for p in playbooks if not p.get('console_code'))
     session_get_playbook_count = sum(1 for e, m in zip(pb_endpoints, pb_methods) if _is_session_endpoint(e, m))
     compressed_library_playbook_count = sum(1 for p in playbooks if 'compressed' in _norm(' '.join(p.get('limitations') or []) + ' ' + ' '.join(p.get('verification_notes') or [])))
@@ -113,8 +266,9 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
     promoted_without_breakpoint_plan_count = sum(1 for p in playbooks if not _has_breakpoint_plan(p))
     promoted_without_poc_injection_plan_count = sum(1 for p in playbooks if not _has_poc_injection_plan(p))
     promoted_without_source_location_count = sum(1 for p in playbooks if not _has_source_location(p))
+    promoted_without_evidence_source_location_count = sum(1 for p, ev in zip(playbooks, playbook_evidence) if not _has_evidence_backed_source_location(p, ev))
     promoted_without_why_exploitable_count = sum(1 for p in playbooks if not _has_why_exploitable(p))
-    promoted_without_target_count = sum(1 for p in playbooks if not _has_api_call_or_sink(p))
+    promoted_without_target_count = sum(1 for p, ev in zip(playbooks, playbook_evidence) if not _has_api_call_or_sink(p, ev))
     promoted_manual_plan_only_count = sum(1 for p in playbooks if p.get('manual_poc_plan') and not p.get('console_code'))
     poc_generated_count = sum(1 for p in playbooks if p.get('console_code')) + review_observational_poc_count + manual_poc_plan_count
     candidates_without_any_poc_count = sum(1 for r in review if not (r.get('observational_poc') or r.get('manual_poc_plan') or (r.get('console_poc') and r.get('console_poc', {}).get('code'))))
@@ -144,6 +298,7 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
         'promoted_without_breakpoint_plan_count': promoted_without_breakpoint_plan_count,
         'promoted_without_poc_injection_plan_count': promoted_without_poc_injection_plan_count,
         'promoted_without_source_location_count': promoted_without_source_location_count,
+        'promoted_without_evidence_source_location_count': promoted_without_evidence_source_location_count,
         'promoted_without_why_exploitable_count': promoted_without_why_exploitable_count,
         'promoted_without_target_count': promoted_without_target_count,
         'promoted_manual_plan_only_count': promoted_manual_plan_only_count,
@@ -173,6 +328,8 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
         failures.append('promoted_without_poc_injection_plan detected')
     if promoted_without_source_location_count > 0:
         failures.append('promoted_without_source_location detected')
+    if promoted_without_evidence_source_location_count > 0:
+        failures.append('promoted_without_evidence_backed_source_location detected')
     if promoted_without_why_exploitable_count > 0:
         failures.append('promoted_without_why_exploitable detected')
     if promoted_without_target_count > 0:
