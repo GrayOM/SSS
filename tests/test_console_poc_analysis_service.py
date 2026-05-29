@@ -19,6 +19,25 @@ def f(path, content):
 
 
 class ConsolePocAnalysisTests(unittest.TestCase):
+    def _assert_v1_playbook_contract(self, playbook):
+        self.assertTrue(playbook.source_path)
+        self.assertIsInstance(playbook.start_line, int)
+        self.assertIsInstance(playbook.end_line, int)
+        self.assertTrue(playbook.vulnerability_title)
+        self.assertTrue(playbook.vulnerable_code_summary)
+        self.assertTrue(playbook.why_exploitable)
+        self.assertIsNotNone(playbook.data_flow)
+        self.assertTrue(playbook.data_flow.api_call_or_sink)
+        self.assertIsNotNone(playbook.breakpoint_plan)
+        self.assertTrue(playbook.breakpoint_plan.file)
+        self.assertIsInstance(playbook.breakpoint_plan.line, int)
+        self.assertTrue(playbook.breakpoint_plan.when_to_pause)
+        self.assertTrue(playbook.breakpoint_plan.what_variable_or_request_to_check)
+        self.assertIsNotNone(playbook.poc_injection_plan)
+        self.assertEqual(playbook.poc_injection_plan.where_to_paste_code, 'Browser DevTools Console')
+        self.assertTrue(playbook.poc_injection_plan.when_to_run)
+        self.assertTrue(playbook.poc_injection_plan.required_user_action)
+        self.assertTrue(playbook.console_code)
 
     def test_build_artifact_dom_xss_not_generated(self):
         files = [f('src/app-bd3d900226fb938894f0.js', 'self.webpackChunkgatsby=[]; el.innerHTML=location.hash;')]
@@ -920,6 +939,59 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertGreaterEqual(len(auth.affected_files), 2)
+
+    def test_react_button_api_flow_has_v1_contract_and_console_poc(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/orders/123/pay'][0]
+
+        self._assert_v1_playbook_contract(playbook)
+        self.assertEqual(playbook.source_path, 'src/Pay.jsx')
+        self.assertEqual(playbook.function_name, 'submitOrder')
+        self.assertIn('window.SSS_POC', playbook.console_code)
+        self.assertIn('amount', playbook.breakpoint_plan.what_variable_or_request_to_check)
+
+    def test_jquery_click_ajax_flow_has_v1_contract_and_console_poc(self):
+        files = [f('templates/mypage.html', "<button id=\"sendSms\">인증번호 발송</button>\n<script>$('#sendSms').on('click', function(){ $.ajax({ url:'/user/chkMobiSendAjax', type:'POST', data:{ phoneNo } }); });</script>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.endpoint == '/user/chkMobiSendAjax'][0]
+
+        self._assert_v1_playbook_contract(playbook)
+        self.assertIn('Browser DevTools Console', playbook.poc_injection_plan.where_to_paste_code)
+        self.assertIn('/user/chkMobiSendAjax', playbook.data_flow.api_call_or_sink)
+
+    def test_html_form_submit_flow_has_v1_contract_and_console_poc(self):
+        files = [f('templates/pay.html', """<form id="payForm"><button type="submit">Pay now</button></form>
+<script>
+document.getElementById('payForm').addEventListener('submit', submitOrder);
+function submitOrder(event) {
+  event.preventDefault();
+  fetch('/api/orders/123/pay', { method: 'POST', body: JSON.stringify({ amount }) });
+}
+</script>""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/orders/123/pay'][0]
+
+        self._assert_v1_playbook_contract(playbook)
+        self.assertEqual(playbook.function_name, 'submitOrder')
+        self.assertIn('submitOrder', playbook.breakpoint_plan.function)
+
+    def test_dom_xss_source_sink_flow_has_v1_contract_and_console_poc(self):
+        files = [f('src/x.js', "const value = location.hash.slice(1);\ndocument.getElementById('out').innerHTML = value;")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.risk_type == 'DOM XSS'][0]
+
+        self._assert_v1_playbook_contract(playbook)
+        self.assertEqual(playbook.method, 'DOM')
+        self.assertIn('innerHTML', playbook.data_flow.api_call_or_sink)
+        self.assertIn('location.hash', playbook.console_code)
+
+    def test_unknown_generic_api_wrapper_stays_review_candidate(self):
+        files = [f('src/api.js', "function save(payload){ return apiClient.post(endpoint, payload); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+
+        self.assertEqual(len(result.verification_playbooks), 0)
+        self.assertTrue(any(x.poc_generation_status == 'manual_plan' for x in result.review_candidates))
 
 
 if __name__ == '__main__':

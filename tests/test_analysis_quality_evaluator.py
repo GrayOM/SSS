@@ -107,6 +107,14 @@ def test_promoted_without_console_code_fail_gate():
     assert any('promoted_without_console_code' in x or 'missing console_code' in x for x in r.failures)
 
 
+def test_promoted_without_breakpoint_plan_fail_gate():
+    data = _base()
+    exp = copy.deepcopy(_load('expectations/sample_jquery_template_large_expectation.json'))
+    data['readable_analysis']['verification_playbooks'][0].pop('breakpoint_plan', None)
+    r = evaluate_analysis_quality(data, exp)
+    assert any('promoted_without_breakpoint_plan' in x for x in r.failures)
+
+
 def test_poc_generation_rate_threshold_fail():
     data = _base()
     exp = copy.deepcopy(_load('expectations/sample_jquery_template_large_expectation.json'))

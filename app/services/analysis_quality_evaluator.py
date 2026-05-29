@@ -51,6 +51,30 @@ def _extract_risk_type(item: dict[str, Any]) -> str:
     return str(item.get('risk_type') or item.get('vulnerability_type') or '')
 
 
+def _has_source_location(item: dict[str, Any]) -> bool:
+    return bool(item.get('source_path')) and isinstance(item.get('start_line'), int) and isinstance(item.get('end_line'), int)
+
+
+def _has_breakpoint_plan(item: dict[str, Any]) -> bool:
+    plan = item.get('breakpoint_plan') or {}
+    return bool(plan.get('file')) and isinstance(plan.get('line'), int) and bool(plan.get('when_to_pause')) and bool(plan.get('what_variable_or_request_to_check'))
+
+
+def _has_poc_injection_plan(item: dict[str, Any]) -> bool:
+    plan = item.get('poc_injection_plan') or {}
+    return bool(plan.get('where_to_paste_code')) and bool(plan.get('when_to_run')) and bool(plan.get('required_user_action'))
+
+
+def _has_why_exploitable(item: dict[str, Any]) -> bool:
+    return bool(str(item.get('why_exploitable') or '').strip())
+
+
+def _has_api_call_or_sink(item: dict[str, Any]) -> bool:
+    flow = item.get('data_flow') or {}
+    value = str(flow.get('api_call_or_sink') or item.get('endpoint') or '').strip().lower()
+    return value not in {'', 'unknown'}
+
+
 def _is_session_endpoint(endpoint: str, method: str) -> bool:
     e = _norm(endpoint).split('?', 1)[0].rstrip('/')
     return _norm(method) == 'get' and (e.endswith('/api/user/session') or e in {'/api/auth/me', '/api/me', '/api/profile/me'})
@@ -86,6 +110,12 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
     review_observational_poc_count = sum(1 for r in review if (r.get('observational_poc') or (r.get('console_poc') and r.get('console_poc', {}).get('code'))))
     manual_poc_plan_count = sum(1 for r in review if (r.get('manual_poc_plan') or []))
     promoted_without_console_code_count = sum(1 for p in playbooks if not p.get('console_code'))
+    promoted_without_breakpoint_plan_count = sum(1 for p in playbooks if not _has_breakpoint_plan(p))
+    promoted_without_poc_injection_plan_count = sum(1 for p in playbooks if not _has_poc_injection_plan(p))
+    promoted_without_source_location_count = sum(1 for p in playbooks if not _has_source_location(p))
+    promoted_without_why_exploitable_count = sum(1 for p in playbooks if not _has_why_exploitable(p))
+    promoted_without_target_count = sum(1 for p in playbooks if not _has_api_call_or_sink(p))
+    promoted_manual_plan_only_count = sum(1 for p in playbooks if p.get('manual_poc_plan') and not p.get('console_code'))
     poc_generated_count = sum(1 for p in playbooks if p.get('console_code')) + review_observational_poc_count + manual_poc_plan_count
     candidates_without_any_poc_count = sum(1 for r in review if not (r.get('observational_poc') or r.get('manual_poc_plan') or (r.get('console_poc') and r.get('console_poc', {}).get('code'))))
     total_candidates = len(playbooks) + len(review)
@@ -111,6 +141,12 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
         'manual_poc_plan_count': manual_poc_plan_count,
         'poc_generation_rate': poc_generation_rate,
         'promoted_without_console_code_count': promoted_without_console_code_count,
+        'promoted_without_breakpoint_plan_count': promoted_without_breakpoint_plan_count,
+        'promoted_without_poc_injection_plan_count': promoted_without_poc_injection_plan_count,
+        'promoted_without_source_location_count': promoted_without_source_location_count,
+        'promoted_without_why_exploitable_count': promoted_without_why_exploitable_count,
+        'promoted_without_target_count': promoted_without_target_count,
+        'promoted_manual_plan_only_count': promoted_manual_plan_only_count,
         'candidates_without_any_poc_count': candidates_without_any_poc_count,
         'promoted_endpoint_patterns': pb_endpoints,
         'reviewed_endpoint_patterns': rv_endpoints,
@@ -131,6 +167,18 @@ def evaluate_analysis_quality(analysis_result: dict[str, Any], expectation: dict
         failures.append('missing console_code in verification_playbooks')
     if expectation.get('require_poc_for_promoted', False) and promoted_without_console_code_count > 0:
         failures.append('promoted_without_console_code detected')
+    if promoted_without_breakpoint_plan_count > 0:
+        failures.append('promoted_without_breakpoint_plan detected')
+    if promoted_without_poc_injection_plan_count > 0:
+        failures.append('promoted_without_poc_injection_plan detected')
+    if promoted_without_source_location_count > 0:
+        failures.append('promoted_without_source_location detected')
+    if promoted_without_why_exploitable_count > 0:
+        failures.append('promoted_without_why_exploitable detected')
+    if promoted_without_target_count > 0:
+        failures.append('promoted_without_endpoint_or_sink detected')
+    if promoted_manual_plan_only_count > 0:
+        failures.append('manual_poc_plan promoted without console_code detected')
 
     generic_action_rate = (generic_action_count / len(playbooks)) if playbooks else 0.0
     generic_page_rate = (generic_page_count / len(playbooks)) if playbooks else 0.0

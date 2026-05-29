@@ -141,6 +141,27 @@ class ReadableEvidence(BaseModel):
 
 
 
+class FindingDataFlow(BaseModel):
+    user_action: str | None = None
+    handler: str | None = None
+    api_call_or_sink: str
+    missing_guard_or_validation: str
+
+
+class BreakpointPlan(BaseModel):
+    file: str
+    line: int
+    function: str | None = None
+    when_to_pause: str
+    what_variable_or_request_to_check: str
+
+
+class PocInjectionPlan(BaseModel):
+    where_to_paste_code: str = 'Browser DevTools Console'
+    when_to_run: str
+    required_user_action: str
+
+
 
 class ReadableFinding(BaseModel):
     id: str
@@ -152,6 +173,16 @@ class ReadableFinding(BaseModel):
     summary: str
     evidence: list[ReadableEvidence]
     console_poc: ConsoleSafePoc | None = None
+    vulnerability_title: str | None = None
+    source_path: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    function_name: str | None = None
+    vulnerable_code_summary: str | None = None
+    why_exploitable: str | None = None
+    data_flow: FindingDataFlow | None = None
+    breakpoint_plan: BreakpointPlan | None = None
+    poc_injection_plan: PocInjectionPlan | None = None
     attack_scenario: list[str]
     impact: str
     root_cause: str
@@ -168,7 +199,10 @@ class ReadableFinding(BaseModel):
 class ConsoleVerificationPlaybookSummary(BaseModel):
     id: str
     title: str
+    vulnerability_title: str | None = None
     source_path: str
+    start_line: int | None = None
+    end_line: int | None = None
     function_name: str | None = None
     endpoint: str | None = None
     method: str | None = None
@@ -176,6 +210,12 @@ class ConsoleVerificationPlaybookSummary(BaseModel):
     user_action_hint: str | None = None
     risk_type: str
     confidence: str
+    vulnerable_code_summary: str | None = None
+    root_cause: str | None = None
+    why_exploitable: str | None = None
+    data_flow: FindingDataFlow | None = None
+    breakpoint_plan: BreakpointPlan | None = None
+    poc_injection_plan: PocInjectionPlan | None = None
     console_code: str | None = None
     setup_steps: list[str] = Field(default_factory=list)
     proof_steps: list[str] = Field(default_factory=list)
@@ -227,6 +267,22 @@ class ApiInventoryItem(BaseModel):
     risk_category: str | None = None
 
 
+class SourceFileManifest(BaseModel):
+    source_path: str
+    framework_hint: str = 'unknown'
+    pages: list[dict[str, Any]] = Field(default_factory=list)
+    forms: list[dict[str, Any]] = Field(default_factory=list)
+    buttons: list[dict[str, Any]] = Field(default_factory=list)
+    ui_triggers: list[dict[str, Any]] = Field(default_factory=list)
+    event_handlers: list[dict[str, Any]] = Field(default_factory=list)
+    api_calls: list[dict[str, Any]] = Field(default_factory=list)
+    storage_usage: list[dict[str, Any]] = Field(default_factory=list)
+    dangerous_sinks: list[dict[str, Any]] = Field(default_factory=list)
+    validation_guard_hints: list[dict[str, Any]] = Field(default_factory=list)
+    linked_script_references: list[dict[str, Any]] = Field(default_factory=list)
+    inline_script_blocks: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class BusinessFlow(BaseModel):
     flow_type: str
     source_paths: list[str] = Field(default_factory=list)
@@ -238,6 +294,7 @@ class BusinessFlow(BaseModel):
 
 class ProjectUnderstandingResult(BaseModel):
     framework: str | None = None
+    normalized_manifest: list[SourceFileManifest] = Field(default_factory=list)
     routes: list[ProjectRoute] = Field(default_factory=list)
     pages: list[ProjectPage] = Field(default_factory=list)
     ui_events: list[UiEventCandidate] = Field(default_factory=list)

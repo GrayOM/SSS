@@ -56,6 +56,38 @@ class SourceIntelligenceTests(unittest.TestCase):
         self.assertIn(inv.risk_category, {'identity_verification', 'account_recovery'})
         self.assertIn(inv.interaction_confidence, {'medium', 'high'})
 
+    def test_normalized_manifest_captures_html_js_security_facts(self):
+        files = [f(
+            'templates/pay.html',
+            """<form id="payForm" method="post" onsubmit="submitOrder(event)">
+<button id="payBtn" type="submit">Pay now</button>
+<script src="/static/pay.js"></script>
+<script>
+const token = localStorage.getItem('token');
+function submitOrder(event) {
+  event.preventDefault();
+  if (!amount) return;
+  fetch('/api/orders/123/pay', { method: 'POST', body: JSON.stringify({ amount }) });
+}
+document.getElementById('out').innerHTML = location.hash;
+eval(window.name);
+</script>""",
+        )]
+        result = build_project_understanding(files)
+        manifest = result.normalized_manifest[0]
+
+        self.assertEqual(manifest.source_path, 'templates/pay.html')
+        self.assertEqual(manifest.framework_hint, 'vanilla')
+        self.assertTrue(any(form['id'] == 'payForm' and form['method'] == 'POST' for form in manifest.forms))
+        self.assertTrue(any(button['text'] == 'Pay now' for button in manifest.buttons))
+        self.assertTrue(any(call['endpoint'] == '/api/orders/123/pay' and call['method'] == 'POST' for call in manifest.api_calls))
+        self.assertTrue(any(item['storage'] == 'localStorage' and item['key'] == 'token' for item in manifest.storage_usage))
+        self.assertTrue(any(item['sink'] == 'innerHTML' for item in manifest.dangerous_sinks))
+        self.assertTrue(any(item['sink'] == 'eval' for item in manifest.dangerous_sinks))
+        self.assertTrue(any(item['src'] == '/static/pay.js' for item in manifest.linked_script_references))
+        self.assertTrue(any(block['start_line'] < block['end_line'] for block in manifest.inline_script_blocks))
+        self.assertTrue(any('amount' in item['hint'] for item in manifest.validation_guard_hints))
+
 
 if __name__ == '__main__':
     unittest.main()

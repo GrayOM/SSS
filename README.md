@@ -4,6 +4,19 @@
 로컬 실행형 JS/HTML 취약점 분석 준비 도구입니다.
 ZIP 업로드 기반 전처리 파이프라인을 통해 분석 대상 파일 목록을 생성하고, 이후 AI 분석 모듈이 사용할 입력을 준비합니다.
 
+## SSS v1 범위
+SSS v1은 소스코드 취약점 분석 엔진입니다. 취약점 관리 플랫폼, 보고서 관리, 리뷰 워크플로우, 증적 첨부/히스토리 시스템이 아닙니다.
+
+필수 분석 출력:
+- 취약 코드 위치
+- 취약점 설명 및 source-level exploitability 근거
+- Browser DevTools Console용 PoC 코드
+- breakpoint 설정 위치와 확인 변수/요청
+- PoC 실행 시점과 사용자 동작
+- 성공/실패 증적 캡처 기준
+
+AI 분석 입력은 JS/HTML 원문만이 아니라 정규화된 source intelligence manifest를 함께 사용합니다. Manifest는 framework hint, page/route, form/button/handler, API call, storage, dangerous sink, validation guard, script reference 정보를 line number와 함께 제공합니다.
+
 ## 처리 흐름
 ZIP 업로드 → 보안 검증 → 압축 해제 → 파일 필터링 → 분석 대상 목록 반환
 

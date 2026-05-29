@@ -4,7 +4,7 @@ import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
-from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, BreakpointHint, ConsoleSafePoc, ConsoleVerificationPlaybook, ConsoleVerificationPlaybookSummary, FileContent, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
+from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, BreakpointHint, BreakpointPlan, ConsoleSafePoc, ConsoleVerificationPlaybook, ConsoleVerificationPlaybookSummary, FileContent, FindingDataFlow, PocInjectionPlan, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 from app.services.json_utils import extract_json_payload
@@ -719,6 +719,24 @@ def _build_observational_network_poc(endpoint: str, method: str, source_path: st
     )
 
 
+def _build_safe_network_poc(endpoint: str, page_hint: str, action_hint: str) -> ConsoleSafePoc:
+    return ConsoleSafePoc(
+        poc_type='browser_console',
+        description='관찰 우선 네트워크 PoC',
+        preconditions=['승인된 테스트 환경', '브라우저 DevTools Console 접근 가능'],
+        steps=[
+            'Console에 PoC 코드를 붙여넣고 실행',
+            '[SSS PoC] 설치 완료 로그 확인',
+            _format_page_step(page_hint or '해당 기능 화면'),
+            f'{action_hint or "대상 기능 버튼 클릭"} 수행',
+            'window.SSS_POC.list()로 캡처된 요청 확인',
+        ],
+        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or '해당 기능 화면', action_hint=action_hint or '대상 기능 버튼 클릭'),
+        expected_result='요청 URL/method/payload/status가 Console에 캡처됨',
+        safety='기본 상태는 observe only이며 mutation은 window.SSS_POC.armMutation() 호출 전 비활성화된다.',
+    )
+
+
 def _is_external_or_static_endpoint(endpoint: str) -> bool:
     ep = (endpoint or '').lower().strip()
     if not ep:
@@ -738,6 +756,123 @@ def _build_manual_poc_plan(source_path: str, function_name: str | None, endpoint
         'Console hook 적용 가능 여부를 확인(UNKNOWN endpoint 또는 압축/라이브러리 코드는 제한될 수 있음)',
         'executable/observational PoC 제한 사유를 검토 노트에 기록',
     ]
+
+
+def _first_evidence_location(finding: ReadableFinding) -> tuple[str, int, int, str]:
+    if finding.evidence:
+        ev = finding.evidence[0]
+        return ev.source_path, ev.start_line, ev.end_line, ev.snippet
+    source_path = finding.affected_files[0] if finding.affected_files else 'UNKNOWN'
+    return source_path, 1, 1, ''
+
+
+def _api_call_or_sink(method: str, endpoint: str, sink: str) -> str:
+    if endpoint and endpoint != 'UNKNOWN':
+        return f'{method} {endpoint}'.strip()
+    if sink:
+        return sink
+    return 'UNKNOWN'
+
+
+def _build_contract_fields(
+    finding: ReadableFinding,
+    method: str,
+    endpoint: str,
+    sink: str,
+    function_name: str | None,
+    page_hint: str,
+    action_hint: str,
+    api_match: ApiCallCandidate | None,
+) -> dict:
+    source_path, start_line, end_line, snippet = _first_evidence_location(finding)
+    target = _api_call_or_sink(method, endpoint, sink)
+    parameters = api_match.parameters if api_match else []
+    is_dom = method == 'DOM' or 'DOM sink:' in endpoint or finding.vulnerability_type == 'DOM XSS'
+    missing_guard = (
+        '입력값 인코딩/sanitizer 없이 DOM sink에 전달될 수 있음'
+        if is_dom
+        else '서버측 권한/업무 검증을 프론트 소스에서 확인할 수 없고, 클라이언트 요청값은 DevTools에서 변경 가능함'
+    )
+    why = (
+        f'사용자가 제어 가능한 DOM 입력이 {target}에 도달하는 source-to-sink 흐름이 코드에 존재한다.'
+        if is_dom
+        else f'브라우저에서 {target} 요청 직전 payload/parameter를 관찰할 수 있고, {", ".join(parameters) or "요청값"} 검증이 클라이언트 코드에 의존한다.'
+    )
+    check = (
+        f'{target}에 전달되는 값과 DOM 반영 여부'
+        if is_dom
+        else f'{target} 요청의 payload/query/status/response' + (f" 및 parameter({', '.join(parameters)})" if parameters else '')
+    )
+    return {
+        'vulnerability_title': finding.title,
+        'source_path': source_path,
+        'start_line': start_line,
+        'end_line': end_line,
+        'function_name': function_name or None,
+        'vulnerable_code_summary': f'{source_path}:{start_line}-{end_line}에서 {target} 흐름이 확인됨',
+        'why_exploitable': why,
+        'data_flow': FindingDataFlow(
+            user_action=action_hint,
+            handler=function_name or None,
+            api_call_or_sink=target,
+            missing_guard_or_validation=missing_guard,
+        ),
+        'breakpoint_plan': BreakpointPlan(
+            file=source_path,
+            line=(api_match.start_line if api_match else start_line),
+            function=function_name or None,
+            when_to_pause='PoC 설치 후 취약 UI 동작을 실행해 요청/DOM sink 직전에 중단',
+            what_variable_or_request_to_check=check,
+        ),
+        'poc_injection_plan': PocInjectionPlan(
+            when_to_run=(
+                '페이지가 해당 DOM 입력을 읽기 전 또는 취약 화면을 새로고침하기 전'
+                if is_dom
+                else '취약 UI 액션 클릭 전 또는 요청을 발생시키기 전'
+            ),
+            required_user_action=action_hint,
+        ),
+    }
+
+
+def _apply_v1_contract(
+    finding: ReadableFinding,
+    method: str,
+    endpoint: str,
+    sink: str,
+    function_name: str | None,
+    page_hint: str,
+    action_hint: str,
+    api_match: ApiCallCandidate | None,
+) -> dict:
+    fields = _build_contract_fields(finding, method, endpoint, sink, function_name, page_hint, action_hint, api_match)
+    for key, value in fields.items():
+        setattr(finding, key, value)
+    return fields
+
+
+def _proof_steps(method: str, page_hint: str, action_hint: str) -> list[str]:
+    if method == 'DOM':
+        return ['Console에 PoC 붙여넣기', _format_page_step(page_hint), 'PoC 코드 실행 또는 페이지 새로고침', 'DOM sink 실행 여부 확인']
+    return ['Console에 PoC 붙여넣기', '[SSS PoC] 설치 완료 확인', _format_page_step(page_hint), f'{action_hint} 수행', 'window.SSS_POC.list() 실행', '캡처된 요청 endpoint/method/payload 확인', 'window.SSS_POC.armMutation() 실행', '동일 동작 재수행', '변조 전/후 payload와 서버 응답 비교']
+
+
+def _success_criteria(method: str) -> list[str]:
+    if method == 'DOM':
+        return ['테스트 payload가 DOM sink까지 도달함', '브라우저에서 alert 또는 명확한 DOM 변화가 관찰됨']
+    return ['요청 payload가 Console에 캡처됨', 'armMutation 후 지정 필드가 변조됨', '서버가 변조된 값에 대해 200/201 또는 상태 변경을 허용함', '또는 권한 없는 객체 조회가 200으로 응답함']
+
+
+def _failure_criteria(method: str) -> list[str]:
+    if method == 'DOM':
+        return ['입력이 안전하게 인코딩되어 스크립트가 실행되지 않음', 'DOM sink가 호출되지 않음', 'sanitizer가 payload를 제거함']
+    return ['서버가 400/401/403으로 차단함', 'payload 변조가 서버 반영 전에 정규화됨', 'endpoint가 호출되지 않음', 'HTML fallback이 반환됨']
+
+
+def _evidence_to_capture(method: str) -> list[str]:
+    if method == 'DOM':
+        return ['Sources breakpoint 위치', 'Console PoC 실행 로그', 'DOM 변화 또는 alert 실행 화면', '입력값이 sink에 도달한 Call Stack']
+    return ['Console 캡처 로그', 'Network 요청 URL/method', '변조 전 payload', '변조 후 payload', '서버 응답 status/body', '화면 상태 변화']
 
 
 def _find_validation_return_breakpoints(f: FileContent, candidate: ApiCallCandidate | None = None) -> list[BreakpointHint]:
@@ -1018,7 +1153,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             confidence='medium',
             affected_files=[f.path],
             summary='외부 입력이 위험 sink로 전달될 수 있습니다.',
-            evidence=[ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='source-sink 조합', data_flow=['source -> state/storage -> sink'])],
+            evidence=[ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='source-sink 조합', data_flow=['source -> state/storage -> sink', 'method: DOM', 'endpoint: DOM sink: innerHTML', 'sink: innerHTML'])],
             console_poc=ConsoleSafePoc(
                 poc_type='browser_console',
                 description='hash 기반 확인',
@@ -1292,7 +1427,8 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         self.last_debug.called = True
         self.last_debug.call_count += 1
         try:
-            raw_text = self.client.analyze(build_candidate_analysis_prompt(safe_files, candidates))
+            project_map = build_project_understanding(safe_files)
+            raw_text = self.client.analyze(build_candidate_analysis_prompt(safe_files, candidates, project_map))
         except Exception as exc:
             self.last_debug.errors.append(f'call failed: {type(exc).__name__}')
             return []
@@ -1391,6 +1527,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     for f in findings:
         flow, method, endpoint, function_name = _flow_and_meta(f)
         src = flow[1]
+        sink = flow[5]
         api_match = next((a for a in project_map.api_inventory if a.source_path == src and a.endpoint == endpoint and (not function_name or a.function_name == function_name)), None)
         page_obj = next((p for p in project_map.pages if p.source_path == src), None)
         ui_matches = [u.model_dump() for u in project_map.ui_events if u.source_path == src and (not function_name or u.handler_name == function_name)]
@@ -1446,6 +1583,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         )
         is_generic_type = f.vulnerability_type == 'Generic API Review Candidate'
         is_compressed = _is_compressed_or_library_evidence(f, function_name)
+        is_dom_flow = method == 'DOM' or f.vulnerability_type == 'DOM XSS'
         is_jq_html_promotable = bool(
             api_match and
             method in {'POST', 'PUT', 'PATCH'} and
@@ -1480,8 +1618,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         score += -2 if is_auto_fn else 0
         should_review = (
             is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
-            is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable) or is_session_get or is_compressed or
-            score < 5 or
+            (is_generic_action and not is_dom_flow) or (is_generic_page and not is_dom_flow) or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
+            (score < 5 and not is_dom_flow) or
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
         if should_review:
@@ -1536,10 +1674,23 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     f.manual_poc_plan = _build_manual_poc_plan(flow[1], function_name, endpoint, method)
                     review_candidates.append(f)
                     continue
+                contract = _apply_v1_contract(
+                    finding=f,
+                    method=method,
+                    endpoint=endpoint,
+                    sink=sink,
+                    function_name=function_name or None,
+                    page_hint=page_hint,
+                    action_hint=action_hint,
+                    api_match=api_match,
+                )
                 pb = ConsoleVerificationPlaybookSummary(
                     id=f.id,
                     title=f.title,
+                    vulnerability_title=contract['vulnerability_title'],
                     source_path=flow[1],
+                    start_line=contract['start_line'],
+                    end_line=contract['end_line'],
                     function_name=(function_name or None),
                     endpoint=endpoint,
                     method=method,
@@ -1547,12 +1698,18 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     user_action_hint=action_hint,
                     risk_type=f.vulnerability_type,
                     confidence=f.confidence,
+                    vulnerable_code_summary=contract['vulnerable_code_summary'],
+                    root_cause=f.root_cause,
+                    why_exploitable=contract['why_exploitable'],
+                    data_flow=contract['data_flow'],
+                    breakpoint_plan=contract['breakpoint_plan'],
+                    poc_injection_plan=contract['poc_injection_plan'],
                     console_code=executable_poc.code,
                     setup_steps=executable_poc.steps,
-                    proof_steps=['Console에 PoC 붙여넣기', '[SSS PoC] 설치 완료 확인', _format_page_step(page_hint), f'{action_hint} 수행', 'window.SSS_POC.list() 실행', '캡처된 요청 endpoint/method/payload 확인', 'window.SSS_POC.armMutation() 실행', '동일 동작 재수행', '변조 전/후 payload와 서버 응답 비교'],
-                    success_criteria=['요청 payload가 Console에 캡처됨', 'armMutation 후 지정 필드가 변조됨', '서버가 변조된 값에 대해 200/201 또는 상태 변경을 허용함', '또는 권한 없는 객체 조회가 200으로 응답함'],
-                    failure_criteria=['서버가 400/401/403으로 차단함', 'payload 변조가 서버 반영 전에 정규화됨', 'endpoint가 호출되지 않음', 'HTML fallback이 반환됨'],
-                    evidence_to_capture=['Console 캡처 로그', 'Network 요청 URL/method', '변조 전 payload', '변조 후 payload', '서버 응답 status/body', '화면 상태 변화'],
+                    proof_steps=_proof_steps(method, page_hint, action_hint),
+                    success_criteria=_success_criteria(method),
+                    failure_criteria=_failure_criteria(method),
+                    evidence_to_capture=_evidence_to_capture(method),
                     limitations=(f.verification_playbook.limitations if f.verification_playbook else []),
                 )
                 pri = {

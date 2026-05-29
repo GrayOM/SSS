@@ -1,7 +1,8 @@
 import re
 from collections import defaultdict
+from typing import Any
 
-from app.models.schemas import ApiInventoryItem, BusinessFlow, FileContent, ProjectPage, ProjectRoute, ProjectUnderstandingResult, UiEventCandidate
+from app.models.schemas import ApiInventoryItem, BusinessFlow, FileContent, ProjectPage, ProjectRoute, ProjectUnderstandingResult, SourceFileManifest, UiEventCandidate
 from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 def _find_enclosing_function_block(content: str, line_number: int) -> tuple[str | None, int, int, str] | None:
     lines = content.splitlines() or ['']
@@ -42,6 +43,177 @@ def _detect_framework(files: list[FileContent]) -> str | None:
     if any(k in text for k in ['addeventlistener', 'queryselector']):
         return 'Vanilla'
     return None
+
+
+def _detect_file_framework(file: FileContent, project_framework: str | None) -> str:
+    text = file.content.lower()
+    path = file.path.lower()
+    if path.endswith('.vue') or any(k in text for k in ('@click', 'v-on:', 'v-model', 'createapp')):
+        return 'Vue'
+    if any(k in text for k in ('import react', "from 'react'", 'reactdom.createroot', '<route', 'onclick={', 'onsubmit={')):
+        return 'React'
+    if any(k in text for k in ('$.ajax', '.on(\'click\'', '.on("click"', 'document.ready', '$(')):
+        return 'jQuery'
+    if any(k in text for k in ('addeventlistener', 'queryselector', 'getelementbyid')):
+        return 'vanilla'
+    return project_framework or 'unknown'
+
+
+def _line_of(content: str, offset: int) -> int:
+    return content.count('\n', 0, offset) + 1
+
+
+def _extract_forms(file: FileContent) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in re.finditer(r'<form\b([^>]*)>', file.content, re.IGNORECASE):
+        attrs = m.group(1)
+        out.append({
+            'line': _line_of(file.content, m.start()),
+            'id': _attr(attrs, 'id'),
+            'name': _attr(attrs, 'name'),
+            'action': _attr(attrs, 'action'),
+            'method': (_attr(attrs, 'method') or 'GET').upper(),
+            'handler': _attr(attrs, 'onsubmit'),
+        })
+    return out
+
+
+def _attr(attrs: str, name: str) -> str | None:
+    m = re.search(rf'\b{name}\s*=\s*["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+    return m.group(1).strip() if m else None
+
+
+def _extract_buttons(file: FileContent) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in re.finditer(r'<button\b([^>]*)>(.*?)</button>|<input\b([^>]*)>', file.content, re.IGNORECASE | re.DOTALL):
+        attrs = m.group(1) or m.group(3) or ''
+        text = re.sub(r'<[^>]+>', '', m.group(2) or '').strip() or _attr(attrs, 'value')
+        out.append({
+            'line': _line_of(file.content, m.start()),
+            'id': _attr(attrs, 'id'),
+            'type': _attr(attrs, 'type') or ('button' if m.group(1) else 'input'),
+            'text': text,
+            'on_click': _attr(attrs, 'onclick'),
+            'disabled_expression': _attr(attrs, 'disabled'),
+        })
+    return out
+
+
+def _extract_storage_usage(file: FileContent) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in re.finditer(r'\b(localStorage|sessionStorage)\.(getItem|setItem|removeItem)\(\s*["\']([^"\']+)["\']', file.content):
+        out.append({'line': _line_of(file.content, m.start()), 'storage': m.group(1), 'operation': m.group(2), 'key': m.group(3)})
+    for m in re.finditer(r'\bdocument\.cookie\b', file.content):
+        out.append({'line': _line_of(file.content, m.start()), 'storage': 'cookie', 'operation': 'read/write', 'key': None})
+    return out
+
+
+def _extract_dangerous_sinks(file: FileContent) -> list[dict[str, Any]]:
+    patterns = {
+        'innerHTML': r'\.innerHTML\b',
+        'document.write': r'\bdocument\.write\s*\(',
+        'eval': r'\beval\s*\(',
+        'Function': r'\bnew\s+Function\s*\(|\bFunction\s*\(',
+        'location': r'\blocation\.(?:href|assign|replace)\b',
+        'postMessage': r'\bpostMessage\s*\(',
+    }
+    out: list[dict[str, Any]] = []
+    for sink, pattern in patterns.items():
+        for m in re.finditer(pattern, file.content):
+            out.append({'line': _line_of(file.content, m.start()), 'sink': sink})
+    return sorted(out, key=lambda x: x['line'])
+
+
+def _extract_validation_guard_hints(file: FileContent) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    guard_re = re.compile(r'\b(if\s*\([^)]*(?:amount|price|status|role|userType|isAdmin|code|email|password)[^)]*\)|requireAuth\s*\(|checkSession\s*\(|preventDefault\s*\(|disabled\s*=)', re.IGNORECASE)
+    for m in guard_re.finditer(file.content):
+        out.append({'line': _line_of(file.content, m.start()), 'hint': m.group(1)[:160]})
+    return out
+
+
+def _extract_script_links(file: FileContent) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    linked: list[dict[str, Any]] = []
+    inline: list[dict[str, Any]] = []
+    for m in re.finditer(r'<script\b([^>]*)>(.*?)</script>', file.content, re.IGNORECASE | re.DOTALL):
+        attrs = m.group(1)
+        src = _attr(attrs, 'src')
+        start = _line_of(file.content, m.start())
+        end = _line_of(file.content, m.end())
+        if src:
+            linked.append({'line': start, 'src': src})
+        else:
+            inline.append({'start_line': start, 'end_line': end})
+    return linked, inline
+
+
+def _build_normalized_manifest(
+    files: list[FileContent],
+    framework: str | None,
+    routes: list[ProjectRoute],
+    pages: list[ProjectPage],
+    ui_events: list[UiEventCandidate],
+    api_inventory: list[ApiInventoryItem],
+) -> list[SourceFileManifest]:
+    manifests: list[SourceFileManifest] = []
+    for file in files:
+        linked_scripts, inline_scripts = _extract_script_links(file)
+        file_pages = [p for p in pages if p.source_path == file.path]
+        file_routes = [r for r in routes if r.source_path == file.path]
+        file_ui = [u for u in ui_events if u.source_path == file.path]
+        file_api = [a for a in api_inventory if a.source_path == file.path]
+        manifests.append(SourceFileManifest(
+            source_path=file.path,
+            framework_hint=_detect_file_framework(file, framework),
+            pages=[
+                {
+                    'component_name': p.component_name,
+                    'route_paths': p.route_paths,
+                    'page_hint': p.page_hint,
+                    'title_texts': p.title_texts,
+                }
+                for p in file_pages
+            ] + [
+                {
+                    'route_path': r.path,
+                    'component': r.component,
+                    'line': r.line,
+                }
+                for r in file_routes
+            ],
+            forms=_extract_forms(file),
+            buttons=_extract_buttons(file),
+            ui_triggers=[u.model_dump() for u in file_ui],
+            event_handlers=[
+                {
+                    'handler_name': u.handler_name,
+                    'ui_event': u.ui_event,
+                    'start_line': u.start_line,
+                    'end_line': u.end_line,
+                    'element_text': u.element_text,
+                }
+                for u in file_ui if u.handler_name
+            ],
+            api_calls=[
+                {
+                    'method': a.method,
+                    'endpoint': a.endpoint,
+                    'request_parameters': a.parameters,
+                    'sink': a.sink,
+                    'start_line': a.start_line,
+                    'end_line': a.end_line,
+                    'function_name': a.function_name,
+                    'risk_category': a.risk_category,
+                }
+                for a in file_api
+            ],
+            storage_usage=_extract_storage_usage(file),
+            dangerous_sinks=_extract_dangerous_sinks(file),
+            validation_guard_hints=_extract_validation_guard_hints(file),
+            linked_script_references=linked_scripts,
+            inline_script_blocks=inline_scripts,
+        ))
+    return manifests
 
 
 def _risk_category(method: str, endpoint: str, params: list[str]) -> str | None:
@@ -155,6 +327,7 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
 
     return ProjectUnderstandingResult(
         framework=framework,
+        normalized_manifest=_build_normalized_manifest(files, framework, routes, pages, ui_events, inv),
         routes=routes,
         pages=pages,
         ui_events=ui_events,
