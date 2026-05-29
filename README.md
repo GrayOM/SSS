@@ -32,6 +32,7 @@ ZIP 업로드 → 보안 검증 → 압축 해제 → 파일 필터링 → 분�
 
 ## ZIP 보안 정책
 - ZIP Slip 방어
+- ZIP MIME Type 검증(`application/zip`, `application/x-zip-compressed`, `multipart/x-zip`, 유효한 ZIP 시그니처의 `application/octet-stream`)
 - ZIP 멤버 수 제한
 - 압축 해제 총 용량 제한
 - symlink 차단

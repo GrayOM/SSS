@@ -4,7 +4,7 @@ import unittest
 import zipfile
 
 from fastapi import HTTPException
-from starlette.datastructures import UploadFile
+from starlette.datastructures import Headers, UploadFile
 
 from app.api.routes_analyze import analyze_zip
 from app.models.schemas import AnalysisResult, ReadableAnalysisResult, AiAnalysisDebug
@@ -27,8 +27,12 @@ class RoutesAnalyzeTests(unittest.TestCase):
         return bio.getvalue()
 
     @staticmethod
-    def _upload(filename: str, data: bytes) -> UploadFile:
-        return UploadFile(file=io.BytesIO(data), filename=filename)
+    def _upload(filename: str, data: bytes, content_type: str = 'application/zip') -> UploadFile:
+        return UploadFile(
+            file=io.BytesIO(data),
+            filename=filename,
+            headers=Headers({'content-type': content_type}),
+        )
 
     def test_analyze_success_returns_full_structure(self):
         original_backend = analysis_service.settings.ANALYZER_BACKEND
@@ -107,6 +111,49 @@ class RoutesAnalyzeTests(unittest.TestCase):
             analysis_service.settings.ANALYZER_BACKEND = 'mock'
             with self.assertRaises(HTTPException):
                 asyncio.run(analyze_zip(self._upload('bad.zip', b'NOTZIP')))
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_analyze_valid_zip_content_type_accepted(self):
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            data = self._zip_bytes({'src/app.js': 'const a = 1;'})
+            result = asyncio.run(
+                analyze_zip(self._upload('sample.zip', data, 'application/x-zip-compressed'))
+            )
+            self.assertIn('readable_analysis', result.model_dump())
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_analyze_invalid_content_type_returns_400(self):
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            data = self._zip_bytes({'src/app.js': 'const a = 1;'})
+            with self.assertRaises(HTTPException) as cm:
+                asyncio.run(analyze_zip(self._upload('sample.zip', data, 'text/plain')))
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertEqual(cm.exception.detail, 'Invalid ZIP content type')
+        finally:
+            analysis_service.settings.ANALYZER_BACKEND = original_backend
+
+    def test_analyze_octet_stream_requires_valid_zip_signature(self):
+        original_backend = analysis_service.settings.ANALYZER_BACKEND
+        try:
+            analysis_service.settings.ANALYZER_BACKEND = 'mock'
+            data = self._zip_bytes({'src/app.js': 'const a = 1;'})
+            result = asyncio.run(
+                analyze_zip(self._upload('sample.zip', data, 'application/octet-stream'))
+            )
+            self.assertIn('readable_analysis', result.model_dump())
+
+            with self.assertRaises(HTTPException) as cm:
+                asyncio.run(
+                    analyze_zip(self._upload('bad.zip', b'NOTZIP', 'application/octet-stream'))
+                )
+            self.assertEqual(cm.exception.status_code, 400)
+            self.assertEqual(cm.exception.detail, 'Invalid ZIP signature')
         finally:
             analysis_service.settings.ANALYZER_BACKEND = original_backend
 

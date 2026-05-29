@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from fastapi import HTTPException
-from starlette.datastructures import UploadFile
+from starlette.datastructures import Headers, UploadFile
 
 from app.core.config import settings
 from app.services import upload_service
@@ -13,8 +13,12 @@ from app.services import upload_service
 
 class UploadServiceCleanupTests(unittest.TestCase):
     @staticmethod
-    def _upload(filename: str, data: bytes) -> UploadFile:
-        return UploadFile(file=io.BytesIO(data), filename=filename)
+    def _upload(filename: str, data: bytes, content_type: str = 'application/zip') -> UploadFile:
+        return UploadFile(
+            file=io.BytesIO(data),
+            filename=filename,
+            headers=Headers({'content-type': content_type}),
+        )
 
     @staticmethod
     def _leftover_upload_dirs(tmp_dir: str) -> list[Path]:

@@ -8,12 +8,30 @@ from app.core.config import settings
 from app.services.zip_service import ZipSecurityError, extract_zip, prepare_workspace
 
 
+ALLOWED_ZIP_CONTENT_TYPES = {
+    'application/zip',
+    'application/x-zip-compressed',
+    'multipart/x-zip',
+    'application/octet-stream',
+}
+
+
+def _normalized_content_type(file: UploadFile) -> str:
+    return (file.content_type or '').split(';', 1)[0].strip().lower()
+
+
+def _validate_zip_content_type(file: UploadFile) -> None:
+    if _normalized_content_type(file) not in ALLOWED_ZIP_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail='Invalid ZIP content type')
+
+
 async def prepare_uploaded_zip(file: UploadFile) -> tuple[Path, Path]:
     workspace: Path | None = None
     try:
         safe_name = Path(file.filename or '').name
         if not safe_name or safe_name != file.filename or not safe_name.lower().endswith('.zip'):
             raise HTTPException(status_code=400, detail='Invalid ZIP filename')
+        _validate_zip_content_type(file)
 
         os.makedirs(settings.TMP_DIR, exist_ok=True)
         workspace = Path(prepare_workspace())
