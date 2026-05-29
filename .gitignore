@@ -5,3 +5,5 @@ __pycache__/
 gpt_review*.patch
 gpt_review*_stat.txt
 gpt_review*_untracked.txt
+gpt_review_stat*.txt
+gpt_review_untracked*.txt
