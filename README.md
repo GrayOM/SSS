@@ -38,6 +38,12 @@ ZIP 업로드 → 보안 검증 → 압축 해제 → 파일 필터링 → 분�
 - symlink 차단
 - 업로드 용량 제한(기본 20MB)
 
+## 분석 결과 저장
+- 완료된 `/api/analyze` 결과는 SQLite에 저장됩니다.
+- DB 경로는 `ANALYSIS_DB_PATH` 환경 변수로 설정합니다.
+- 조회 API: `GET /api/analysis-runs`, `GET /api/analysis-runs/{run_id}`
+- 저장 JSON은 API 응답용 안전 결과만 포함하며 원본 파일 `content` 필드는 저장하지 않습니다.
+
 ## Docker 보안 정책
 - non-root(`appuser`) 실행
 - `127.0.0.1:8000:8000` localhost 바인딩

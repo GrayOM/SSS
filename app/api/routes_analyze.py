@@ -8,6 +8,7 @@ from app.services.analysis_service import analyze_chunks
 from app.services.chunk_service import build_chunks
 from app.services.console_poc_analysis_service import analyze_console_exploitability, get_console_poc_analyzer
 from app.services.file_content_loader import load_file_contents
+from app.services.analysis_run_repository import save_analysis_run
 from app.services.response_mapper import to_safe_analysis_result, to_safe_chunk_result, to_safe_content_load_result
 from app.services.scan_service import scan_extracted_directory
 from app.services.upload_service import prepare_uploaded_zip
@@ -43,7 +44,7 @@ async def analyze_zip(file: UploadFile = File(...)):
         except Exception as exc:
             raise HTTPException(status_code=502, detail='Readable analysis backend failed') from exc
         analysis_debug = getattr(readable_analyzer, 'last_debug', None)
-        return FullAnalysisResponse(
+        response = FullAnalysisResponse(
             upload=upload_result,
             content_load=to_safe_content_load_result(content_result),
             chunks=to_safe_chunk_result(chunk_result),
@@ -55,5 +56,7 @@ async def analyze_zip(file: UploadFile = File(...)):
                 'readable_analysis is console-oriented readable finding output.',
             ],
         )
+        save_analysis_run(file.filename or '', response)
+        return response
     finally:
         shutil.rmtree(workspace, ignore_errors=True)

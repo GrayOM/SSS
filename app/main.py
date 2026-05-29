@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.api.routes_analysis_runs import router as analysis_runs_router
 from app.api.routes_analyze import router as analyze_router
 from app.api.routes_ui import router as ui_router
 from app.api.routes_upload import router as upload_router
@@ -17,6 +18,7 @@ def create_app() -> FastAPI:
     app.include_router(ui_router)
     app.include_router(upload_router)
     app.include_router(analyze_router)
+    app.include_router(analysis_runs_router)
     app.mount('/static', StaticFiles(directory=str(STATIC_DIR)), name='static')
     return app
 

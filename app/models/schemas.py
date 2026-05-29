@@ -328,6 +328,22 @@ class FullAnalysisResponse(BaseModel):
     analysis_notes: list[str] = Field(default_factory=list)
 
 
+class AnalysisRunSummary(BaseModel):
+    id: int
+    original_filename: str
+    created_at: str
+    backend: str
+    included_file_count: int
+    skipped_file_count: int
+    finding_count: int
+    verification_playbook_count: int
+    review_candidate_count: int
+
+
+class AnalysisRunDetail(AnalysisRunSummary):
+    result: dict[str, Any]
+
+
 class ApiCallCandidate(BaseModel):
     source_path: str
     method: str

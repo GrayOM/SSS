@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE_BYTES: int = 2 * 1024 * 1024
     MAX_ZIP_MEMBERS: int = 5000
     MAX_UNCOMPRESSED_SIZE_MB: int = 200
+    ANALYSIS_DB_PATH: str = '/tmp/ai_code_analyzer/analysis_runs.sqlite3'
     MAX_CHUNK_LINES: int = 200
     CHUNK_OVERLAP_LINES: int = 20
 
