@@ -1098,6 +1098,17 @@ def _build_safe_network_poc(endpoint: str, page_hint: str, action_hint: str) -> 
     )
 
 
+def _build_capture_hint(endpoint: str, method: str, page_hint: str, action_hint: str) -> str:
+    """Short 5-line comment for review candidates. References common_console_helper only."""
+    return '\n'.join([
+        '// Capture hint — install common_console_helper once first, then:',
+        f'// 1. {_review_page_step(page_hint)}',
+        f'// 2. Perform: {action_hint}',
+        '// 3. window.SSS_POC.list()',
+        f'// 4. window.SSS_POC.find({{ urlIncludes: {json.dumps(endpoint)}, method: {json.dumps(method)} }})',
+    ])
+
+
 def _is_external_or_static_endpoint(endpoint: str) -> bool:
     ep = (endpoint or '').lower().strip()
     if not ep:
@@ -1702,15 +1713,23 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             or any(p.lower() in {'userid', 'memberid', 'accountid', 'orderid', 'paymentid'} for p in parameters)
             or any('endpoint variable requires manual review' in n for n in (candidate.notes or []))
         )
-        if method == 'GET' and endpoint != 'UNKNOWN' and important_get:
-            poc_type = 'browser_console'
-            poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
-            conf = 'medium'
-            safety = 'Read-only request. Inspect only response status/body.'
-        elif method == 'GET' and not important_get:
+
+        # Unimportant GETs are always skipped, regardless of action inference.
+        if method == 'GET' and (endpoint == 'UNKNOWN' or not important_get):
             return None
-        elif method in {'POST', 'PUT', 'PATCH'}:
-            if endpoint != 'UNKNOWN':
+
+        action_is_generic = (action_hint == 'target action')
+        if action_is_generic:
+            notes.append('Not a runnable proof yet: user action could not be inferred from source code')
+            notes.append('Confirm the page and triggering user action manually before using any PoC')
+
+        if not action_is_generic:
+            if method == 'GET' and endpoint != 'UNKNOWN' and important_get:
+                poc_type = 'browser_console'
+                poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
+                conf = 'medium'
+                safety = 'Read-only request. Inspect only response status/body.'
+            elif method in {'POST', 'PUT', 'PATCH'} and endpoint != 'UNKNOWN':
                 poc_type = 'browser_console'
                 poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
                 conf = 'medium'
@@ -1718,15 +1737,12 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 safety = 'The default guard prevents immediate mutation. Use only with approved test accounts and test data.'
                 if self._is_base_variable_endpoint(endpoint):
                     notes.append('replace API_BASE with the actual target URL')
-        elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):
-            if endpoint != 'UNKNOWN':
-                poc_type = 'browser_console'
-                poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
-                conf = 'medium'
-            notes.append('High-risk requests block replay/mutation and provide observe mode only.')
-
-        if action_hint == 'target action':
-            notes.append('Exact button/page was not inferred. Confirm manually using source_path/function_name.')
+            elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):
+                if endpoint != 'UNKNOWN':
+                    poc_type = 'browser_console'
+                    poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
+                    conf = 'medium'
+                notes.append('High-risk requests block replay/mutation and provide observe mode only.')
 
         classification = self._classify_api_candidate(candidate, source_path=f.path)
         steps = [
@@ -1764,18 +1780,14 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation=classification['remediation'],
             verification_notes=notes,
             verification_playbook=_build_playbook(f, candidate=candidate, page_hint=page_hint, action_hint=action_hint, function_name=function_name),
-            poc_generation_status=('manual_plan' if endpoint == 'UNKNOWN' else 'observational'),
-            poc_generation_reason=('endpoint unknown' if endpoint == 'UNKNOWN' else 'endpoint/method available with safe observer PoC'),
-            observational_poc=(None if endpoint == 'UNKNOWN' else ConsoleSafePoc(
-                poc_type='browser_console',
-                description='Observational PoC: capture request and inspect response.',
-                preconditions=['Approved test environment'],
-                steps=['Run the Console code', 'Perform the normal UI action', 'Run window.SSS_REVIEW_POC.list()'],
-                code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint),
-                expected_result='Request URL/method/payload/status is captured.',
-                safety='Mutation/replay remains disabled before an explicit arm call.',
-            )),
-            manual_poc_plan=(_build_manual_poc_plan(f.path, function_name, endpoint, method) if endpoint == 'UNKNOWN' else []),
+            poc_generation_status=('manual_plan' if (endpoint == 'UNKNOWN' or action_is_generic) else 'observational'),
+            poc_generation_reason=(
+                'endpoint unknown' if endpoint == 'UNKNOWN'
+                else 'Not a runnable proof yet: user action could not be resolved' if action_is_generic
+                else 'endpoint/method available; observational PoC assigned by orchestrator'
+            ),
+            observational_poc=None,
+            manual_poc_plan=(_build_manual_poc_plan(f.path, function_name, endpoint, method) if (endpoint == 'UNKNOWN' or action_is_generic) else []),
         )
 
 
@@ -2055,26 +2067,52 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
         if should_review:
+            # Clear the full SSS_REVIEW_POC hook code when demoting to review candidate.
+            # Do not clear bespoke short PoC code (auth bypass, DOM XSS, etc.).
+            if f.console_poc and f.console_poc.code:
+                code = f.console_poc.code
+                is_full_hook = 'SSS_REVIEW_POC_STATE' in code or 'TARGET_ENDPOINT' in code
+                if is_full_hook:
+                    f.console_poc = f.console_poc.model_copy(update={'code': None})
+
             has_snippet = bool(f.evidence and (f.evidence[0].snippet or '').strip())
             disallow_observational = is_compressed or _is_external_or_static_endpoint(endpoint)
-            if endpoint != 'UNKNOWN' and method != 'UNKNOWN' and has_snippet and not disallow_observational:
+            # Only generate an observational hint when page, action, and endpoint are all
+            # concretely resolved. Generic/unresolved cases get manual_plan only.
+            resolved_context = (
+                endpoint != 'UNKNOWN'
+                and method != 'UNKNOWN'
+                and has_snippet
+                and not disallow_observational
+                and not is_generic_action
+                and not is_generic_page
+                and not bool(unresolved_placeholders)
+            )
+            if resolved_context:
                 f.poc_generation_status = 'observational'
-                f.poc_generation_reason = 'review candidate with generated safe observational PoC'
-                f.observational_poc = _build_observational_network_poc(
-                    endpoint=endpoint,
-                    method=method,
-                    source_path=flow[1],
-                    function_name=function_name,
-                    page_hint=page_hint,
-                    action_hint=action_hint,
+                f.poc_generation_reason = 'review candidate: short capture hint (install common_console_helper first)'
+                f.observational_poc = ConsoleSafePoc(
+                    poc_type='browser_console',
+                    description='Request capture hint — install common_console_helper first.',
+                    preconditions=['common_console_helper installed', 'Approved test environment'],
+                    steps=[
+                        _review_page_step(page_hint),
+                        f"Perform: {_english_review_hint(action_hint, 'target action')}",
+                        'window.SSS_POC.list()',
+                        f'window.SSS_POC.find({{ urlIncludes: {json.dumps(endpoint)}, method: {json.dumps(method)} }})',
+                    ],
+                    code=_build_capture_hint(endpoint, method, page_hint, action_hint),
+                    expected_result=f'Captured request for {method} {endpoint} is visible in window.SSS_POC.captured.',
+                    safety='Comments only — no hook installer. Requires common_console_helper to be active.',
                 )
             elif endpoint == 'UNKNOWN' or method == 'UNKNOWN' or is_compressed or not has_snippet:
                 f.poc_generation_status = 'manual_plan'
                 f.poc_generation_reason = 'manual verification required due to unknown/compressed/insufficient evidence'
                 f.manual_poc_plan = _build_manual_poc_plan(flow[1], function_name, endpoint, method)
             else:
-                f.poc_generation_status = 'not_possible'
-                f.poc_generation_reason = 'third-party/static/analytics endpoint or insufficient safe context'
+                f.poc_generation_status = 'manual_plan'
+                f.poc_generation_reason = 'Not a runnable proof yet: page/action/endpoint could not be fully resolved'
+                f.observational_poc = None
             if unresolved_placeholders:
                 f.poc_generation_status = 'manual_plan'
                 f.poc_generation_reason = f'manual verification required: unresolved placeholder(s) {", ".join(unresolved_placeholders)}'
@@ -2086,6 +2124,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 _add_unique(f.verification_notes, f'Unresolved placeholder blocks promotion: {", ".join(unresolved_placeholders)}')
             if is_generic_action or is_generic_page:
                 _add_unique(f.verification_notes, 'Generic page/action blocks promotion')
+                _add_unique(f.verification_notes, 'Not a runnable proof yet: resolve the page and user action before using any PoC')
             f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'no_strong_signals'}")
             if no_code and is_unknown and 'endpoint is UNKNOWN: auto PoC not generated' not in f.verification_notes:
                 f.verification_notes.append('endpoint is UNKNOWN: auto PoC not generated')
@@ -2203,6 +2242,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             _add_unique(f.verification_notes, 'Confirmed promoted finding')
             if f.console_poc:
                 f.console_poc.code = None
+            f.observational_poc = None
         else:
             f.verification_notes = [note for note in f.verification_notes if note != 'Confirmed promoted finding']
     return ReadableAnalysisResult(

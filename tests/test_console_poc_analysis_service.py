@@ -242,11 +242,13 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertNotEqual(findings[0].id, findings[1].id)
 
     def test_get_endpoint_allows_safe_console_poc(self):
+        # No function/UI event → action is generic → no runnable hook; manual_plan review candidate
         files = [f('src/get.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
-        self.assertEqual(finding.console_poc.poc_type, 'browser_console')
-        self.assertIn('[SSS Review PoC] installed', finding.console_poc.code or '')
+        self.assertEqual(finding.poc_generation_status, 'manual_plan')
+        self.assertIsNone(finding.console_poc.code)
+        self.assertTrue(any('Not a runnable proof yet' in n for n in finding.verification_notes))
 
     def test_unknown_endpoint_is_low_with_verification_note(self):
         files = [f('src/x.js', "const endpoint = API_ENDPOINTS.CHARGE_POINT; apiClient.post(endpoint, payload); const amount=1;")]
@@ -288,18 +290,25 @@ class ConsolePocAnalysisTests(unittest.TestCase):
             self.assertIn('{API_BASE}/verify-code', finding.console_poc.code or '')
             self.assertTrue(any('replace API_BASE with the actual target URL' in n for n in finding.verification_notes) or finding.console_poc.code is None)
 
-    def test_api_base_get_endpoint_uses_placeholder_base(self):
+    def test_api_base_get_endpoint_no_runnable_poc(self):
+        # {API_BASE} placeholder → unresolved → no runnable PoC code; manual_plan
         files = [f('src/vget.js', "fetch('{API_BASE}/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
-        self.assertIn('{API_BASE}/user/session', finding.console_poc.code or '')
+        self.assertIsNone(finding.console_poc.code)
+        self.assertNotIn('{API_BASE}/user/session', (finding.console_poc.code or ''))
+        self.assertNotIn('url.includes("{API_BASE}/user/session")', (finding.console_poc.code or ''))
+        self.assertTrue(any('Unresolved placeholder' in n or 'Not a runnable proof' in n or 'manual' in n.lower() for n in finding.verification_notes))
 
-    def test_api_base_path_variable_is_replaced_in_poc(self):
+    def test_api_base_path_variable_no_url_includes_placeholder(self):
+        # {API_BASE} and {userId} are unresolved → no runnable PoC; no url.includes with placeholder
         files = [f('src/vpath.js', "axios.post('{API_BASE}/api/user/{userId}/wallet', { amount })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if 'Candidate' in x.vulnerability_type][0]
-        self.assertNotIn('TEST_VALUE/wallet', finding.console_poc.code or '')
-        self.assertIn('{API_BASE}/api/user/{userId}/wallet', finding.console_poc.code or '')
+        self.assertIsNone(finding.console_poc.code)
+        self.assertNotIn('url.includes("{API_BASE}', (finding.console_poc.code or ''))
+        self.assertNotIn('url.includes("{userId}', (finding.console_poc.code or ''))
+        self.assertNotIn('url.includes("TEST_VALUE', (finding.console_poc.code or ''))
 
     def test_auth_missing_dependency_uses_fetch_hook_poc(self):
         files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]
@@ -513,41 +522,49 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         findings = MockConsolePocAnalyzer().analyze(files)
         self.assertTrue(any(x.vulnerability_type == 'DOM XSS' for x in findings))
 
-    def test_post_request_generates_guarded_poc(self):
+    def test_post_request_no_hook_when_action_generic(self):
+        # No function/UI event → action is generic → no runnable hook; "Not a runnable proof yet"
         files = [f('src/post.js', "axios.post('/api/pay', { amount, orderId, userId })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
-        self.assertIsNotNone(finding.console_poc.code)
-        self.assertEqual(finding.console_poc.poc_type, 'browser_console')
-        self.assertIn('[SSS Review PoC] installed', finding.console_poc.code or '')
-        self.assertIn('window.SSS_REVIEW_POC.armMutation()', finding.console_poc.code or '')
-        self.assertIn('list() {', finding.console_poc.code or '')
-        self.assertIn('window.fetch = async function', finding.console_poc.code or '')
+        self.assertIsNone(finding.console_poc.code)
+        self.assertEqual(finding.poc_generation_status, 'manual_plan')
+        self.assertTrue(any('Not a runnable proof yet' in n for n in finding.verification_notes))
+        # Hook installer must not appear in any review candidate code
+        for rc in result.review_candidates:
+            self.assertNotIn('window.fetch = async function', (rc.console_poc.code or ''))
+            self.assertNotIn('SSS_REVIEW_POC_STATE', (rc.console_poc.code or ''))
 
-    def test_get_endpoint_has_executable_readonly_poc(self):
+    def test_get_endpoint_has_no_hook_code_when_action_generic(self):
+        # No function/UI event → action is generic → no runnable hook code
         files = [f('src/get2.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
-        self.assertIsNotNone(finding.console_poc.code)
-        self.assertIn('[SSS Review PoC] installed', finding.console_poc.code or '')
-        self.assertIn('response looks like HTML instead of API JSON', finding.console_poc.code or '')
+        self.assertIsNone(finding.console_poc.code)
+        self.assertEqual(finding.poc_generation_status, 'manual_plan')
+        self.assertFalse(any('window.fetch = async function' in (f.console_poc.code or '') for f in result.findings))
 
-    def test_complete_payment_and_charge_are_guarded_not_blocked(self):
+    def test_complete_payment_and_charge_unresolved_placeholder_is_manual_plan(self):
+        # Template literal endpoints with {orderId}/{sessionData.userId} are unresolved placeholders.
+        # They become manual_plan review candidates, not runnable PoC.
         files = [
             f('src/pay1.js', "axios.post('/api/order/{orderId}/complete-payment', { orderId, totalAmount, usePoints })"),
             f('src/pay2.js', "axios.post('/api/user/{sessionData.userId}/wallet/charge', { amount, userId })"),
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        pocs = [x.console_poc.code or '' for x in result.findings if 'Manipulation Candidate' in x.vulnerability_type]
-        self.assertTrue(any('window.SSS_REVIEW_POC.armMutation()' in c for c in pocs))
+        candidates = [x for x in result.findings if 'Manipulation Candidate' in x.vulnerability_type]
+        self.assertTrue(len(candidates) >= 1)
+        for c in candidates:
+            self.assertIsNone(c.console_poc.code)
+            self.assertNotIn('window.fetch = async function', (c.console_poc.code or ''))
 
-    def test_delete_endpoint_manual_check_with_reason(self):
+    def test_delete_endpoint_no_hook_when_action_generic(self):
+        # No function/UI event → action is generic → no runnable hook code regardless of method
         files = [f('src/del.js', "axios.delete('/api/admin/delete-user/{userId}')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type in {'State/Status Manipulation Candidate', 'Client-side Validation Bypass', 'Generic API Review Candidate'}][0]
-        self.assertIsNotNone(finding.console_poc.code)
-        self.assertIn('replay blocked: high-risk endpoint', finding.console_poc.code or '')
-        self.assertTrue(any('observe mode only' in n for n in finding.verification_notes))
+        self.assertIsNone(finding.console_poc.code)
+        self.assertTrue(any('Not a runnable proof yet' in n or 'observe mode only' in n for n in finding.verification_notes))
 
     def test_post_poc_steps_use_arm_mutation_not_confirm_flag(self):
         files = [f('src/post2.js', "axios.post('/api/pay', { amount })")]
@@ -653,17 +670,22 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertNotIn('window.SSS_POC.armMutation()', code)
         self.assertNotIn('window.SSS_POC.replay', code)
 
-    def test_review_candidate_observational_poc_does_not_overwrite_common_helper(self):
+    def test_review_candidate_no_hook_no_function_no_overwrite(self):
+        # No function/UI → action generic → no hook code, no SSS_POC or SSS_REVIEW_POC overwrite
         files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        review = [x for x in result.review_candidates if x.observational_poc and x.observational_poc.code][0]
-        code = review.observational_poc.code or ''
+        review = [x for x in result.review_candidates if '/api/orders/123/pay' in ' '.join(sum([e.data_flow for e in x.evidence], []))][0]
 
         self.assertIn(MANUAL_REVIEW_NOTE, review.title)
         self.assertIn(NOT_CONFIRMED_NOTE, review.summary)
         self.assertIn(RESOLVE_BEFORE_POC_NOTE, ' '.join(review.verification_notes))
-        self.assertIn('window.SSS_REVIEW_POC =', code)
-        self.assertNotIn('window.SSS_POC =', code)
+        # No hook installer in any code field
+        self.assertIsNone(review.console_poc.code)
+        obs_code = (review.observational_poc.code or '') if review.observational_poc else ''
+        self.assertNotIn('window.SSS_POC =', obs_code)
+        self.assertNotIn('window.SSS_REVIEW_POC =', obs_code)
+        # common_console_helper still correctly uses window.SSS_POC =
+        self.assertIn('window.SSS_POC = {', result.common_console_helper or '')
 
     def test_promoted_playbook_has_concrete_runtime_guidance(self):
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
@@ -734,11 +756,13 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertTrue(any('compressed/library code' in ' '.join(x.verification_notes) for x in result.review_candidates))
 
-    def test_generic_action_hint_adds_manual_verification_note(self):
+    def test_generic_action_hint_adds_not_runnable_note(self):
+        # Generic action (doRequest has no matching action inference) → "Not a runnable proof yet" note
         files = [f('src/unknown.js', "function doRequest(){axios.post('/api/pay',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
-        self.assertTrue(any('Confirm manually' in n for n in finding.verification_notes))
+        self.assertTrue(any('Not a runnable proof yet' in n for n in finding.verification_notes))
+        self.assertIsNone(finding.console_poc.code)
 
     def test_same_endpoint_different_function_creates_separate_playbooks(self):
         files = [
@@ -900,14 +924,15 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         assert all((p.console_code is not None and p.console_code != '') for p in result.verification_playbooks)
 
-    def test_review_with_endpoint_method_gets_observational_poc(self):
+    def test_review_without_function_is_manual_plan_no_code(self):
+        # No function/UI event → action generic → manual_plan; no hook code
         files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         rel = [x for x in result.review_candidates if '/api/orders/123/pay' in '\\n'.join(sum([e.data_flow for e in x.evidence], []))]
         self.assertTrue(len(rel) >= 1)
-        self.assertEqual(rel[0].poc_generation_status, 'observational')
-        self.assertIsNotNone(rel[0].observational_poc)
-        self.assertTrue((rel[0].observational_poc.code or '').strip() != '')
+        self.assertEqual(rel[0].poc_generation_status, 'manual_plan')
+        self.assertIsNone(rel[0].console_poc.code)
+        self.assertTrue(any('Not a runnable proof yet' in n for n in rel[0].verification_notes))
 
     def test_unknown_endpoint_review_has_manual_plan(self):
         files = [f('src/service.js', "axios.post(apiUrl,{amount})")]
@@ -1296,6 +1321,98 @@ function submitOrder(event) {
         self.assertIn(NOT_CONFIRMED_NOTE, source)
         self.assertIn(RESOLVE_BEFORE_POC_NOTE, source)
         self.assertIn('Needs runtime capture before proof', source)
+
+    # ── New PoC simplification tests ─────────────────────────────
+
+    def test_promoted_finding_has_no_hook_code_in_console_poc(self):
+        """Promoted ReadableFinding.console_poc.code must be None — short code is in playbook."""
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        promoted_ids = {p.id for p in result.verification_playbooks}
+        for finding in result.findings:
+            if finding.id in promoted_ids:
+                self.assertIsNone(finding.console_poc.code)
+                self.assertIsNone(finding.observational_poc)
+
+    def test_promoted_playbook_console_code_no_fetch_hook_installer(self):
+        """Promoted playbook console_code must NOT install its own fetch/XHR hook."""
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for pb in result.verification_playbooks:
+            code = pb.console_code or ''
+            self.assertNotIn('window.fetch = async function', code)
+            self.assertNotIn('XMLHttpRequest.prototype.open', code)
+            self.assertNotIn('axios.interceptors.request.use', code)
+            self.assertNotIn('window.SSS_POC = {', code)
+            self.assertNotIn('window.SSS_REVIEW_POC', code)
+            self.assertIn('window.SSS_POC.find(', code)
+
+    def test_review_candidate_with_api_base_no_url_includes_placeholder(self):
+        """Unresolved base-URL placeholder must never appear inside url.includes(...)."""
+        files = [f('src/Login.js', "function login(){axios.post(API_BASE_URL+'/login',{email,password})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for rc in result.review_candidates:
+            for code_src in [
+                (rc.console_poc.code or '') if rc.console_poc else '',
+                (rc.observational_poc.code or '') if rc.observational_poc else '',
+            ]:
+                self.assertNotIn('url.includes("{API_BASE', code_src)
+                self.assertNotIn('url.includes("API_BASE', code_src)
+
+    def test_unresolved_review_candidate_not_runnable_note(self):
+        """Any review candidate whose action cannot be inferred must say 'Not a runnable proof yet'."""
+        files = [f('src/service.js', "axios.post('/api/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for rc in result.review_candidates:
+            if rc.poc_generation_status == 'manual_plan':
+                notes_text = ' '.join(rc.verification_notes)
+                self.assertTrue(
+                    'Not a runnable proof yet' in notes_text or 'endpoint is UNKNOWN' in notes_text,
+                    f"Expected 'Not a runnable proof yet' note, got: {rc.verification_notes}"
+                )
+
+    def test_no_review_candidate_has_full_hook_in_console_poc_code(self):
+        """No review candidate may embed a full fetch/XHR/axios hook installer in console_poc.code."""
+        files = [
+            f('src/service.js', "axios.post('/api/orders/123/pay',{amount})"),
+            f('src/Login.js', "axios.post('/api/login',{email,password})"),
+            f('src/del.js', "axios.delete('/api/admin/delete-user/{userId}')"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for rc in result.review_candidates:
+            code = (rc.console_poc.code or '') if rc.console_poc else ''
+            self.assertNotIn('SSS_REVIEW_POC_STATE', code,
+                             f"Review candidate [{rc.vulnerability_type}] has full hook in console_poc.code")
+            self.assertNotIn('window.fetch = async function', code)
+
+    def test_placeholder_endpoint_review_candidate_no_code(self):
+        """{API_BASE_URL} placeholder must not generate runnable PoC code."""
+        files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE_URL}/send-verification',{email})}\n<button onClick={sendVerificationCode}>Send code</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        review = [x for x in result.review_candidates if '{API_BASE_URL}' in ' '.join(sum([e.data_flow for e in x.evidence], []))]
+        self.assertTrue(review, "Expected a review candidate for unresolved placeholder endpoint")
+        for rc in review:
+            self.assertIsNone(rc.console_poc.code)
+            obs_code = (rc.observational_poc.code or '') if rc.observational_poc else ''
+            self.assertNotIn('{API_BASE_URL}', obs_code)
+
+    def test_common_console_helper_generated_once_and_no_hook_in_findings(self):
+        """common_console_helper is returned once; no finding embeds a duplicate hook."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+            f('src/service.js', "axios.post('/api/orders/456/pay',{amount})"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        helper = result.common_console_helper or ''
+        self.assertIn('window.SSS_POC = {', helper)
+        self.assertEqual(helper.count('window.SSS_POC = {'), 1)
+        # No finding (promoted or review) should re-define window.SSS_POC
+        for finding in result.findings:
+            for attr in ('console_poc', 'observational_poc'):
+                poc = getattr(finding, attr, None)
+                code = (poc.code or '') if poc else ''
+                self.assertNotIn('window.SSS_POC = {', code,
+                                  f"finding [{finding.vulnerability_type}].{attr}.code re-defines window.SSS_POC")
 
 
 if __name__ == '__main__':

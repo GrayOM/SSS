@@ -101,37 +101,38 @@ function renderCommonConsoleHelper(readable) {
   </div>`;
 }
 
+function renderManualPocPlan(plan) {
+  const steps = (plan || []).filter((x) => x);
+  if (!steps.length) return '';
+  return `<div><b>Manual verification plan:</b><ol>${steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></div>`;
+}
+
 function renderManualReviewCandidates(candidates) {
   const cards = (candidates || []).map((f) => {
     const ev = (f.evidence || [])[0] || {};
     const poc = f.console_poc || {};
     const verificationNotes = f.verification_notes || [];
     const verificationPlaybook = f.verification_playbook || {};
+    const isManualPlan = f.poc_generation_status === 'manual_plan';
+    const notRunnableNotes = verificationNotes.filter((n) => n.includes('Not a runnable proof yet'));
     return `<div class="card">
       <h3>${esc(f.title)}</h3>
-      <p><b>Manual Review Candidates</b> / <b>Not automatically confirmed vulnerability</b></p>
+      <p><b>Manual Review Candidate</b> — <b>Not automatically confirmed vulnerability</b></p>
       <p><b>Type:</b> ${esc(f.vulnerability_type)} / <b>Risk:</b> ${esc(f.severity)} / <b>Confidence:</b> ${esc(f.confidence)}</p>
+      ${notRunnableNotes.length ? `<p style="color:#b91c1c;font-weight:700;">⚠ ${notRunnableNotes.map(esc).join(' / ')}</p>` : ''}
+      ${isManualPlan && f.poc_generation_reason ? `<p><b>Why no runnable PoC:</b> ${esc(f.poc_generation_reason)}</p>` : ''}
       <p><b>Source location:</b> ${esc(formatLocation(f))}</p>
       <p><b>function_name:</b> ${esc(f.function_name || 'N/A')}</p>
       <p><b>Summary:</b> ${esc(f.summary)}</p>
       <p><b>Affected files:</b> ${(f.affected_files || []).map(esc).join(', ')}</p>
       <p><b>Evidence reason:</b> ${esc(ev.reason || '')}</p>
       <p><b>root_cause:</b> ${esc(f.root_cause || '')}</p>
-      <p><b>why_exploitable:</b> ${esc(f.why_exploitable || '')}</p>
       <div><b>data_flow:</b> ${renderDataFlow(f.data_flow, ev.data_flow || [])}</div>
       <div><b>breakpoint_plan:</b> ${renderPlan(f.breakpoint_plan)}</div>
-      <div><b>poc_injection_plan:</b> ${renderPlan(f.poc_injection_plan)}</div>
       <p><b>Attack scenario:</b> ${(f.attack_scenario || []).map(esc).join(' → ')}</p>
-      <p><b>PoC description:</b> ${esc(poc.description || '')}</p>
-      <p><b>Preconditions:</b> ${(poc.preconditions || []).map(esc).join(', ')}</p>
-      <p><b>Steps:</b> ${(poc.steps || []).map(esc).join(' / ')}</p>
-      ${renderVerificationCode(poc.code)}
-      <p><b>verification_playbook.console_code:</b></p>
-      ${renderVerificationCode(verificationPlaybook.console_code)}
-      <div><b>success_criteria:</b> ${listHtml(f.success_criteria || verificationPlaybook.success_criteria)}</div>
-      <div><b>failure_criteria:</b> ${listHtml(f.failure_criteria || verificationPlaybook.failure_criteria)}</div>
-      <p><b>Expected result:</b> ${esc(poc.expected_result || '')}</p>
-      <p><b>Safety:</b> ${esc(poc.safety || '')}</p>
+      ${isManualPlan ? renderManualPocPlan(f.manual_poc_plan) : ''}
+      ${!isManualPlan && poc.code ? `<p><b>Capture hint (install common_console_helper first):</b></p>${renderVerificationCode(poc.code)}` : ''}
+      ${!isManualPlan && poc.steps && poc.steps.length ? `<p><b>Steps:</b> ${(poc.steps || []).map(esc).join(' / ')}</p>` : ''}
       <p><b>Verification notes:</b> <span style="color:#b91c1c;font-weight:700;">${verificationNotes.map(esc).join(' / ')}</span></p>
       <p><b>Impact:</b> ${esc(f.impact)}</p>
       <p><b>Remediation:</b> ${esc(f.remediation)}</p>
