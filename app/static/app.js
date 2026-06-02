@@ -107,20 +107,37 @@ function renderManualPocPlan(plan) {
   return `<div><b>Manual verification plan:</b><ol>${steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></div>`;
 }
 
+const HOOK_MARKERS = [
+  'window.fetch = async function',
+  'XMLHttpRequest.prototype.open',
+  'axios.interceptors.request.use',
+  'SSS_REVIEW_POC_STATE',
+  'TARGET_ENDPOINT =',
+];
+
+function isSafeReviewCode(code) {
+  if (!code) return false;
+  return !HOOK_MARKERS.some((m) => code.includes(m));
+}
+
 function renderManualReviewCandidates(candidates) {
   const cards = (candidates || []).map((f) => {
     const ev = (f.evidence || [])[0] || {};
     const poc = f.console_poc || {};
+    const obsPoc = f.observational_poc || {};
     const verificationNotes = f.verification_notes || [];
-    const verificationPlaybook = f.verification_playbook || {};
     const isManualPlan = f.poc_generation_status === 'manual_plan';
+    const isObservational = f.poc_generation_status === 'observational';
     const notRunnableNotes = verificationNotes.filter((n) => n.includes('Not a runnable proof yet'));
+    // Only render code that has passed the short-capture-hint policy (no hook installers).
+    const safeObsCode = isSafeReviewCode(obsPoc.code) ? obsPoc.code : null;
+    const safePocCode = isSafeReviewCode(poc.code) ? poc.code : null;
     return `<div class="card">
       <h3>${esc(f.title)}</h3>
       <p><b>Manual Review Candidate</b> — <b>Not automatically confirmed vulnerability</b></p>
       <p><b>Type:</b> ${esc(f.vulnerability_type)} / <b>Risk:</b> ${esc(f.severity)} / <b>Confidence:</b> ${esc(f.confidence)}</p>
       ${notRunnableNotes.length ? `<p style="color:#b91c1c;font-weight:700;">⚠ ${notRunnableNotes.map(esc).join(' / ')}</p>` : ''}
-      ${isManualPlan && f.poc_generation_reason ? `<p><b>Why no runnable PoC:</b> ${esc(f.poc_generation_reason)}</p>` : ''}
+      ${f.poc_generation_reason ? `<p><b>Why no runnable PoC:</b> ${esc(f.poc_generation_reason)}</p>` : ''}
       <p><b>Source location:</b> ${esc(formatLocation(f))}</p>
       <p><b>function_name:</b> ${esc(f.function_name || 'N/A')}</p>
       <p><b>Summary:</b> ${esc(f.summary)}</p>
@@ -131,8 +148,14 @@ function renderManualReviewCandidates(candidates) {
       <div><b>breakpoint_plan:</b> ${renderPlan(f.breakpoint_plan)}</div>
       <p><b>Attack scenario:</b> ${(f.attack_scenario || []).map(esc).join(' → ')}</p>
       ${isManualPlan ? renderManualPocPlan(f.manual_poc_plan) : ''}
-      ${!isManualPlan && poc.code ? `<p><b>Capture hint (install common_console_helper first):</b></p>${renderVerificationCode(poc.code)}` : ''}
-      ${!isManualPlan && poc.steps && poc.steps.length ? `<p><b>Steps:</b> ${(poc.steps || []).map(esc).join(' / ')}</p>` : ''}
+      ${isObservational && safeObsCode ? `
+      <p><b>Runtime request discovery hint</b> — <i>Install common_console_helper first. This is still not a confirmed vulnerability.</i></p>
+      ${renderVerificationCode(safeObsCode)}
+      ${obsPoc.steps && obsPoc.steps.length ? `<p><b>Steps:</b> ${obsPoc.steps.map(esc).join(' / ')}</p>` : ''}
+      ${obsPoc.expected_result ? `<p><b>Expected:</b> ${esc(obsPoc.expected_result)}</p>` : ''}
+      ${obsPoc.safety ? `<p><b>Safety:</b> ${esc(obsPoc.safety)}</p>` : ''}
+      ` : ''}
+      ${!isManualPlan && !isObservational && safePocCode ? `<p><b>Capture hint (install common_console_helper first):</b></p>${renderVerificationCode(safePocCode)}` : ''}
       <p><b>Verification notes:</b> <span style="color:#b91c1c;font-weight:700;">${verificationNotes.map(esc).join(' / ')}</span></p>
       <p><b>Impact:</b> ${esc(f.impact)}</p>
       <p><b>Remediation:</b> ${esc(f.remediation)}</p>
