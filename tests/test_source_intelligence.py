@@ -27,7 +27,7 @@ class SourceIntelligenceTests(unittest.TestCase):
         self.assertIn(inv.interaction_confidence, {'medium', 'high'})
         self.assertEqual(inv.risk_category, 'payment')
         page = [x for x in r.pages if x.source_path == 'src/PaymentPage.jsx'][0]
-        self.assertEqual(page.page_hint, '결제/주문 화면')
+        self.assertEqual(page.page_hint, 'payment/order page')
         self.assertTrue(any(x.flow_type == 'payment' for x in r.business_flows))
 
     def test_vue_jquery_vanilla_flows(self):

@@ -245,15 +245,15 @@ def _risk_category(method: str, endpoint: str, params: list[str]) -> str | None:
 def _page_hint(route_paths: list[str], titles: list[str], component_name: str | None, source_path: str, risk_categories: list[str]) -> str | None:
     base = ' '.join(route_paths + titles + [component_name or '', source_path]).lower()
     if any(k in base for k in ('/payment', '/checkout', 'payment', 'checkout', 'order')) or 'payment' in risk_categories:
-        return '결제/주문 화면'
+        return 'payment/order page'
     if any(k in base for k in ('/auction', '/bid', 'auction', 'bid')) or 'auction' in risk_categories:
-        return '경매/입찰 화면'
+        return 'auction/bid page'
     if any(k in base for k in ('/find-password', 'reset', 'verify', 'password')) or 'account_recovery' in risk_categories:
-        return '계정 복구/인증 화면'
+        return 'account recovery page'
     if any(k in base for k in ('/wallet', '/point', '/charge', 'wallet', 'point')) or 'wallet_point' in risk_categories:
-        return '지갑/포인트 화면'
+        return 'wallet/point page'
     if any(k in base for k in ('/admin', 'dashboard', 'manage')) or 'authorization' in risk_categories:
-        return '관리자/관리 화면'
+        return 'admin/management page'
     return None
 
 

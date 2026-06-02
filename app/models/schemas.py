@@ -309,6 +309,7 @@ class ReadableAnalysisResult(BaseModel):
     finding_count: int
     findings: list[ReadableFinding]
     analyzed_focus: list[str] = Field(default_factory=list)
+    common_console_helper: str | None = None
     executive_findings: list[ReadableFinding] = Field(default_factory=list)
     verification_playbooks: list[ConsoleVerificationPlaybookSummary] = Field(default_factory=list)
     review_candidates: list[ReadableFinding] = Field(default_factory=list)

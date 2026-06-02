@@ -3,8 +3,12 @@ import unittest
 from app.models.schemas import FileContent
 from app.services.console_poc_analysis_service import (
     GeminiConsolePocAnalyzer,
+    MAX_PLAYBOOK_COUNT,
     MockConsolePocAnalyzer,
+    PROMOTION_SCORE_THRESHOLD,
+    _build_common_console_helper,
     _build_network_hook_mutation_poc,
+    _build_short_console_verification_code,
     _is_allowed_guarded_poc_code,
     _extract_endpoint,
     _auth_bypass_severity,
@@ -16,6 +20,13 @@ from app.services.console_poc_analysis_service import (
 
 def f(path, content):
     return FileContent(path=path, extension='.js', size=len(content), priority=1, reason_code='INCLUDED', content_hash='h', content=content)
+
+
+MANUAL_REVIEW_NOTE = 'Manual review candidate'
+NOT_CONFIRMED_NOTE = 'Not an automatically confirmed vulnerability'
+RESOLVE_BEFORE_POC_NOTE = 'Resolve endpoint/page/action before using PoC'
+UNRESOLVED_PLACEHOLDER_NOTE = 'Unresolved placeholder blocks promotion'
+GENERIC_PAGE_ACTION_NOTE = 'Generic page/action blocks promotion'
 
 
 class ConsolePocAnalysisTests(unittest.TestCase):
@@ -77,10 +88,10 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertNotIn('.args', auth.console_poc.code or '')
         self.assertNotIn('originalFetch(...args)', auth.console_poc.code or '')
         self.assertNotIn('originalFetch(.args)', auth.console_poc.code or '')
-        self.assertIn('requireAuth/checkSession 구현 파일 확인이 필요합니다.', auth.verification_notes)
-        self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
+        self.assertIn('requireAuth/checkSession implementation file needs manual confirmation', auth.verification_notes)
+        self.assertIn('sessionStorage/localStorage manipulation PoC is not confirmed by current code evidence', auth.verification_notes)
         self.assertEqual(auth.confidence, 'low')
-        self.assertIn('추가 확인 필요', auth.summary)
+        self.assertIn('needs manual confirmation', auth.summary)
 
     def test_auth_fetch_hook_regression_no_spread_args(self):
         files = [f('src/AuthPage.js', "if (userInfo.userType !== 'ADMIN') { navigate('/'); } requireAuth(user);")]
@@ -96,7 +107,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertIn('fetch hook installed', auth.console_poc.code or '')
-        self.assertIn('sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.', auth.verification_notes)
+        self.assertIn('sessionStorage/localStorage manipulation PoC is not confirmed by current code evidence', auth.verification_notes)
         self.assertIn("userInfo.userType === 'ADMIN'", auth.evidence[0].snippet)
 
     def test_auth_evidence_excludes_requireauth_import_line(self):
@@ -156,7 +167,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any(x.startswith('parameter: amount') for x in flow))
         self.assertTrue(any(x.startswith('endpoint: /api/order') for x in flow))
         self.assertIsNotNone(finding.verification_playbook)
-        self.assertIn('API 호출 직전', finding.verification_playbook.breakpoints[0].reason)
+        self.assertIn('before API call', finding.verification_playbook.breakpoints[0].reason)
         self.assertIn('amount', finding.verification_playbook.breakpoints[0].watch_variables)
 
     def test_dom_xss_requires_source_sink_flow(self):
@@ -235,7 +246,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
         self.assertEqual(finding.console_poc.poc_type, 'browser_console')
-        self.assertIn('[SSS PoC] 설치 완료', finding.console_poc.code or '')
+        self.assertIn('[SSS Review PoC] installed', finding.console_poc.code or '')
 
     def test_unknown_endpoint_is_low_with_verification_note(self):
         files = [f('src/x.js', "const endpoint = API_ENDPOINTS.CHARGE_POINT; apiClient.post(endpoint, payload); const amount=1;")]
@@ -260,7 +271,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/order.js', "fetch('/api/order/by-product/${productId}/user/${userId}')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'IDOR / Unauthorized Data Access Candidate'][0]
-        self.assertIn('식별자 기반 조회 요청의 접근 제어 확인 필요', finding.title)
+        self.assertIn('access control check required for identifier-based query', finding.title)
 
     def test_user_session_get_is_kept(self):
         files = [f('src/s.js', "fetch('/api/user/session')")]
@@ -275,7 +286,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
             finding = findings[0]
             self.assertNotIn('TEST_VALUE/verify-code', finding.console_poc.code or '')
             self.assertIn('{API_BASE}/verify-code', finding.console_poc.code or '')
-            self.assertTrue(any('API_BASE 값을 실제 대상 URL로 변경해야 합니다.' in n for n in finding.verification_notes) or finding.console_poc.code is None)
+            self.assertTrue(any('replace API_BASE with the actual target URL' in n for n in finding.verification_notes) or finding.console_poc.code is None)
 
     def test_api_base_get_endpoint_uses_placeholder_base(self):
         files = [f('src/vget.js', "fetch('{API_BASE}/user/session')")]
@@ -411,7 +422,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         findings = MockConsolePocAnalyzer().analyze(files)
         finding = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
-        self.assertIn('window.SSS_POC.armMutation()', finding.console_poc.code or '')
+        self.assertIn('window.SSS_REVIEW_POC.armMutation()', finding.console_poc.code or '')
         self.assertIsNotNone(finding.verification_playbook)
 
     def test_disabled_button_only_generates_playbook_console_code(self):
@@ -442,8 +453,8 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         findings = MockConsolePocAnalyzer().analyze(files)
         rec = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
         reasons = [b.reason for b in rec.verification_playbook.breakpoints]
-        self.assertIn('클라이언트 검증 실패 분기 확인', reasons)
-        self.assertIn('API 호출 직전 payload 변조 확인', reasons)
+        self.assertIn('check client-side validation branch', reasons)
+        self.assertIn('check payload before API call', reasons)
         all_watch = {w for bp in rec.verification_playbook.breakpoints for w in bp.watch_variables}
         self.assertIn('code', all_watch)
 
@@ -455,7 +466,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
 
     def test_xhr_hook_does_not_mutate_without_arm(self):
         code = _build_network_hook_mutation_poc('/api/pay')
-        self.assertIn('if (SSS_POC_STATE.mutationArmed && !BLOCKED_REPLAY && parsed)', code)
+        self.assertIn('if (SSS_REVIEW_POC_STATE.mutationArmed && !BLOCKED_REPLAY && parsed)', code)
 
     def test_xhr_hook_captures_method_url_body(self):
         code = _build_network_hook_mutation_poc('/api/pay')
@@ -470,7 +481,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/item.js', content)]
         findings = MockConsolePocAnalyzer().analyze(files)
         pay = [x for x in findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
-        self.assertFalse(any(bp.reason == '클라이언트 검증 실패 분기 확인' and bp.start_line > 700 for bp in (pay.verification_playbook.breakpoints if pay.verification_playbook else [])))
+        self.assertFalse(any(bp.reason == 'check client-side validation branch' and bp.start_line > 700 for bp in (pay.verification_playbook.breakpoints if pay.verification_playbook else [])))
 
     def test_verify_code_watch_variables_are_narrow(self):
         files = [f('src/verify.js', "function handleVerify(){ if (!code) return; axios.post('/verify-code', { code }); }")]
@@ -508,8 +519,8 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         finding = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
         self.assertEqual(finding.console_poc.poc_type, 'browser_console')
-        self.assertIn('[SSS PoC] 설치 완료', finding.console_poc.code or '')
-        self.assertIn('window.SSS_POC.armMutation()', finding.console_poc.code or '')
+        self.assertIn('[SSS Review PoC] installed', finding.console_poc.code or '')
+        self.assertIn('window.SSS_REVIEW_POC.armMutation()', finding.console_poc.code or '')
         self.assertIn('list() {', finding.console_poc.code or '')
         self.assertIn('window.fetch = async function', finding.console_poc.code or '')
 
@@ -518,8 +529,8 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
-        self.assertIn('[SSS PoC] 설치 완료', finding.console_poc.code or '')
-        self.assertIn('API JSON이 아니라 HTML이 반환되었습니다', finding.console_poc.code or '')
+        self.assertIn('[SSS Review PoC] installed', finding.console_poc.code or '')
+        self.assertIn('response looks like HTML instead of API JSON', finding.console_poc.code or '')
 
     def test_complete_payment_and_charge_are_guarded_not_blocked(self):
         files = [
@@ -528,7 +539,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         pocs = [x.console_poc.code or '' for x in result.findings if 'Manipulation Candidate' in x.vulnerability_type]
-        self.assertTrue(any('window.SSS_POC.armMutation()' in c for c in pocs))
+        self.assertTrue(any('window.SSS_REVIEW_POC.armMutation()' in c for c in pocs))
 
     def test_delete_endpoint_manual_check_with_reason(self):
         files = [f('src/del.js', "axios.delete('/api/admin/delete-user/{userId}')")]
@@ -536,7 +547,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         finding = [x for x in result.findings if x.vulnerability_type in {'State/Status Manipulation Candidate', 'Client-side Validation Bypass', 'Generic API Review Candidate'}][0]
         self.assertIsNotNone(finding.console_poc.code)
         self.assertIn('replay blocked: high-risk endpoint', finding.console_poc.code or '')
-        self.assertTrue(any('observe mode만 제공됩니다' in n for n in finding.verification_notes))
+        self.assertTrue(any('observe mode only' in n for n in finding.verification_notes))
 
     def test_post_poc_steps_use_arm_mutation_not_confirm_flag(self):
         files = [f('src/post2.js', "axios.post('/api/pay', { amount })")]
@@ -546,7 +557,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         steps = ' '.join(finding.console_poc.steps)
         notes = ' '.join(finding.verification_notes)
         self.assertNotIn('CONFIRM_AUTHORIZED_TEST', pre + steps + notes)
-        self.assertIn('window.SSS_POC.armMutation()', pre + steps + notes)
+        self.assertIn('window.SSS_REVIEW_POC.armMutation()', pre + steps + notes)
 
     def test_axios_capture_has_transport_marker(self):
         code = _build_network_hook_mutation_poc('/api/pay')
@@ -572,7 +583,24 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertTrue(len(result.review_candidates) >= 1)
-        self.assertTrue(any('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' in ' '.join(x.verification_notes) for x in result.review_candidates))
+        self.assertTrue(any('endpoint is UNKNOWN: auto PoC not generated' in ' '.join(x.verification_notes) for x in result.review_candidates))
+
+    def test_unresolved_api_base_url_endpoint_is_not_promoted(self):
+        files = [f('src/LoginPage.js', "function handleLogin(){axios.post('{API_BASE_URL}/login',{ username, password })}\n<button onClick={handleLogin}>Login</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '{API_BASE_URL}/login' for p in result.verification_playbooks))
+        review = [x for x in result.review_candidates if any('endpoint: {API_BASE_URL}/login' in flow for ev in x.evidence for flow in ev.data_flow)][0]
+        self.assertEqual(review.poc_generation_status, 'manual_plan')
+        self.assertTrue(any('{API_BASE_URL}' in step for step in review.manual_poc_plan))
+        self.assertIn(MANUAL_REVIEW_NOTE, review.title)
+        self.assertIn(NOT_CONFIRMED_NOTE, ' '.join(review.verification_notes))
+        self.assertIn(UNRESOLVED_PLACEHOLDER_NOTE, ' '.join(review.verification_notes))
+
+    def test_generic_action_hint_is_not_promoted(self):
+        files = [f('src/PaymentPage.js', "function doRequest(){axios.post('/api/pay',{amount})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/api/pay' for p in result.verification_playbooks))
+        self.assertTrue(any(GENERIC_PAGE_ACTION_NOTE in ' '.join(x.verification_notes) for x in result.review_candidates))
 
     def test_disabled_loading_is_review_candidate_not_playbook(self):
         files = [f('src/a.js', "<button disabled={loading}>Pay</button>")]
@@ -583,23 +611,88 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/123/complete-payment',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = result.verification_playbooks[0]
-        self.assertEqual(p.page_hint, '결제/주문 화면')
-        self.assertEqual(p.user_action_hint, '결제 버튼 클릭')
+        self.assertEqual(p.page_hint, 'payment/order page')
+        self.assertEqual(p.user_action_hint, 'click payment button')
         self.assertEqual(p.function_name, 'handlePayment')
-        self.assertIn('검증 화면', p.console_code or '')
-        self.assertIn('사용자 동작', p.console_code or '')
-        self.assertIn('대상 API', p.console_code or '')
+        self.assertIn('// Page:', p.console_code or '')
+        self.assertIn('// Action:', p.console_code or '')
+        self.assertIn('// Target:', p.console_code or '')
         finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
         steps = ' '.join(finding.console_poc.steps if finding.console_poc else [])
-        self.assertIn('결제/주문 화면', steps)
-        self.assertIn('결제 버튼 클릭', steps)
+        self.assertIn('Open page:', steps)
+        self.assertIn('Perform action:', steps)
+
+    def test_generated_poc_explains_undefined_is_normal_after_install(self):
+        code = _build_network_hook_mutation_poc('/api/pay', page_hint='payment page', action_hint='click payment button')
+        self.assertIn('undefined output is normal', code)
+        self.assertIn('Confirm window.SSS_REVIEW_POC exists', code)
+        self.assertIn('wrong page, wrong button/action, placeholder endpoint', code)
+        self.assertIn('window.SSS_REVIEW_POC.list()', code)
+        self.assertIn('Use window.SSS_REVIEW_POC.armMutation() only after the baseline request is captured', code)
+        self.assertNotIn('window.SSS_POC =', code)
+        self.assertIn('const PAGE_HINT = "payment page";', code)
+        self.assertIn('const ACTION_HINT = "click payment button";', code)
+
+    def test_review_poc_invalid_hints_use_english_fallback(self):
+        invalid_hint = chr(0x2603)
+        code = _build_network_hook_mutation_poc('/api/pay', page_hint=invalid_hint, action_hint=invalid_hint)
+
+        self.assertIn('const PAGE_HINT = "target page";', code)
+        self.assertIn('const ACTION_HINT = "target action";', code)
+        self.assertFalse(any(ord(ch) > 127 for ch in code))
+        self.assertNotIn('window.SSS_POC =', code)
+
+    def test_review_candidate_standalone_poc_uses_review_namespace(self):
+        code = _build_network_hook_mutation_poc('/api/pay', page_hint='payment page', action_hint='click payment button')
+
+        self.assertIn('window.SSS_REVIEW_POC =', code)
+        self.assertIn('window.SSS_REVIEW_POC.armMutation()', code)
+        self.assertIn('window.SSS_REVIEW_POC.replay(index, overrides)', code)
+        self.assertNotIn('window.SSS_POC =', code)
+        self.assertNotIn('window.SSS_POC.list()', code)
+        self.assertNotIn('window.SSS_POC.armMutation()', code)
+        self.assertNotIn('window.SSS_POC.replay', code)
+
+    def test_review_candidate_observational_poc_does_not_overwrite_common_helper(self):
+        files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        review = [x for x in result.review_candidates if x.observational_poc and x.observational_poc.code][0]
+        code = review.observational_poc.code or ''
+
+        self.assertIn(MANUAL_REVIEW_NOTE, review.title)
+        self.assertIn(NOT_CONFIRMED_NOTE, review.summary)
+        self.assertIn(RESOLVE_BEFORE_POC_NOTE, ' '.join(review.verification_notes))
+        self.assertIn('window.SSS_REVIEW_POC =', code)
+        self.assertNotIn('window.SSS_POC =', code)
+
+    def test_promoted_playbook_has_concrete_runtime_guidance(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        p = [x for x in result.verification_playbooks if x.endpoint == '/api/orders/123/pay'][0]
+        self.assertEqual(p.page_hint, 'payment/order page')
+        self.assertEqual(p.user_action_hint, 'click payment button')
+        self.assertEqual(p.endpoint, '/api/orders/123/pay')
+        self.assertTrue(p.console_code)
+        self.assertNotIn('target action', p.user_action_hint)
+        self.assertNotIn('const TARGET_ENDPOINT = "UNKNOWN";', p.console_code)
+        self.assertNotIn('const TARGET_ENDPOINT = "{API_BASE_URL}/login";', p.console_code)
+
+    def test_review_candidate_with_manual_plan_is_not_confirmed_vulnerability(self):
+        files = [f('src/service.js', "axios.post(apiUrl,{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        review = [x for x in result.review_candidates if x.poc_generation_status == 'manual_plan'][0]
+        self.assertTrue(review.manual_poc_plan)
+        self.assertIn(MANUAL_REVIEW_NOTE, review.title)
+        self.assertIn(NOT_CONFIRMED_NOTE, review.summary)
+        self.assertIn(RESOLVE_BEFORE_POC_NOTE, ' '.join(review.verification_notes))
 
     def test_playbook_contains_proof_and_criteria(self):
         files = [f('src/FindPassword.js', "function handleVerify(){axios.post('/verify-code',{code})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = result.verification_playbooks[0]
-        self.assertEqual(p.page_hint, '계정 복구/인증 화면')
-        self.assertEqual(p.user_action_hint, '인증번호 확인 버튼 클릭')
+        self.assertEqual(p.page_hint, 'account recovery page')
+        self.assertEqual(p.user_action_hint, 'click verify code button')
         self.assertTrue(len(p.proof_steps) > 0)
         self.assertTrue(len(p.success_criteria) > 0)
         self.assertTrue(len(p.failure_criteria) > 0)
@@ -626,7 +719,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/x.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertFalse(any(p.risk_type == 'Generic API Review Candidate' for p in result.verification_playbooks))
-        self.assertTrue(any('일반 API 후보라 자동 검증 Playbook에서 제외하고 수동 검토 후보로 분류했습니다.' in ' '.join(x.verification_notes) for x in result.review_candidates))
+        self.assertTrue(any('generic API candidate: excluded from auto playbook, moved to manual review' in ' '.join(x.verification_notes) for x in result.review_candidates))
 
     def test_session_endpoint_with_query_goes_review(self):
         files = [f('src/s.js', "fetch('/api/user/session?refresh=true')")]
@@ -639,13 +732,13 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/verification.js', snippet + " axios.post('/api/pay',{amount})")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
-        self.assertTrue(any('압축/라이브러리성 코드' in ' '.join(x.verification_notes) for x in result.review_candidates))
+        self.assertTrue(any('compressed/library code' in ' '.join(x.verification_notes) for x in result.review_candidates))
 
     def test_generic_action_hint_adds_manual_verification_note(self):
         files = [f('src/unknown.js', "function doRequest(){axios.post('/api/pay',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
-        self.assertTrue(any('수동 확인 필요' in n for n in finding.verification_notes))
+        self.assertTrue(any('Confirm manually' in n for n in finding.verification_notes))
 
     def test_same_endpoint_different_function_creates_separate_playbooks(self):
         files = [
@@ -662,37 +755,36 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         src = "\n".join([f"function handlePay{i}(){{axios.post('/api/pay/{i}',{{amount}})}}" for i in range(12)])
         files = [f('src/PaymentPage.js', src)]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        self.assertLessEqual(len(result.verification_playbooks), 7)
+        self.assertLessEqual(len(result.verification_playbooks), MAX_PLAYBOOK_COUNT)
 
     def test_auction_page_bid_has_page_and_action_hint(self):
         files = [f('src/AuctionPage.js', "function handleBid(){axios.post('/api/auction/1/bid',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertTrue(len(result.verification_playbooks) >= 1)
         p = result.verification_playbooks[0]
-        self.assertEqual(p.page_hint, '경매/입찰 화면')
-        self.assertEqual(p.user_action_hint, '입찰 버튼 클릭')
+        self.assertEqual(p.page_hint, 'auction/bid page')
+        self.assertEqual(p.user_action_hint, 'click bid button')
 
 
-    def test_findpassword_send_verification_promoted_with_action_hint(self):
+    def test_findpassword_send_verification_with_api_base_stays_review(self):
         files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE}/send-verification',{email})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        self.assertTrue(any(p.endpoint == '{API_BASE}/send-verification' for p in result.verification_playbooks))
-        pbook = [p for p in result.verification_playbooks if p.endpoint == '{API_BASE}/send-verification'][0]
-        self.assertEqual(pbook.user_action_hint, '인증번호 발송 버튼 클릭')
+        self.assertFalse(any(p.endpoint == '{API_BASE}/send-verification' for p in result.verification_playbooks))
+        self.assertTrue(result.review_candidates)
         finding = [x for x in result.findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
-        self.assertTrue(any('API_BASE 값을 실제 대상 URL로 변경해야 합니다.' in n for n in finding.verification_notes))
+        self.assertTrue(any(UNRESOLVED_PLACEHOLDER_NOTE in n for n in finding.verification_notes))
 
-    def test_findpassword_verify_code_promoted_with_action_hint(self):
+    def test_findpassword_verify_code_with_api_base_stays_review(self):
         files = [f('src/FindPassword.js', "function verifyCode(){axios.post('{API_BASE}/verify-code',{code})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        pbook = [p for p in result.verification_playbooks if p.endpoint == '{API_BASE}/verify-code'][0]
-        self.assertEqual(pbook.user_action_hint, '인증번호 확인 버튼 클릭')
+        self.assertFalse(any(p.endpoint == '{API_BASE}/verify-code' for p in result.verification_playbooks))
+        self.assertTrue(result.review_candidates)
 
-    def test_findpassword_reset_password_promoted_with_action_hint(self):
+    def test_findpassword_reset_password_with_api_base_stays_review(self):
         files = [f('src/FindPassword.js', "function resetPassword(){axios.put('{API_BASE}/reset-password',{password})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        pbook = [p for p in result.verification_playbooks if p.endpoint == '{API_BASE}/reset-password'][0]
-        self.assertEqual(pbook.user_action_hint, '비밀번호 재설정 버튼 클릭')
+        self.assertFalse(any(p.endpoint == '{API_BASE}/reset-password' for p in result.verification_playbooks))
+        self.assertTrue(result.review_candidates)
 
     def test_purchase_stripe_and_iamport_action_hints(self):
         stripe_files = [f('src/PurchasePage.js', "function handleStripeCheckout(){axios.post('/api/stripe/create-checkout-session',{amount})}")]
@@ -703,19 +795,22 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         iamport_result = analyze_console_exploitability(iamport_files, analyzer=MockConsolePocAnalyzer())
         iamport = [p for p in iamport_result.verification_playbooks if p.endpoint == '/api/iamport/prepare'][0]
 
-        self.assertEqual(stripe.user_action_hint, '결제 버튼 클릭')
-        self.assertEqual(iamport.user_action_hint, '결제 승인/검증 버튼 클릭')
+        self.assertEqual(stripe.user_action_hint, 'click payment button')
+        self.assertEqual(iamport.user_action_hint, 'click payment approval button')
 
     def test_steps_do_not_repeat_screen_word(self):
         files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/1/complete-payment',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        finding = [x for x in result.findings if x.console_poc and x.console_poc.code and x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
-        self.assertFalse(any('화면 화면으로 이동' in step for step in finding.console_poc.steps))
+        finding = [x for x in result.findings if x.console_poc and x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
+        self.assertFalse(any('Navigate to target feature page' in step for step in finding.console_poc.steps))
 
     def test_verify_identity_classification_for_non_findpassword(self):
         files = [f('src/ItemDetailPage.js', "function handleVerifyCode(){axios.post('/api/user/verify-identity',{code})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        finding = [x for x in result.findings if '/api/user/verify-identity' in (x.console_poc.code or '')][0]
+        finding = [
+            x for x in result.findings
+            if any('/api/user/verify-identity' in flow for ev in x.evidence for flow in ev.data_flow)
+        ][0]
         self.assertEqual(finding.vulnerability_type, 'Identity Verification / Action Authorization Bypass Candidate')
 
     def test_generic_get_recommend_note_not_session_note(self):
@@ -724,28 +819,28 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertTrue(len(result.review_candidates) >= 1)
         notes = ' '.join(result.review_candidates[0].verification_notes)
-        self.assertIn('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.', notes)
-        self.assertNotIn('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.', notes)
+        self.assertIn('classified as auto-query/recommend API: excluded from playbook', notes)
+        self.assertNotIn('classified as auto session/init request: excluded from playbook', notes)
 
     def test_react_generic_submit_order_infers_payment_hints(self):
         files = [f('src/OrderFlow.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = [x for x in result.verification_playbooks if x.endpoint == '/api/orders/123/pay'][0]
-        self.assertEqual(p.page_hint, '결제/주문 화면')
-        self.assertEqual(p.user_action_hint, '결제 버튼 클릭')
+        self.assertEqual(p.page_hint, 'payment/order page')
+        self.assertEqual(p.user_action_hint, 'click payment button')
 
     def test_vue_generic_place_bid_infers_auction_hints(self):
         files = [f('src/BidWidget.vue', "@click=\"placeBid\"\nfunction placeBid(){axios.post('/api/auction/1/bid',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = [x for x in result.verification_playbooks if x.endpoint == '/api/auction/1/bid'][0]
-        self.assertEqual(p.page_hint, '경매/입찰 화면')
-        self.assertEqual(p.user_action_hint, '입찰 버튼 클릭')
+        self.assertEqual(p.page_hint, 'auction/bid page')
+        self.assertEqual(p.user_action_hint, 'click bid button')
 
     def test_vanilla_charge_infers_wallet_hint(self):
         files = [f('src/Wallet.js', "document.querySelector('#charge').addEventListener('click', chargeWallet)\nfunction chargeWallet(){fetch('/api/wallet/charge',{method:'POST',body:JSON.stringify({amount})})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = [x for x in result.verification_playbooks if x.endpoint == '/api/wallet/charge'][0]
-        self.assertEqual(p.page_hint, '지갑/포인트 화면')
+        self.assertEqual(p.page_hint, 'wallet/point page')
 
     def test_result_contains_project_understanding(self):
         files = [f('src/App.jsx', "<Route path='/payment' element={<PaymentPage />} />"), f('src/PaymentPage.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}")]
@@ -782,8 +877,8 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertTrue(any(p.endpoint == '/user/chkMobiSendAjax' for p in result.verification_playbooks))
         p = [x for x in result.verification_playbooks if x.endpoint == '/user/chkMobiSendAjax'][0]
-        self.assertEqual(p.user_action_hint, '인증번호 발송 버튼 클릭')
-        self.assertNotEqual(p.page_hint, '해당 기능 화면')
+        self.assertEqual(p.user_action_hint, 'click send code button')
+        self.assertNotEqual(p.page_hint, 'target feature page')
         notes = ' '.join([n for x in result.findings for n in x.verification_notes])
         self.assertIn('playbook_score=', notes)
         self.assertTrue(('ui_event_connected' in notes) or ('endpoint_category=' in notes))
@@ -793,7 +888,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
         notes = ' '.join(result.review_candidates[0].verification_notes)
-        self.assertIn('조회/추천검색성 API', notes)
+        self.assertIn('auto-query/recommend API', notes)
 
     def test_mypage_get_review_candidate(self):
         files = [f('templates/mypage.html', "function loadMyPage(){fetch('/myPage/myPageNewAjax')}")]
@@ -979,12 +1074,11 @@ function submitOrder(event) {
     def test_dom_xss_source_sink_flow_has_v1_contract_and_console_poc(self):
         files = [f('src/x.js', "const value = location.hash.slice(1);\ndocument.getElementById('out').innerHTML = value;")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        playbook = [p for p in result.verification_playbooks if p.risk_type == 'DOM XSS'][0]
-
-        self._assert_v1_playbook_contract(playbook)
-        self.assertEqual(playbook.method, 'DOM')
-        self.assertIn('innerHTML', playbook.data_flow.api_call_or_sink)
-        self.assertIn('location.hash', playbook.console_code)
+        self.assertFalse(any(p.risk_type == 'DOM XSS' for p in result.verification_playbooks))
+        self.assertTrue(any(x.vulnerability_type == 'DOM XSS' for x in result.review_candidates))
+        review = [x for x in result.review_candidates if x.vulnerability_type == 'DOM XSS'][0]
+        self.assertIn(MANUAL_REVIEW_NOTE, ' '.join(review.verification_notes))
+        self.assertIn(NOT_CONFIRMED_NOTE, ' '.join(review.verification_notes))
 
     def test_unknown_generic_api_wrapper_stays_review_candidate(self):
         files = [f('src/api.js', "function save(payload){ return apiClient.post(endpoint, payload); }")]
@@ -992,6 +1086,216 @@ function submitOrder(event) {
 
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertTrue(any(x.poc_generation_status == 'manual_plan' for x in result.review_candidates))
+
+    def test_manual_placeholder_guidance_uses_english(self):
+        files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE_URL}/send-verification',{email})}")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        review = result.review_candidates[0]
+        manual_plan = '\n'.join(review.manual_poc_plan)
+
+        self.assertIn('Resolve {API_BASE_URL} to the real origin/base URL before confirming the endpoint', manual_plan)
+        self.assertIn(UNRESOLVED_PLACEHOLDER_NOTE, manual_plan)
+
+    def test_common_console_helper_is_generated_once(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+
+        self.assertTrue(result.common_console_helper)
+        self.assertEqual(result.common_console_helper, _build_common_console_helper())
+        self.assertIn('window.SSS_POC', result.common_console_helper)
+        self.assertIn('find(criteria = {})', result.common_console_helper)
+        self.assertIn('urlIncludes', result.common_console_helper)
+        self.assertIn('transport', result.common_console_helper)
+        self.assertIn('window.fetch = async function', result.common_console_helper)
+        self.assertIn('XMLHttpRequest.prototype.open', result.common_console_helper)
+        self.assertIn('axios.interceptors.request.use', result.common_console_helper)
+        self.assertIn('window.jQuery.ajax', result.common_console_helper)
+        self.assertIn('undefined after install is normal', result.common_console_helper)
+
+    def test_promoted_finding_console_code_is_short_commands(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/orders/123/pay'][0]
+        code = playbook.console_code or ''
+
+        self.assertLess(len(code), 1200)
+        self.assertIn('window.SSS_POC.list()', code)
+        self.assertIn('const match = window.SSS_POC.find({', code)
+        self.assertIn('if (!match)', code)
+        self.assertIn('window.SSS_POC.find({', code)
+        self.assertIn('window.SSS_POC.replay(match.index', code)
+        self.assertIn('Then copy/run:', code)
+        self.assertIn('Do not replay or mutate until approval is granted', code)
+        self.assertNotIn('<index>', code)
+        self.assertTrue(code.startswith('(async () => {'))
+        self.assertFalse(any(line.startswith('const match =') for line in code.splitlines()))
+        self.assertIn('Install common_console_helper first', code)
+        self.assertNotIn('TEST_VALUE', code)
+        self.assertNotIn('  window.SSS_POC.armMutation();', code)
+        self.assertNotIn('await window.SSS_POC.replay', code)
+        self.assertNotIn('window.fetch = async function', code)
+        self.assertNotIn('XMLHttpRequest.prototype.open', code)
+        self.assertNotIn('axios.interceptors.request.use', code)
+        self.assertNotIn('window.jQuery.ajax = function', code)
+
+    def test_finding_specific_console_code_prints_replay_guidance_only(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        code = result.verification_playbooks[0].console_code or ''
+
+        self.assertIn('console.log("[SSS PoC] After approval, run: window.SSS_POC.armMutation();");', code)
+        self.assertIn('console.log("[SSS PoC] Then copy/run:",', code)
+        self.assertIn('window.SSS_POC.replay(match.index', code)
+        self.assertNotIn('  window.SSS_POC.armMutation();', code)
+        self.assertNotIn('await window.SSS_POC.replay', code)
+
+    def test_get_finding_specific_console_code_prints_replay_guidance(self):
+        code = _build_short_console_verification_code(
+            endpoint='/api/search',
+            method='GET',
+            page_hint='Search page',
+            action_hint='Click search',
+        )
+
+        self.assertIn('Read-only replay guidance', code)
+        self.assertIn('window.SSS_POC.replay(match.index);', code)
+        self.assertNotIn('await window.SSS_POC.replay', code)
+        self.assertNotIn('  window.SSS_POC.armMutation();', code)
+
+    def test_common_helper_replay_is_transport_aware(self):
+        helper = _build_common_console_helper()
+
+        self.assertIn("item.transport === 'xhr'", helper)
+        self.assertIn('xhr replay is not automatic', helper)
+        self.assertIn("item.transport === 'axios'", helper)
+        self.assertIn('await window.axios(config)', helper)
+        self.assertIn("item.transport === 'jquery.ajax'", helper)
+        self.assertIn('return window.jQuery.ajax(config)', helper)
+        self.assertIn('replaying captured fetch request', helper)
+        self.assertIn('state.originalFetch.call(window, url, init)', helper)
+
+    def test_common_helper_non_get_replay_still_requires_arm_mutation(self):
+        helper = _build_common_console_helper()
+
+        self.assertIn("method !== 'GET' && !state.mutationArmed", helper)
+        self.assertIn('replay blocked. Run window.SSS_POC.armMutation() first for non-GET requests.', helper)
+
+    def test_promoted_finding_console_poc_does_not_redefine_sss_poc(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        promoted_ids = {p.id for p in result.verification_playbooks}
+
+        self.assertTrue(promoted_ids)
+        for finding in result.findings:
+            if finding.id in promoted_ids:
+                code = finding.console_poc.code if finding.console_poc else None
+                self.assertFalse(code)
+                self.assertNotIn('window.SSS_POC =', code or '')
+
+    def test_short_playbook_code_uses_common_helper_model(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        helper = result.common_console_helper or ''
+        playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/orders/123/pay'][0]
+        code = playbook.console_code or ''
+
+        self.assertEqual(helper.count('window.SSS_POC = {'), 1)
+        self.assertIn('find(criteria = {})', helper)
+        self.assertIn('replay(index, overrides = {})', helper)
+        self.assertIn('if (!window.SSS_POC || !window.SSS_POC.find)', code)
+        self.assertIn('window.SSS_POC.find({', code)
+        self.assertIn('Then copy/run:', code)
+        self.assertNotIn('window.SSS_POC =', code)
+        self.assertNotIn('window.SSS_REVIEW_POC', code)
+
+    def test_promotion_constants_are_used(self):
+        import inspect
+        from app.services import console_poc_analysis_service as svc
+
+        source = inspect.getsource(svc.analyze_console_exploitability)
+        self.assertEqual(PROMOTION_SCORE_THRESHOLD, 5)
+        self.assertEqual(MAX_PLAYBOOK_COUNT, 7)
+        self.assertIn('score < PROMOTION_SCORE_THRESHOLD', source)
+        self.assertIn('len(verification_playbooks) >= MAX_PLAYBOOK_COUNT', source)
+        self.assertNotIn('score < 5', source)
+        self.assertNotIn('len(verification_playbooks) >= 7', source)
+
+    def test_unresolved_endpoint_is_review_candidate_only(self):
+        files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE_URL}/send-verification',{email})}\n<button onClick={sendVerificationCode}>Send code</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+
+        self.assertFalse(any(p.endpoint and '{API_BASE_URL}' in p.endpoint for p in result.verification_playbooks))
+        self.assertTrue(result.review_candidates)
+        self.assertTrue(any(UNRESOLVED_PLACEHOLDER_NOTE in ' '.join(x.verification_notes) for x in result.review_candidates))
+
+    def test_every_promoted_playbook_has_concrete_contract(self):
+        from app.services import console_poc_analysis_service as svc
+
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(result.verification_playbooks)
+
+        for playbook in result.verification_playbooks:
+            self.assertTrue(playbook.source_path)
+            self.assertTrue(playbook.function_name or (isinstance(playbook.start_line, int) and isinstance(playbook.end_line, int)))
+            self.assertTrue(playbook.endpoint or (playbook.data_flow and playbook.data_flow.api_call_or_sink))
+            self.assertNotIn('UNKNOWN', f'{playbook.method} {playbook.endpoint} {playbook.data_flow.api_call_or_sink if playbook.data_flow else ""}')
+            self.assertNotIn('{', playbook.endpoint or '')
+            self.assertFalse(svc._is_generic_page_hint(playbook.page_hint))
+            self.assertFalse(svc._is_generic_action_hint(playbook.user_action_hint))
+            self.assertTrue(playbook.why_exploitable)
+            self.assertIsNotNone(playbook.data_flow)
+            self.assertIsNotNone(playbook.breakpoint_plan)
+            self.assertIsNotNone(playbook.poc_injection_plan)
+            self.assertIn('window.SSS_POC', playbook.console_code or '')
+
+    def test_review_candidate_is_not_confirmed_vulnerability(self):
+        files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        promoted_ids = {p.id for p in result.verification_playbooks}
+
+        self.assertTrue(result.review_candidates)
+        self.assertFalse(any(candidate.id in promoted_ids for candidate in result.review_candidates))
+        self.assertFalse(any('Confirmed promoted finding' in ' '.join(candidate.verification_notes) for candidate in result.review_candidates))
+        review_text = ' '.join(result.review_candidates[0].verification_notes)
+        self.assertIn(MANUAL_REVIEW_NOTE, review_text)
+        self.assertIn(NOT_CONFIRMED_NOTE, review_text)
+        self.assertIn('Needs runtime capture before proof', review_text)
+
+    def test_confirmed_note_only_on_appended_playbooks(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        promoted_ids = {p.id for p in result.verification_playbooks}
+
+        self.assertTrue(promoted_ids)
+        self.assertFalse(any('Confirmed promoted finding' in ' '.join(candidate.verification_notes) for candidate in result.review_candidates))
+        for finding in result.findings:
+            notes = ' '.join(finding.verification_notes)
+            if finding.id in promoted_ids:
+                self.assertIn('Confirmed promoted finding', notes)
+            else:
+                self.assertNotIn('Confirmed promoted finding', notes)
+
+    def test_console_poc_service_has_single_policy_helper_definitions(self):
+        import inspect
+        from app.services import console_poc_analysis_service as svc
+
+        source = inspect.getsource(svc)
+        lines = source.splitlines()
+        debug = '\n'.join(f'{idx + 1}: {line}' for idx, line in enumerate(lines) if 45 <= idx + 1 <= 140 or 1855 <= idx + 1 <= 1890)
+        self.assertEqual(source.count('def _is_generic_action_hint'), 1, debug)
+        self.assertEqual(source.count('def _is_generic_page_hint'), 1, debug)
+        self.assertEqual(source.count('def _find_unresolved_poc_placeholders'), 1, debug)
+
+    def test_mark_review_candidate_uses_english_markers(self):
+        import inspect
+        from app.services import console_poc_analysis_service as svc
+
+        source = inspect.getsource(svc._mark_review_candidate)
+        self.assertIn(MANUAL_REVIEW_NOTE, source)
+        self.assertIn(NOT_CONFIRMED_NOTE, source)
+        self.assertIn(RESOLVE_BEFORE_POC_NOTE, source)
+        self.assertIn('Needs runtime capture before proof', source)
 
 
 if __name__ == '__main__':

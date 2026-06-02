@@ -67,7 +67,7 @@ function renderVerificationCode(code) {
 }
 
 function renderVerificationPlaybooks(playbooks) {
-  return (playbooks || []).map((pb) => `<div class="card">
+  const cards = (playbooks || []).map((pb) => `<div class="card">
     <h3>${esc(pb.title || pb.vulnerability_title || 'Verification Playbook')}</h3>
     <p><b>Source location:</b> ${esc(formatLocation(pb))}</p>
     <p><b>function_name:</b> ${esc(pb.function_name || 'N/A')}</p>
@@ -82,18 +82,34 @@ function renderVerificationPlaybooks(playbooks) {
     <div><b>success_criteria:</b> ${listHtml(pb.success_criteria)}</div>
     <div><b>failure_criteria:</b> ${listHtml(pb.failure_criteria)}</div>
   </div>`).join('');
+  return `<section>
+    <h2>Promoted Verification Playbooks</h2>
+    ${cards || '<div class="card">No promoted verification playbooks</div>'}
+  </section>`;
 }
 
-function renderFindings(body) {
-  const findings = body.readable_analysis?.findings ?? [];
-  const playbooks = body.readable_analysis?.verification_playbooks ?? [];
-  const findingsHtml = findings.map((f) => {
+function renderCommonConsoleHelper(readable) {
+  const helper = readable?.common_console_helper || '';
+  if (!helper) return '';
+  return `<div class="card">
+    <h3>Common Console Helper</h3>
+    <p><b>Step 1:</b> paste common_console_helper once.</p>
+    <p><b>Step 2:</b> perform the documented page/action.</p>
+    <p><b>Step 3:</b> run the short finding-specific console_code.</p>
+    <p><b>Step 4:</b> use mutation/replay only after approval.</p>
+    ${renderVerificationCode(helper)}
+  </div>`;
+}
+
+function renderManualReviewCandidates(candidates) {
+  const cards = (candidates || []).map((f) => {
     const ev = (f.evidence || [])[0] || {};
     const poc = f.console_poc || {};
     const verificationNotes = f.verification_notes || [];
     const verificationPlaybook = f.verification_playbook || {};
     return `<div class="card">
       <h3>${esc(f.title)}</h3>
+      <p><b>Manual Review Candidates</b> / <b>Not automatically confirmed vulnerability</b></p>
       <p><b>Type:</b> ${esc(f.vulnerability_type)} / <b>Risk:</b> ${esc(f.severity)} / <b>Confidence:</b> ${esc(f.confidence)}</p>
       <p><b>Source location:</b> ${esc(formatLocation(f))}</p>
       <p><b>function_name:</b> ${esc(f.function_name || 'N/A')}</p>
@@ -120,9 +136,20 @@ function renderFindings(body) {
       <p><b>Impact:</b> ${esc(f.impact)}</p>
       <p><b>Remediation:</b> ${esc(f.remediation)}</p>
     </div>`;
-  }).join('') || '<div class="card">No readable findings</div>';
+  }).join('');
+  return `<section>
+    <h2>Manual Review Candidates</h2>
+    ${cards || '<div class="card">No manual review candidates</div>'}
+  </section>`;
+}
+
+function renderFindings(body) {
+  const playbooks = body.readable_analysis?.verification_playbooks ?? [];
+  const reviewCandidates = body.readable_analysis?.review_candidates ?? [];
   const playbooksHtml = renderVerificationPlaybooks(playbooks);
-  findingsBox.innerHTML = `${findingsHtml}${playbooksHtml}`;
+  const reviewCandidatesHtml = renderManualReviewCandidates(reviewCandidates);
+  const commonHelperHtml = renderCommonConsoleHelper(body.readable_analysis);
+  findingsBox.innerHTML = `${commonHelperHtml}${playbooksHtml}${reviewCandidatesHtml}`;
 }
 
 form.addEventListener('submit', async (e) => {

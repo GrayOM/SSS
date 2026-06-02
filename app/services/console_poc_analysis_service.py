@@ -29,6 +29,40 @@ AUTH_SNIPPET_KEYS = ['requireAuth', 'checkSession', 'userInfo.userType', 'userTy
 DOM_SNIPPET_KEYS = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'location', 'document.URL', 'postMessage', 'input.value']
 VALIDATION_SNIPPET_KEYS = ['axios.post', 'axios.put', 'fetch', 'FormData', 'amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints']
 VALIDATION_PARAMETERS = ['amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints', 'paymentMethod', 'merchant_uid', 'imp_uid']
+PROMOTION_SCORE_THRESHOLD = 5
+MAX_PLAYBOOK_COUNT = 7
+GENERIC_HINT_ACTION_KIND = 'generic_action_hint'
+GENERIC_HINT_PAGE_KIND = 'generic_page_hint'
+UNRESOLVED_POC_PLACEHOLDERS = (
+    '{API_BASE_URL}',
+    '{userId}',
+    '{sessionData.userId}',
+    '{auctionItem.orderId}',
+    'test_user_id',
+    'test_order_id',
+    'UNKNOWN',
+)
+
+
+def _normalize_runtime_hint(value: str | None) -> str:
+    return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
+
+
+def _default_runtime_hint(kind: str) -> str:
+    page_hint, action_hint, _ = _infer_page_action_hints('__sss_unknown__', '', None)
+    if kind == GENERIC_HINT_ACTION_KIND:
+        return action_hint
+    return page_hint
+
+
+def _is_generic_action_hint(action_hint: str | None) -> bool:
+    normalized = _normalize_runtime_hint(action_hint)
+    return not normalized or normalized == _normalize_runtime_hint(_default_runtime_hint(GENERIC_HINT_ACTION_KIND))
+
+
+def _is_generic_page_hint(page_hint: str | None) -> bool:
+    normalized = _normalize_runtime_hint(page_hint)
+    return not normalized or normalized == _normalize_runtime_hint(_default_runtime_hint(GENERIC_HINT_PAGE_KIND))
 
 
 def _auth_bypass_severity(content: str) -> str:
@@ -36,6 +70,11 @@ def _auth_bypass_severity(content: str) -> str:
     if 'navigate' in content_lower and 'requireauth' not in content_lower and 'axios.' not in content_lower and 'fetch(' not in content_lower:
         return 'low'
     return 'high'
+
+
+def _add_unique(target: list[str], value: str) -> None:
+    if value not in target:
+        target.append(value)
 
 
 def select_console_relevant_files(files: list[FileContent]) -> list[FileContent]:
@@ -276,10 +315,14 @@ def _is_allowed_guarded_poc_code(code: str) -> bool:
 
     has_legacy_guard = 'confirm_authorized_test = false' in low and 'if (!confirm_authorized_test)' in low
     has_sss_poc_guard = all(x in low for x in ('sss_poc_state', 'mutationarmed', 'armmutation', 'disarm'))
+    has_sss_review_poc_guard = all(x in low for x in ('sss_review_poc_state', 'mutationarmed', 'armmutation', 'disarm'))
     has_high_risk_observer_guard = all(x in low for x in ('blocked_replay', 'replay blocked: high-risk endpoint', 'captured'))
     is_sss_hook = 'window.sss_poc' in low and ('window.fetch = async function' in low or 'xmlhttprequest.prototype.send' in low or 'axios.interceptors.request.use' in low)
+    is_sss_review_hook = 'window.sss_review_poc' in low and ('window.fetch = async function' in low or 'xmlhttprequest.prototype.send' in low or 'axios.interceptors.request.use' in low)
 
     if is_sss_hook and (has_sss_poc_guard or has_high_risk_observer_guard):
+        return True
+    if is_sss_review_hook and (has_sss_review_poc_guard or has_high_risk_observer_guard):
         return True
 
     if re.search(r'axios\.delete\s*\(', low):
@@ -344,15 +387,315 @@ console.log('window.SSS_DISABLED.list()로 후보를 확인하고, 승인된 테
 """
 
 
-def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기능 화면', action_hint: str = '대상 기능 버튼 클릭') -> str:
+def _build_common_console_helper() -> str:
+    return """(() => {
+  if (window.SSS_POC && window.SSS_POC.__installed) {
+    console.log('[SSS PoC] common helper already installed.');
+    console.log('[SSS PoC] undefined after install is normal JavaScript console output.');
+    return;
+  }
+
+  const captured = [];
+  const state = {
+    mutationArmed: false,
+    originalFetch: window.fetch,
+    originalXHROpen: XMLHttpRequest.prototype.open,
+    originalXHRSend: XMLHttpRequest.prototype.send,
+    originalJQueryAjax: window.jQuery && window.jQuery.ajax
+  };
+
+  const preview = (value) => {
+    if (value === undefined || value === null) return null;
+    try {
+      return typeof value === 'string' ? value.slice(0, 500) : JSON.stringify(value).slice(0, 500);
+    } catch (err) {
+      return String(value).slice(0, 500);
+    }
+  };
+
+  const parseBody = (body) => {
+    if (!body || typeof body !== 'string') return null;
+    try { return JSON.parse(body); } catch (err) { return null; }
+  };
+
+  const pushCapture = (item) => {
+    const entry = Object.assign({ index: captured.length, timestamp: new Date().toISOString() }, item);
+    captured.push(entry);
+    console.group('[SSS PoC] request captured');
+    console.log('index:', entry.index);
+    console.log('transport:', entry.transport);
+    console.log('method:', entry.method);
+    console.log('url:', entry.url);
+    console.log('body:', entry.bodyPreview || null);
+    console.groupEnd();
+    return entry;
+  };
+
+  window.SSS_POC = {
+    __installed: true,
+    captured,
+    armMutation() {
+      state.mutationArmed = true;
+      console.warn('[SSS PoC] mutation/replay armed. Use only in an approved test environment.');
+      console.warn('[SSS PoC] armMutation does not change live traffic by itself; it allows replay(index, overrides) for mutating requests.');
+    },
+    disarm() {
+      state.mutationArmed = false;
+      console.log('[SSS PoC] disarmed.');
+    },
+    list() {
+      console.table(captured.map((x) => ({ index: x.index, transport: x.transport, method: x.method, url: x.url, status: x.responseStatus || '' })));
+      return captured;
+    },
+    find(criteria = {}) {
+      const urlIncludes = criteria.urlIncludes ? String(criteria.urlIncludes) : '';
+      const method = criteria.method ? String(criteria.method).toUpperCase() : '';
+      const transport = criteria.transport ? String(criteria.transport).toLowerCase() : '';
+      return captured.find((item) => {
+        const itemUrl = String(item.url || '');
+        const itemMethod = String(item.method || '').toUpperCase();
+        const itemTransport = String(item.transport || '').toLowerCase();
+        if (urlIncludes && !itemUrl.includes(urlIncludes)) return false;
+        if (method && itemMethod !== method) return false;
+        if (transport && itemTransport !== transport) return false;
+        return true;
+      }) || null;
+    },
+    get(index) {
+      return captured[index] || null;
+    },
+    async replay(index, overrides = {}) {
+      const item = captured[index];
+      if (!item) {
+        console.warn('[SSS PoC] invalid capture index');
+        return null;
+      }
+      const method = String(overrides.method || item.method || 'GET').toUpperCase();
+      if (method !== 'GET' && !state.mutationArmed) {
+        console.warn('[SSS PoC] replay blocked. Run window.SSS_POC.armMutation() first for non-GET requests.');
+        return null;
+      }
+      if (item.transport === 'xhr') {
+        console.warn('[SSS PoC] xhr replay is not automatic. Reproduce the UI action manually or rebuild the request in an approved API client.');
+        console.log('[SSS PoC] xhr captured request:', item);
+        return null;
+      }
+      const headers = Object.assign({}, item.headers || {}, overrides.headers || {});
+      if (item.transport === 'axios') {
+        if (!window.axios || typeof window.axios !== 'function') {
+          console.warn('[SSS PoC] axios replay unavailable: window.axios is not callable.');
+          return null;
+        }
+        const config = Object.assign({}, item.config || {}, overrides || {});
+        config.method = method;
+        config.url = overrides.url || item.url || config.url;
+        config.headers = headers;
+        if (overrides.body !== undefined) {
+          config.data = overrides.body;
+        }
+        console.warn('[SSS PoC] replaying captured axios request:', method, config.url);
+        const resp = await window.axios(config);
+        console.log('[SSS PoC] axios replay response:', resp);
+        return resp;
+      }
+      if (item.transport === 'jquery.ajax') {
+        if (!window.jQuery || !window.jQuery.ajax) {
+          console.warn('[SSS PoC] jQuery replay unavailable: window.jQuery.ajax is missing.');
+          return null;
+        }
+        const config = Object.assign({}, item.config || {}, overrides || {});
+        config.type = method;
+        config.method = method;
+        config.url = overrides.url || item.url || config.url;
+        config.headers = headers;
+        if (overrides.body !== undefined) {
+          config.data = overrides.body;
+        }
+        console.warn('[SSS PoC] replaying captured jQuery.ajax request:', method, config.url);
+        return window.jQuery.ajax(config);
+      }
+      const url = overrides.url || item.url;
+      const init = Object.assign({}, item.init || {}, overrides);
+      init.method = method;
+      if (overrides.body !== undefined) {
+        init.body = typeof overrides.body === 'string' ? overrides.body : JSON.stringify(overrides.body);
+      } else if (item.body !== undefined && item.body !== null) {
+        init.body = item.body;
+      }
+      init.headers = headers;
+      console.warn('[SSS PoC] replaying captured fetch request:', method, url);
+      const resp = await state.originalFetch.call(window, url, init);
+      console.log('[SSS PoC] fetch replay response status:', resp.status);
+      console.log('[SSS PoC] fetch replay response preview:', (await resp.clone().text().catch(() => '')).slice(0, 500));
+      return resp;
+    }
+  };
+
+  if (state.originalFetch) {
+    window.fetch = async function(input, init = {}) {
+      const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+      const method = String(init && init.method || 'GET').toUpperCase();
+      const entry = pushCapture({
+        transport: 'fetch',
+        method,
+        url,
+        init: Object.assign({}, init),
+        headers: init && init.headers || {},
+        body: init && init.body || null,
+        bodyPreview: preview(init && init.body),
+        parsedPayload: parseBody(init && init.body)
+      });
+      const resp = await state.originalFetch.call(this, input, init);
+      entry.responseStatus = resp.status;
+      entry.responseContentType = resp.headers && resp.headers.get ? resp.headers.get('content-type') : '';
+      entry.responsePreview = (await resp.clone().text().catch(() => '')).slice(0, 500);
+      return resp;
+    };
+  }
+
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this.__sss_poc_method = String(method || 'GET').toUpperCase();
+    this.__sss_poc_url = String(url || '');
+    return state.originalXHROpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function(body) {
+    pushCapture({
+      transport: 'xhr',
+      method: this.__sss_poc_method || 'GET',
+      url: this.__sss_poc_url || '',
+      body: body || null,
+      bodyPreview: preview(body),
+      parsedPayload: parseBody(body)
+    });
+    return state.originalXHRSend.call(this, body);
+  };
+
+  if (window.axios && window.axios.interceptors && window.axios.interceptors.request) {
+    window.axios.interceptors.request.use((config) => {
+      pushCapture({
+        transport: 'axios',
+        method: String(config && config.method || 'GET').toUpperCase(),
+        url: String(config && config.url || ''),
+        config,
+        headers: config && config.headers || {},
+        body: config && config.data || null,
+        bodyPreview: preview(config && config.data),
+        parsedPayload: typeof (config && config.data) === 'object' ? config.data : parseBody(config && config.data)
+      });
+      return config;
+    });
+  }
+
+  if (window.jQuery && window.jQuery.ajax) {
+    window.jQuery.ajax = function(urlOrOptions, maybeOptions) {
+      const options = typeof urlOrOptions === 'string' ? Object.assign({}, maybeOptions || {}, { url: urlOrOptions }) : Object.assign({}, urlOrOptions || {});
+      pushCapture({
+        transport: 'jquery.ajax',
+        method: String(options.type || options.method || 'GET').toUpperCase(),
+        url: String(options.url || ''),
+        config: options,
+        headers: options.headers || {},
+        body: options.data || null,
+        bodyPreview: preview(options.data),
+        parsedPayload: typeof options.data === 'object' ? options.data : parseBody(options.data)
+      });
+      return state.originalJQueryAjax.apply(this, arguments);
+    };
+  }
+
+  console.group('[SSS PoC] common helper installed');
+  console.log('1. If the console prints undefined after install, that is normal JavaScript completion output.');
+  console.log('2. Confirm window.SSS_POC exists:', !!window.SSS_POC);
+  console.log('3. Go to the target page and perform the playbook user action.');
+  console.log('4. Run window.SSS_POC.list() to inspect captured requests.');
+  console.log('5. Use window.SSS_POC.find({ urlIncludes, method, transport }) to get the first matching request.');
+  console.log('6. Use window.SSS_POC.get(index) to inspect one request.');
+  console.log('7. Use window.SSS_POC.armMutation() only before replaying non-GET requests with approved test data.');
+  console.log('8. Use window.SSS_POC.disarm() after verification.');
+  console.groupEnd();
+})();"""
+
+
+def _build_short_console_verification_code(
+    endpoint: str,
+    method: str,
+    page_hint: str,
+    action_hint: str,
+    parameters: list[str] | None = None,
+) -> str:
+    endpoint_js = json.dumps(endpoint or '')
+    method_js = json.dumps((method or '').upper())
+    lines = [
+        '(async () => {',
+        '  if (!window.SSS_POC || !window.SSS_POC.find) {',
+        '    console.warn("[SSS PoC] Install common_console_helper first.");',
+        '    return;',
+        '  }',
+        '  // Install common_console_helper once before running this finding-specific check.',
+        f'  // Page: {page_hint}',
+        f'  // Action: {action_hint}',
+        f'  // Target: {method or "UNKNOWN"} {endpoint or "UNKNOWN"}',
+        '  window.SSS_POC.list();',
+        f'  const match = window.SSS_POC.find({{ urlIncludes: {endpoint_js}, method: {method_js} }});',
+        '  if (!match) {',
+        '    console.warn("[SSS PoC] target request not captured yet. Perform the documented UI action, then run again.");',
+        '    return;',
+        '  }',
+        '  console.log(match);',
+    ]
+    override_examples: list[str] = []
+    for p in (parameters or []):
+        if not p or not re.fullmatch(r'[A-Za-z_$][A-Za-z0-9_$]*', p):
+            continue
+        low = p.lower()
+        if low in {'amount', 'price', 'totalamount', 'usepoints', 'point', 'points', 'balance'}:
+            override_examples.append(f'{p}: 1')
+        elif low == 'status':
+            override_examples.append(f'{p}: "TEST_STATUS"')
+        elif low in {'code', 'verificationcode'}:
+            override_examples.append(f'{p}: "000000"')
+    if override_examples:
+        example = ', '.join(override_examples[:4])
+        replay_command = f'window.SSS_POC.replay(match.index, {{ body: {{ {example} }} }});'
+    else:
+        replay_command = 'window.SSS_POC.replay(match.index);'
+    replay_command_js = json.dumps(replay_command)
+    if (method or '').upper() != 'GET':
+        lines.extend([
+            '  console.warn("[SSS PoC] Do not replay or mutate until approval is granted.");',
+            '  console.log("[SSS PoC] After approval, run: window.SSS_POC.armMutation();");',
+            f'  console.log("[SSS PoC] Then copy/run:", {replay_command_js});',
+            '  console.log("[SSS PoC] Finish with: window.SSS_POC.disarm();");',
+        ])
+    else:
+        lines.extend([
+            '  console.log("[SSS PoC] Read-only replay guidance. Copy/run only after confirming it is safe:");',
+            f'  console.log("[SSS PoC]", {replay_command_js});',
+        ])
+    lines.append('})();')
+    return '\n'.join(lines)
+
+
+def _english_review_hint(value: str | None, fallback: str) -> str:
+    text = str(value or '').strip()
+    if not text or not text.isascii():
+        return fallback
+    return text
+
+
+def _review_page_step(page_hint: str | None) -> str:
+    return f"Open page: {_english_review_hint(page_hint, 'target page')}"
+
+
+def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = 'target page', action_hint: str = 'target action') -> str:
     endpoint_js = json.dumps(endpoint)
-    page_js = json.dumps(page_hint)
-    action_js = json.dumps(action_hint)
+    page_js = json.dumps(_english_review_hint(page_hint, 'target page'))
+    action_js = json.dumps(_english_review_hint(action_hint, 'target action'))
     return f"""(() => {{
   const TARGET_ENDPOINT = {endpoint_js};
   const PAGE_HINT = {page_js};
   const ACTION_HINT = {action_js};
-  const SSS_POC_STATE = {{ mutationArmed: false, replayArmed: false }};
+  const SSS_REVIEW_POC_STATE = {{ mutationArmed: false, replayArmed: false }};
   const BLOCKED_REPLAY = /(delete|refund|withdraw|transfer|bulk)/i.test(TARGET_ENDPOINT);
   const captured = [];
 
@@ -369,29 +712,29 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
     console.log('response content-type:', ct || '(none)');
     console.log('response body preview:', String(body).slice(0, 300));
     if (isHtmlFallback(ct, body)) {{
-      console.warn('[SSS PoC] API JSON이 아니라 HTML이 반환되었습니다. 프론트엔드 라우팅 fallback 가능성이 있습니다.');
-      console.warn('직접 endpoint 호출 대신 실제 UI 버튼 클릭 후 캡처된 요청을 확인하세요.');
+      console.warn('[SSS Review PoC] The response looks like HTML instead of API JSON. This may be a frontend routing fallback.');
+      console.warn('[SSS Review PoC] Capture the real UI request instead of relying on a direct endpoint call.');
     }}
   }};
 
-  window.SSS_POC = {{
+  window.SSS_REVIEW_POC = {{
     captured,
     armMutation() {{
-      SSS_POC_STATE.mutationArmed = true;
-      console.warn('[SSS PoC] mutation mode armed. 승인된 테스트 환경에서만 진행하세요.');
+      SSS_REVIEW_POC_STATE.mutationArmed = true;
+      console.warn('[SSS Review PoC] mutation mode armed. Use only in an approved test environment.');
     }},
     armReplay() {{
       if (BLOCKED_REPLAY) {{
         console.warn('[SSS PoC] replay blocked: high-risk endpoint');
         return;
       }}
-      SSS_POC_STATE.replayArmed = true;
-      console.warn('[SSS PoC] replay mode armed. 승인된 테스트 환경에서만 진행하세요.');
+      SSS_REVIEW_POC_STATE.replayArmed = true;
+      console.warn('[SSS Review PoC] replay mode armed. Use only in an approved test environment.');
     }},
     disarm() {{
-      SSS_POC_STATE.mutationArmed = false;
-      SSS_POC_STATE.replayArmed = false;
-      console.log('[SSS PoC] disarmed.');
+      SSS_REVIEW_POC_STATE.mutationArmed = false;
+      SSS_REVIEW_POC_STATE.replayArmed = false;
+      console.log('[SSS Review PoC] disarmed.');
     }},
     list() {{
       console.table(captured.map((x, i) => ({{ index: i, method: x.method, url: x.url }})));
@@ -401,8 +744,8 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
         console.warn('[SSS PoC] replay blocked: high-risk endpoint');
         return null;
       }}
-      if (!SSS_POC_STATE.replayArmed) {{
-        console.warn('[SSS PoC] replayArmed=false. window.SSS_POC.armReplay() 후 실행하세요.');
+      if (!SSS_REVIEW_POC_STATE.replayArmed) {{
+        console.warn('[SSS Review PoC] replayArmed=false. Run window.SSS_REVIEW_POC.armReplay() first.');
         return null;
       }}
       const item = captured[index];
@@ -415,11 +758,11 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
           const cfg = Object.assign({{}}, item.config || {{}}, overrides || {{}});
           return axios(cfg);
         }}
-        console.warn('[SSS PoC] axios replay unavailable: axios 인스턴스를 찾지 못했습니다.');
+        console.warn('[SSS Review PoC] axios replay unavailable: window.axios is not callable.');
         return null;
       }}
       if (item.transport === 'xhr') {{
-        console.warn('[SSS PoC] xhr replay는 수동 검증을 사용하세요.');
+        console.warn('[SSS Review PoC] xhr replay is not automatic. Use manual verification.');
         return null;
       }}
       const init = Object.assign({{}}, item.init || {{}}, overrides || {{}});
@@ -429,8 +772,23 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
     }},
   }};
 
-  if (/test_order_id|test_user_id|test_value/i.test(TARGET_ENDPOINT)) {{
-    console.warn('이 endpoint에는 placeholder가 포함되어 있어 직접 호출 대신 실제 UI 요청 캡처를 사용합니다.');
+  const printNextStepChecklist = () => {{
+    console.group('[SSS Review PoC] Next-step checklist');
+    console.log('1. If the final Console evaluation result is "undefined", that is normal when these install logs appeared.');
+    console.log('2. Confirm window.SSS_REVIEW_POC exists:', Boolean(window.SSS_REVIEW_POC));
+    console.log('3. Move to the exact page_hint:', PAGE_HINT);
+    console.log('4. Perform the required_user_action if known:', ACTION_HINT);
+    console.log('5. Run window.SSS_REVIEW_POC.list() after the action to inspect captured requests.');
+    console.log('6. If no request is captured, likely causes: wrong page, wrong button/action, placeholder endpoint, endpoint generated from API_BASE_URL and not resolved, request uses a different transport/path.');
+    console.log('7. Use window.SSS_REVIEW_POC.armMutation() only after the baseline request is captured and you have approval to test mutation. Do not arm mutation for first observation, placeholder endpoints, wrong page/action, or high-risk endpoints.');
+    console.groupEnd();
+  }};
+
+  if (/\\{{[^}}]+\\}}|placeholder/i.test(TARGET_ENDPOINT)) {{
+    console.warn('[SSS Review PoC] The endpoint contains a placeholder. Capture the real UI request before relying on this PoC.');
+  }}
+  if (/[{{}}]|API_BASE_URL|UNKNOWN/i.test(TARGET_ENDPOINT)) {{
+    console.warn('[SSS Review PoC] Target endpoint contains an unresolved placeholder. Resolve endpoint/page/action before relying on this PoC.');
   }}
   const originalFetch = window.fetch;
   window.fetch = async function(input, init = {{}}) {{
@@ -441,13 +799,13 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
       if (init?.body) {{
         try {{ parsed = JSON.parse(init.body); }} catch (e) {{}}
       }}
-      if (SSS_POC_STATE.mutationArmed && parsed && !BLOCKED_REPLAY) {{
+      if (SSS_REVIEW_POC_STATE.mutationArmed && parsed && !BLOCKED_REPLAY) {{
         if ('amount' in parsed) parsed.amount = 1;
         if ('status' in parsed) parsed.status = 'TEST_STATUS';
         init.body = JSON.stringify(parsed);
       }}
       captured.push({{ transport: 'fetch', method, url, init, body: init?.body || null, parsedPayload: parsed }});
-      console.group('[SSS PoC] request captured');
+      console.group('[SSS Review PoC] request captured');
       console.log('url:', url);
       console.log('method:', method);
       console.log('request body:', init?.body || null);
@@ -478,7 +836,7 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
         body: body || null,
         parsedPayload: parsed
       }});
-      if (SSS_POC_STATE.mutationArmed && !BLOCKED_REPLAY && parsed) {{
+      if (SSS_REVIEW_POC_STATE.mutationArmed && !BLOCKED_REPLAY && parsed) {{
         if ('amount' in parsed) parsed.amount = 1;
         if ('status' in parsed) parsed.status = 'TEST_STATUS';
         body = JSON.stringify(parsed);
@@ -489,7 +847,7 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
   if (window.axios && axios.interceptors && axios.interceptors.request) {{
     axios.interceptors.request.use((config) => {{
       if (String(config?.url || '').includes(TARGET_ENDPOINT)) {{
-        if (SSS_POC_STATE.mutationArmed && config?.data && typeof config.data === 'object' && !BLOCKED_REPLAY) {{
+        if (SSS_REVIEW_POC_STATE.mutationArmed && config?.data && typeof config.data === 'object' && !BLOCKED_REPLAY) {{
           if ('amount' in config.data) config.data.amount = 1;
           if ('status' in config.data) config.data.status = 'TEST_STATUS';
         }}
@@ -498,27 +856,30 @@ def _build_network_hook_mutation_poc(endpoint: str, page_hint: str = '해당 기
       return config;
     }});
   }}
-  console.group('[SSS PoC] 설치 완료');
+  console.group('[SSS Review PoC] installed');
   console.log('mode:', 'observe');
   console.log('target:', TARGET_ENDPOINT);
-  console.log('다음 단계: 검증 안내 섹션의 사용자 동작을 수행하세요.');
-  console.log('요청이 감지되면 URL/method/payload/status가 출력됩니다.');
-  console.log('변조 검증은 window.SSS_POC.armMutation() 실행 후 다시 버튼을 클릭하세요.');
-  console.log('재전송 검증은 window.SSS_POC.armReplay() 후 window.SSS_POC.replay(index, overrides)로 수행하세요.');
+  console.log('undefined output is normal if this install log appeared.');
+  console.log('confirm window.SSS_REVIEW_POC exists:', Boolean(window.SSS_REVIEW_POC));
+  console.log('Next step: perform the documented user action.');
+  console.log('When a request is captured, URL/method/payload/status will be logged.');
+  console.log('For mutation verification, run window.SSS_REVIEW_POC.armMutation() after approval, then repeat the user action.');
+  console.log('For replay verification, run window.SSS_REVIEW_POC.armReplay(), then window.SSS_REVIEW_POC.replay(index, overrides).');
   console.groupEnd();
-  console.group('[SSS PoC] 검증 안내');
-  console.log('검증 화면:', PAGE_HINT);
-  console.log('사용자 동작:', ACTION_HINT);
-  console.log('대상 API:', TARGET_ENDPOINT);
-  console.log('현재 모드: observe');
-  console.log('1) 이 화면으로 이동하세요:', PAGE_HINT);
-  console.log('2) Console에 PoC 설치 완료 로그가 보이는지 확인하세요.');
-  console.log('3) 사용자 동작을 수행하세요:', ACTION_HINT);
-  console.log('4) window.SSS_POC.list()로 캡처된 요청을 확인하세요.');
-  console.log('5) 변조 검증은 window.SSS_POC.armMutation() 실행 후 같은 동작을 다시 수행하세요.');
-  console.log('6) 완료 후 window.SSS_POC.disarm()을 실행하세요.');
-  if (ACTION_HINT === '대상 기능 버튼 클릭') {{
-    console.warn('정확한 버튼/화면을 자동 추론하지 못했습니다. source_path와 function_name을 기준으로 수동 확인하세요.');
+  printNextStepChecklist();
+  console.group('[SSS Review PoC] verification guidance');
+  console.log('Page:', PAGE_HINT);
+  console.log('User action:', ACTION_HINT);
+  console.log('Target API:', TARGET_ENDPOINT);
+  console.log('Current mode: observe');
+  console.log('1) Open this page:', PAGE_HINT);
+  console.log('2) Confirm the install log is visible in Console.');
+  console.log('3) Perform this user action:', ACTION_HINT);
+  console.log('4) Run window.SSS_REVIEW_POC.list() to inspect captured requests.');
+  console.log('5) For mutation verification, run window.SSS_REVIEW_POC.armMutation() after approval, then repeat the same action.');
+  console.log('6) Finish with window.SSS_REVIEW_POC.disarm().');
+  if (ACTION_HINT === 'target action') {{
+    console.warn('The exact button/page was not inferred. Confirm manually using source_path and function_name.');
   }}
   console.groupEnd();
 }})();"""
@@ -556,52 +917,52 @@ def _infer_page_action_hints(path: str, snippet: str, function_name: str | None 
     p = path.lower()
     s = snippet.lower()
     page_map = [
-        ('paymentpage', '결제 화면'), ('purchasepage', '구매 화면'),
-        ('auctionpage', '경매/입찰 화면'),
-        ('findpassword', '비밀번호 찾기/계정 복구 화면'), ('loginpage', '로그인 화면'),
-        ('signuppage', '회원가입 화면'), ('itemdetailpage', '상품 상세/입찰 화면'),
-        ('nafalmypage', '마이페이지/관리 화면'), ('usermypage', '마이페이지/관리 화면'), ('adminmypage', '마이페이지/관리 화면'),
+        ('paymentpage', 'payment page'), ('purchasepage', 'purchase page'),
+        ('auctionpage', 'auction/bid page'),
+        ('findpassword', 'password recovery page'), ('loginpage', 'login page'),
+        ('signuppage', 'signup page'), ('itemdetailpage', 'item detail/bid page'),
+        ('nafalmypage', 'mypage/management page'), ('usermypage', 'mypage/management page'), ('adminmypage', 'mypage/management page'),
     ]
-    page_hint = next((v for k, v in page_map if k in p), '해당 기능 화면')
+    page_hint = next((v for k, v in page_map if k in p), 'target feature page')
     fn = function_name
     if not fn:
         m = re.search(r'(handle[A-Za-z0-9_]+|loadDashboardData|fetchDashboard)', snippet)
         if m:
             fn = m.group(1)
-    action = '대상 기능 버튼 클릭'
+    action = 'target action'
     f = (fn or '').lower()
     if 'handlepay' in f or 'handlepayment' in f or 'handleretrypayment' in f:
-        action = '결제/결제완료 버튼 클릭'
+        action = 'click payment/complete button'
     elif 'handlestripecheckout' in f:
-        action = 'Stripe 결제 버튼 클릭'
+        action = 'click Stripe payment button'
     elif 'requestiamportpay' in f:
-        action = '아임포트 결제 요청 버튼 클릭'
+        action = 'click Iamport payment button'
     elif 'handleiamportquick' in f:
-        action = '간편결제/포인트 충전 버튼 클릭'
+        action = 'click quick payment/charge button'
     elif 'handlepointcharge' in f:
-        action = '포인트 충전 버튼 클릭'
+        action = 'click point charge button'
     elif 'handlecharge' in f:
-        action = '포인트 충전 버튼 클릭'
+        action = 'click point charge button'
     elif 'sendverificationcode' in f:
-        action = '인증번호 발송 버튼 클릭'
+        action = 'click send code button'
     elif 'verifycode' in f:
-        action = '인증번호 확인 버튼 클릭'
+        action = 'click verify code button'
     elif 'resetpassword' in f:
-        action = '비밀번호 재설정 버튼 클릭'
+        action = 'click reset password button'
     elif 'handleverify' in f:
-        action = '인증번호 확인 버튼 클릭'
+        action = 'click verify code button'
     elif 'handleresetpassword' in f:
-        action = '비밀번호 재설정 버튼 클릭'
+        action = 'click reset password button'
     elif 'handlesubmit' in f:
-        action = '현재 폼 제출 버튼 클릭'
+        action = 'click submit form button'
     elif 'handlebid' in f:
-        action = '입찰 버튼 클릭'
+        action = 'click bid button'
     elif 'handlepurchase' in f:
-        action = '구매 버튼 클릭'
+        action = 'click purchase button'
     return page_hint, action, fn
 
 def _format_page_step(page_hint: str) -> str:
-    return f'{page_hint}으로 이동' if page_hint.endswith('화면') else f'{page_hint} 화면으로 이동'
+    return f'Navigate to {page_hint}'
 
 
 def infer_interaction_context(source_path: str, function_name: str | None, snippet: str, endpoint: str, method: str, parameters: list[str], surrounding_block: str = '', ui_candidates: list[dict] | None = None) -> tuple[str, str, str, list[str]]:
@@ -609,56 +970,56 @@ def infer_interaction_context(source_path: str, function_name: str | None, snipp
     low_text = ' '.join(filter(None, [snippet, surrounding_block] + [c.get('element_text', '') for c in (ui_candidates or [])])).lower()
     low_fn = (function_name or '').lower()
     reasons: list[str] = []
-    page_hint = '해당 기능 화면'
-    action_hint = '대상 기능 버튼 클릭'
+    page_hint = 'target feature page'
+    action_hint = 'target action'
     confidence = 'low'
     if any(k in low_endpoint for k in ('payment', 'order', 'checkout', 'pay', 'billing')):
-        page_hint, reasons = '결제/주문 화면', reasons + ['endpoint category: payment/order']
+        page_hint, reasons = 'payment/order page', reasons + ['endpoint category: payment/order']
     elif any(k in low_endpoint for k in ('auction', 'bid')):
-        page_hint, reasons = '경매/입찰 화면', reasons + ['endpoint category: auction/bid']
+        page_hint, reasons = 'auction/bid page', reasons + ['endpoint category: auction/bid']
     elif any(k in low_endpoint for k in ('password', 'reset', 'verify-code', 'send-verification', 'verify', 'chkmobi', 'chgmobi', 'mobile', 'sms', 'cert', 'authno')):
-        page_hint, reasons = '계정 복구/인증 화면', reasons + ['endpoint category: recovery/verify']
+        page_hint, reasons = 'account recovery page', reasons + ['endpoint category: recovery/verify']
     elif any(k in low_endpoint for k in ('wallet', 'point', 'charge')):
-        page_hint, reasons = '지갑/포인트 화면', reasons + ['endpoint category: wallet/point']
+        page_hint, reasons = 'wallet/point page', reasons + ['endpoint category: wallet/point']
     elif any(k in low_endpoint for k in ('iamport',)):
-        page_hint, reasons = '결제/주문 화면', reasons + ['endpoint category: iamport payment']
+        page_hint, reasons = 'payment/order page', reasons + ['endpoint category: iamport payment']
     elif any(k in low_endpoint for k in ('login', 'auth/token')):
-        page_hint, reasons = '로그인/인증 화면', reasons + ['endpoint category: login/auth']
+        page_hint, reasons = 'login/auth page', reasons + ['endpoint category: login/auth']
     if any(k in low_text for k in ('pay now', 'checkout', '결제하기', '결제 완료')):
-        action_hint = '결제 버튼 클릭'; reasons.append('ui text indicates payment')
+        action_hint = 'click payment button'; reasons.append('ui text indicates payment')
     elif any(k in low_text for k in ('입찰', 'bid')):
-        action_hint = '입찰 버튼 클릭'; reasons.append('ui text indicates bid')
+        action_hint = 'click bid button'; reasons.append('ui text indicates bid')
     elif any(k in low_text for k in ('인증번호 발송', 'send code')):
-        action_hint = '인증번호 발송 버튼 클릭'; reasons.append('ui text indicates send code')
+        action_hint = 'click send code button'; reasons.append('ui text indicates send code')
     elif any(k in low_text for k in ('인증 확인', 'verify')):
-        action_hint = '인증번호 확인 버튼 클릭'; reasons.append('ui text indicates verify')
+        action_hint = 'click verify code button'; reasons.append('ui text indicates verify')
     elif any(k in low_text for k in ('reset password', '비밀번호 재설정')):
-        action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('ui text indicates reset')
+        action_hint = 'click reset password button'; reasons.append('ui text indicates reset')
     elif any(k in low_endpoint for k in ('verify-code', 'authno', 'verify')):
-        action_hint = '인증번호 확인 버튼 클릭'; reasons.append('endpoint indicates verify-code')
+        action_hint = 'click verify code button'; reasons.append('endpoint indicates verify-code')
     elif any(k in low_endpoint for k in ('reset-password',)):
-        action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('endpoint indicates reset-password')
+        action_hint = 'click reset password button'; reasons.append('endpoint indicates reset-password')
     elif any(k in low_endpoint for k in ('send-verification', 'chkmobisendajax', 'chgmobisendajax', 'sendsms', 'sms')):
-        action_hint = '인증번호 발송 버튼 클릭'; reasons.append('endpoint indicates send-verification')
+        action_hint = 'click send code button'; reasons.append('endpoint indicates send-verification')
     elif 'create-checkout-session' in low_endpoint:
-        action_hint = 'Stripe 결제 버튼 클릭'; reasons.append('endpoint indicates stripe checkout session')
+        action_hint = 'click Stripe payment button'; reasons.append('endpoint indicates stripe checkout session')
     elif any(k in low_endpoint for k in ('iamport/prepare', 'iamport/verify')):
-        action_hint = '결제 승인/검증 버튼 클릭'; reasons.append('endpoint indicates iamport verification')
+        action_hint = 'click payment approval button'; reasons.append('endpoint indicates iamport verification')
     elif any(k in low_endpoint for k in ('wallet/charge', '/charge')):
-        action_hint = '포인트 충전 버튼 클릭'; reasons.append('endpoint indicates charge')
+        action_hint = 'click point charge button'; reasons.append('endpoint indicates charge')
     elif any(k in low_fn for k in ('payment', 'checkout', 'pay', 'submitorder', 'process')):
-        action_hint = '결제 버튼 클릭'; reasons.append('function fallback indicates payment')
+        action_hint = 'click payment button'; reasons.append('function fallback indicates payment')
     elif any(k in low_fn for k in ('bid', 'placebid')):
-        action_hint = '입찰 버튼 클릭'; reasons.append('function fallback indicates bid')
+        action_hint = 'click bid button'; reasons.append('function fallback indicates bid')
     elif any(k in low_fn for k in ('verifycode', 'confirmcode', 'validatecode')):
-        action_hint = '인증번호 확인 버튼 클릭'; reasons.append('function fallback indicates verify')
+        action_hint = 'click verify code button'; reasons.append('function fallback indicates verify')
     elif any(k in low_fn for k in ('resetpassword', 'changepassword')):
-        action_hint = '비밀번호 재설정 버튼 클릭'; reasons.append('function fallback indicates reset')
+        action_hint = 'click reset password button'; reasons.append('function fallback indicates reset')
     elif any(k in low_fn for k in ('sendverificationcode', 'requestcode')):
-        action_hint = '인증번호 발송 버튼 클릭'; reasons.append('function fallback indicates send-code')
-    if action_hint != '대상 기능 버튼 클릭' and page_hint != '해당 기능 화면':
+        action_hint = 'click send code button'; reasons.append('function fallback indicates send-code')
+    if action_hint != 'target action' and page_hint != 'target feature page':
         confidence = 'high'
-    elif action_hint != '대상 기능 버튼 클릭' or page_hint != '해당 기능 화면':
+    elif action_hint != 'target action' or page_hint != 'target feature page':
         confidence = 'medium'
     return page_hint, action_hint, confidence, reasons
 
@@ -667,21 +1028,21 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
     if auth:
         return ConsoleVerificationPlaybook(
             strategy='auth_route_guard',
-            breakpoints=[BreakpointHint(source_path=f.path, start_line=1, end_line=max(1, len(f.content.splitlines())), reason='권한 조건문 분기 확인', watch_variables=['userInfo', 'user', 'role', 'userType', 'isAdmin'])],
-            console_steps=['권한 조건문 breakpoint 설정', '로그인 후 보호 페이지 접근', 'Scope에서 userType/role 확인', '클라이언트 분기만 막는지, API 서버 검증도 있는지 확인'],
-            expected_observation='권한 분기가 클라이언트에만 존재하는지 확인',
+            breakpoints=[BreakpointHint(source_path=f.path, start_line=1, end_line=max(1, len(f.content.splitlines())), reason='check auth branch condition', watch_variables=['userInfo', 'user', 'role', 'userType', 'isAdmin'])],
+            console_steps=['set breakpoint on auth branch', 'access protected page after login', 'check userType/role in Scope', 'confirm if client-only or also server validation'],
+            expected_observation='confirm auth branch is client-only',
         )
     if disabled:
         bps = []
         if candidate is not None:
-            bps.append(BreakpointHint(source_path=f.path, start_line=candidate.start_line, end_line=candidate.end_line, reason='API 호출 직전 payload 변조 확인', watch_variables=['payload'] + (candidate.parameters or [])))
+            bps.append(BreakpointHint(source_path=f.path, start_line=candidate.start_line, end_line=candidate.end_line, reason='check payload before API call', watch_variables=['payload'] + (candidate.parameters or [])))
         return ConsoleVerificationPlaybook(
             strategy='disabled_button_bypass',
             breakpoints=bps,
-            console_steps=['disabled 버튼 목록 확인', '대상 버튼 disabled 해제', '클릭 후 핸들러/요청 발생 여부 확인'],
+            console_steps=['list disabled buttons', 'enable target button', 'confirm handler/request fires after click'],
             console_code=_build_disabled_console_code(),
-            expected_observation='disabled 속성 제거만으로 요청이 발생하는지 확인',
-            limitations=['React/Vue state 기반 검증이 있으면 DOM disabled 제거만으로는 부족할 수 있음', 'handler 내부 validation return 지점 breakpoint 확인 필요'],
+            expected_observation='confirm request fires after removing disabled attribute',
+            limitations=['React/Vue state-based validation may require more than removing DOM disabled', 'check breakpoint at validation return inside handler'],
         )
     endpoint = (candidate.endpoint if candidate else '/api') or '/api'
     validation_bps = _find_validation_return_breakpoints(f, candidate)
@@ -689,14 +1050,14 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
     vars_from_endpoint = set(re.findall(r'\{([^}]+)\}', (candidate.endpoint if candidate else '') or ''))
     watch = ['payload'] + ((candidate.parameters or []) if candidate else []) + list(vars_from_validation) + list(vars_from_endpoint)
     breakpoints = list(validation_bps)
-    breakpoints.append(BreakpointHint(source_path=f.path, start_line=(candidate.start_line if candidate else 1), end_line=(candidate.end_line if candidate else 1), reason='API 호출 직전 payload 변조 확인', watch_variables=sorted(set(watch))))
+    breakpoints.append(BreakpointHint(source_path=f.path, start_line=(candidate.start_line if candidate else 1), end_line=(candidate.end_line if candidate else 1), reason='check payload before API call', watch_variables=sorted(set(watch))))
     return ConsoleVerificationPlaybook(
         strategy='breakpoint_payload_mutation',
         breakpoints=breakpoints,
-        console_steps=['DevTools Sources에서 breakpoint 설정', '정상 UI 버튼 클릭', 'Scope에서 payload 값 확인', '테스트 값으로 변경', 'Resume 후 서버 응답 확인'],
-        console_code=(_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or '해당 기능 화면', action_hint=action_hint or '대상 기능 버튼 클릭') if endpoint != 'UNKNOWN' else None),
-        expected_observation='요청 직전 payload 변경이 전송 본문에 반영됨',
-        limitations=(['endpoint가 UNKNOWN이라 자동 hook 코드는 생성하지 않았습니다.'] if endpoint == 'UNKNOWN' else []),
+        console_steps=['set breakpoint in DevTools Sources', 'click the normal UI button', 'check payload value in Scope', 'change to test value', 'check server response after Resume'],
+        console_code=(_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or 'target feature page', action_hint=action_hint or 'target action') if endpoint != 'UNKNOWN' else None),
+        expected_observation='payload mutation before request is reflected in the body',
+        limitations=(['endpoint is UNKNOWN: auto hook code not generated'] if endpoint == 'UNKNOWN' else []),
     )
 
 
@@ -705,35 +1066,35 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
 def _build_observational_network_poc(endpoint: str, method: str, source_path: str, function_name: str | None, page_hint: str, action_hint: str) -> ConsoleSafePoc:
     return ConsoleSafePoc(
         poc_type='browser_console',
-        description='관찰형 PoC: 네트워크 요청 캡처/관찰',
-        preconditions=['승인된 테스트 환경', '브라우저 DevTools Console 접근 가능'],
+        description='Observational PoC: capture and inspect network requests.',
+        preconditions=['Approved test environment', 'Browser DevTools Console access'],
         steps=[
-            'Console에 관찰형 Hook 코드를 붙여넣고 실행',
-            _format_page_step(page_hint or '해당 기능 화면'),
-            f'{action_hint or "대상 기능 버튼 클릭"} 수행',
-            'window.SSS_POC.list()로 캡처된 요청을 확인',
+            'Paste and run the observational hook code in Console',
+            _review_page_step(page_hint),
+            f"Perform action: {_english_review_hint(action_hint, 'target action')}",
+            'Run window.SSS_REVIEW_POC.list() to inspect captured requests',
         ],
-        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or '해당 기능 화면', action_hint=action_hint or '대상 기능 버튼 클릭'),
-        expected_result=f'요청 URL/method/payload/status가 캡처됨 (target: {method} {endpoint})',
-        safety='관찰형 PoC이며 기본 상태에서는 요청 변조/재전송을 수행하지 않음. armMutation()을 명시적으로 호출하기 전 mutation 비활성.',
+        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or 'target page', action_hint=action_hint or 'target action'),
+        expected_result=f'Request URL/method/payload/status is captured (target: {method} {endpoint})',
+        safety='Observational PoC. It does not mutate or replay requests by default. Mutation remains disabled until armMutation() is explicitly called after approval.',
     )
 
 
 def _build_safe_network_poc(endpoint: str, page_hint: str, action_hint: str) -> ConsoleSafePoc:
     return ConsoleSafePoc(
         poc_type='browser_console',
-        description='관찰 우선 네트워크 PoC',
-        preconditions=['승인된 테스트 환경', '브라우저 DevTools Console 접근 가능'],
+        description='Observation-first network PoC.',
+        preconditions=['Approved test environment', 'Browser DevTools Console access'],
         steps=[
-            'Console에 PoC 코드를 붙여넣고 실행',
-            '[SSS PoC] 설치 완료 로그 확인',
-            _format_page_step(page_hint or '해당 기능 화면'),
-            f'{action_hint or "대상 기능 버튼 클릭"} 수행',
-            'window.SSS_POC.list()로 캡처된 요청 확인',
+            'Paste and run the PoC code in Console',
+            'Confirm the [SSS Review PoC] installed log',
+            _review_page_step(page_hint),
+            f"Perform action: {_english_review_hint(action_hint, 'target action')}",
+            'Run window.SSS_REVIEW_POC.list() to inspect captured requests',
         ],
-        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or '해당 기능 화면', action_hint=action_hint or '대상 기능 버튼 클릭'),
-        expected_result='요청 URL/method/payload/status가 Console에 캡처됨',
-        safety='기본 상태는 observe only이며 mutation은 window.SSS_POC.armMutation() 호출 전 비활성화된다.',
+        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or 'target page', action_hint=action_hint or 'target action'),
+        expected_result='Request URL/method/payload/status is captured in Console.',
+        safety='Default mode is observe-only. Mutation remains disabled until window.SSS_REVIEW_POC.armMutation() is called after approval.',
     )
 
 
@@ -747,15 +1108,56 @@ def _is_external_or_static_endpoint(endpoint: str) -> bool:
 
 def _build_manual_poc_plan(source_path: str, function_name: str | None, endpoint: str, method: str) -> list[str]:
     return [
-        f'파일 확인: {source_path}',
-        f'함수 확인: {function_name or "UNKNOWN"}',
-        f'요청 정보 확인: {method or "UNKNOWN"} {endpoint or "UNKNOWN"}',
-        'data_flow(method/endpoint/function/sink) 항목을 evidence에서 재확인',
-        '요청 직전 payload 변수/검증 분기(if return/throw) 라인에 breakpoint 설정',
-        '브라우저 Network 탭에서 URL/method/payload/status/response를 확인',
-        'Console hook 적용 가능 여부를 확인(UNKNOWN endpoint 또는 압축/라이브러리 코드는 제한될 수 있음)',
-        'executable/observational PoC 제한 사유를 검토 노트에 기록',
+        f'File: {source_path}',
+        f'Function: {function_name or "UNKNOWN"}',
+        f'Request: {method or "UNKNOWN"} {endpoint or "UNKNOWN"}',
+        'reconfirm data_flow (method/endpoint/function/sink) from evidence',
+        'set breakpoint at payload variable / validation branch before request',
+        'check URL/method/payload/status/response in browser Network tab',
+        'confirm Console hook applicability (UNKNOWN endpoint or compressed/library code may limit this)',
+        'record reason for PoC limitation in review notes',
     ]
+
+
+def _extend_manual_poc_plan_for_placeholders(plan: list[str], placeholders: list[str]) -> list[str]:
+    if not placeholders:
+        return plan
+    resolved = list(plan)
+    resolved.append(f'Unresolved placeholder blocks promotion: {", ".join(placeholders)}')
+    for placeholder in placeholders:
+        if placeholder == '{API_BASE_URL}':
+            resolved.append('Resolve {API_BASE_URL} to the real origin/base URL before confirming the endpoint')
+        elif placeholder in {'{userId}', 'test_user_id'}:
+            resolved.append('Resolve userId from the authenticated session, captured Network request, or approved test account')
+        elif placeholder == '{sessionData.userId}':
+            resolved.append('Resolve sessionData.userId from the runtime session object or captured request payload')
+        elif placeholder in {'{auctionItem.orderId}', 'test_order_id'}:
+            resolved.append('Resolve orderId from the approved test order or auction item')
+        elif placeholder == 'UNKNOWN':
+            resolved.append('Resolve UNKNOWN endpoint/method/action from source evidence and the browser Network tab')
+    return resolved
+
+
+def _mark_review_candidate(finding: ReadableFinding) -> None:
+    finding.verification_notes = [note for note in finding.verification_notes if note != 'Confirmed promoted finding']
+    if not finding.title.startswith('Manual review candidate:'):
+        finding.title = f'Manual review candidate: {finding.title}'
+    prefix = 'Manual review candidate - Not an automatically confirmed vulnerability. Resolve endpoint/page/action before using PoC.'
+    if prefix not in finding.summary:
+        finding.summary = f'{prefix} {finding.summary}'
+    _add_unique(finding.verification_notes, 'Manual review candidate')
+    _add_unique(finding.verification_notes, 'Not an automatically confirmed vulnerability')
+    _add_unique(finding.verification_notes, 'Resolve endpoint/page/action before using PoC')
+    _add_unique(finding.verification_notes, 'Needs runtime capture before proof')
+    if finding.observational_poc:
+        if not finding.observational_poc.description.startswith('Manual review candidate'):
+            finding.observational_poc.description = f'Manual review candidate (not automatically confirmed): {finding.observational_poc.description}'
+        precondition = 'Endpoint/page/action manually confirmed'
+        if precondition not in finding.observational_poc.preconditions:
+            finding.observational_poc.preconditions.insert(0, precondition)
+        step = 'Manually confirm endpoint/page/action before using observational PoC'
+        if step not in finding.observational_poc.steps:
+            finding.observational_poc.steps.insert(0, step)
 
 
 def _first_evidence_location(finding: ReadableFinding) -> tuple[str, int, int, str]:
@@ -789,19 +1191,19 @@ def _build_contract_fields(
     parameters = api_match.parameters if api_match else []
     is_dom = method == 'DOM' or 'DOM sink:' in endpoint or finding.vulnerability_type == 'DOM XSS'
     missing_guard = (
-        '입력값 인코딩/sanitizer 없이 DOM sink에 전달될 수 있음'
+        'user input may reach DOM sink without encoding/sanitization'
         if is_dom
-        else '서버측 권한/업무 검증을 프론트 소스에서 확인할 수 없고, 클라이언트 요청값은 DevTools에서 변경 가능함'
+        else 'server-side validation cannot be confirmed from frontend source; client request values can be modified in DevTools'
     )
     why = (
-        f'사용자가 제어 가능한 DOM 입력이 {target}에 도달하는 source-to-sink 흐름이 코드에 존재한다.'
+        f'User-controlled DOM input reaches {target} via a source-to-sink flow in the code.'
         if is_dom
-        else f'브라우저에서 {target} 요청 직전 payload/parameter를 관찰할 수 있고, {", ".join(parameters) or "요청값"} 검증이 클라이언트 코드에 의존한다.'
+        else f'In the browser, {target} request payload/parameters can be observed before dispatch, and {", ".join(parameters) or "request values"} validation relies on client-side code.'
     )
     check = (
-        f'{target}에 전달되는 값과 DOM 반영 여부'
+        f'value delivered to {target} and DOM reflection'
         if is_dom
-        else f'{target} 요청의 payload/query/status/response' + (f" 및 parameter({', '.join(parameters)})" if parameters else '')
+        else f'{target} request payload/query/status/response' + (f" including parameter({', '.join(parameters)})" if parameters else '')
     )
     return {
         'vulnerability_title': finding.title,
@@ -809,7 +1211,7 @@ def _build_contract_fields(
         'start_line': start_line,
         'end_line': end_line,
         'function_name': function_name or None,
-        'vulnerable_code_summary': f'{source_path}:{start_line}-{end_line}에서 {target} 흐름이 확인됨',
+        'vulnerable_code_summary': f'{source_path}:{start_line}-{end_line}: {target} flow identified',
         'why_exploitable': why,
         'data_flow': FindingDataFlow(
             user_action=action_hint,
@@ -821,14 +1223,14 @@ def _build_contract_fields(
             file=source_path,
             line=(api_match.start_line if api_match else start_line),
             function=function_name or None,
-            when_to_pause='PoC 설치 후 취약 UI 동작을 실행해 요청/DOM sink 직전에 중단',
+            when_to_pause='pause just before the request/DOM sink after installing PoC and triggering the vulnerable UI action',
             what_variable_or_request_to_check=check,
         ),
         'poc_injection_plan': PocInjectionPlan(
             when_to_run=(
-                '페이지가 해당 DOM 입력을 읽기 전 또는 취약 화면을 새로고침하기 전'
+                'before the page reads the DOM input or before refreshing the vulnerable page'
                 if is_dom
-                else '취약 UI 액션 클릭 전 또는 요청을 발생시키기 전'
+                else 'before clicking the vulnerable UI action or before triggering the request'
             ),
             required_user_action=action_hint,
         ),
@@ -853,26 +1255,26 @@ def _apply_v1_contract(
 
 def _proof_steps(method: str, page_hint: str, action_hint: str) -> list[str]:
     if method == 'DOM':
-        return ['Console에 PoC 붙여넣기', _format_page_step(page_hint), 'PoC 코드 실행 또는 페이지 새로고침', 'DOM sink 실행 여부 확인']
-    return ['Console에 PoC 붙여넣기', '[SSS PoC] 설치 완료 확인', _format_page_step(page_hint), f'{action_hint} 수행', 'window.SSS_POC.list() 실행', '캡처된 요청 endpoint/method/payload 확인', 'window.SSS_POC.armMutation() 실행', '동일 동작 재수행', '변조 전/후 payload와 서버 응답 비교']
+        return ['paste PoC into Console', _format_page_step(page_hint), 'execute PoC code or reload page', 'confirm DOM sink executes']
+    return ['paste PoC into Console', 'confirm [SSS PoC] install log', _format_page_step(page_hint), f'{action_hint} performed', 'run window.SSS_POC.list()', 'inspect captured request endpoint/method/payload', 'run window.SSS_POC.armMutation()', 'repeat the same user action', 'compare payload and server response before/after mutation']
 
 
 def _success_criteria(method: str) -> list[str]:
     if method == 'DOM':
-        return ['테스트 payload가 DOM sink까지 도달함', '브라우저에서 alert 또는 명확한 DOM 변화가 관찰됨']
-    return ['요청 payload가 Console에 캡처됨', 'armMutation 후 지정 필드가 변조됨', '서버가 변조된 값에 대해 200/201 또는 상태 변경을 허용함', '또는 권한 없는 객체 조회가 200으로 응답함']
+        return ['test payload reaches the DOM sink', 'alert fires or clear DOM change is observed in the browser']
+    return ['request payload captured in Console', 'specified field is mutated after armMutation', 'server accepts mutated value with 200/201 or state change', 'or unauthorized object read returns 200']
 
 
 def _failure_criteria(method: str) -> list[str]:
     if method == 'DOM':
-        return ['입력이 안전하게 인코딩되어 스크립트가 실행되지 않음', 'DOM sink가 호출되지 않음', 'sanitizer가 payload를 제거함']
-    return ['서버가 400/401/403으로 차단함', 'payload 변조가 서버 반영 전에 정규화됨', 'endpoint가 호출되지 않음', 'HTML fallback이 반환됨']
+        return ['input is safely encoded and script does not execute', 'DOM sink is not invoked', 'sanitizer strips the payload']
+    return ['server rejects with 400/401/403', 'payload mutation is normalised before server processing', 'endpoint is not invoked', 'HTML fallback is returned']
 
 
 def _evidence_to_capture(method: str) -> list[str]:
     if method == 'DOM':
-        return ['Sources breakpoint 위치', 'Console PoC 실행 로그', 'DOM 변화 또는 alert 실행 화면', '입력값이 sink에 도달한 Call Stack']
-    return ['Console 캡처 로그', 'Network 요청 URL/method', '변조 전 payload', '변조 후 payload', '서버 응답 status/body', '화면 상태 변화']
+        return ['Sources breakpoint location', 'Console PoC execution log', 'DOM change or alert execution screenshot', 'Call Stack showing input reaching sink']
+    return ['Console capture log', 'Network request URL/method', 'payload before mutation', 'payload after mutation', 'server response status/body', 'UI state change']
 
 
 def _find_validation_return_breakpoints(f: FileContent, candidate: ApiCallCandidate | None = None) -> list[BreakpointHint]:
@@ -902,7 +1304,7 @@ def _find_validation_return_breakpoints(f: FileContent, candidate: ApiCallCandid
                 source_path=f.path,
                 start_line=idx,
                 end_line=idx,
-                reason='클라이언트 검증 실패 분기 확인',
+                reason='check client-side validation branch',
                 watch_variables=vars_found,
             ))
     return hints
@@ -910,7 +1312,7 @@ def _find_validation_return_breakpoints(f: FileContent, candidate: ApiCallCandid
 
 class ConsolePocAnalyzer(ABC):
     @abstractmethod
-    def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
+    def analyze(self, files: list[FileContent], project_map=None) -> list[ReadableFinding]:
         raise NotImplementedError
 
 
@@ -920,7 +1322,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     Production-quality reasoning should use GeminiConsolePocAnalyzer with
     structured API candidates.
     """
-    def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
+    def analyze(self, files: list[FileContent], project_map=None) -> list[ReadableFinding]:
         findings: list[ReadableFinding] = []
         missing_deps = detect_missing_dependencies(files)
         handler_candidates = extract_ui_handler_candidates(files)
@@ -940,24 +1342,24 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 endpoint_item = file_api_candidates[0]
                 findings.append(ReadableFinding(
                     id=self._id(f.path + 'd'),
-                    title='비활성화 UI 우회 검증 필요',
+                    title='disabled UI bypass verification required',
                     vulnerability_type='Client-side Validation Bypass',
                     severity='low',
                     confidence='low',
                     affected_files=[f.path],
-                    summary='disabled UI 제한은 Console/DevTools에서 우회될 수 있어 추가 검증이 필요합니다.',
-                    evidence=[ReadableEvidence(source_path=f.path, start_line=1, end_line=min(20, len(c.splitlines()) or 1), snippet='\n'.join((c.splitlines() or [''])[:20]), reason='disabled UI 조건 탐지', data_flow=[
+                    summary='disabled UI restriction may be bypassed via Console/DevTools; manual verification required',
+                    evidence=[ReadableEvidence(source_path=f.path, start_line=1, end_line=min(20, len(c.splitlines()) or 1), snippet='\n'.join((c.splitlines() or [''])[:20]), reason='disabled UI condition detected', data_flow=[
                         'source -> state/storage -> sink',
                         f"ui_event: {event_item.get('ui_event') if event_item else 'unknown'}",
                         f"disabled_expression: {disabled_item.get('disabled_expression') if disabled_item else ''}",
                         f"handler: {event_item.get('handler_name') if event_item else ''}",
                         f"endpoint: {endpoint_item.endpoint}",
                     ])],
-                    attack_scenario=['disabled 속성 제거 후 클릭'],
-                    impact='클라이언트 단 제약 우회 가능성',
-                    root_cause='UI 속성 기반 제한',
-                    remediation='서버측 유효성/권한 검증 강제',
-                    verification_notes=['disabled 제거만으로 우회 가능한지 확인 필요'],
+                    attack_scenario=['remove disabled attribute and click'],
+                    impact='client-side constraint bypass possible',
+                    root_cause='UI attribute-based restriction',
+                    remediation='enforce server-side validation',
+                    verification_notes=['confirm whether removing disabled attribute alone is sufficient to bypass'],
                     verification_playbook=_build_playbook(f, candidate=endpoint_item, disabled=True),
                 ))
             if (
@@ -1060,7 +1462,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         return any(k in hay for k in ('delete', 'remove', 'withdraw', 'transfer', 'refund', 'bulk', 'cancel-all', 'admin/delete'))
 
     def _ev(self, f: FileContent, reason: str) -> list[ReadableEvidence]:
-        if '권한' in reason:
+        if 'auth' in reason.lower():
             start_line, end_line, snippet = _extract_auth_branch_snippet(f.content)
         else:
             start_line, end_line, snippet = _extract_relevant_snippet(f.content, AUTH_SNIPPET_KEYS)
@@ -1086,11 +1488,11 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         verification_notes = []
         if needs_manual_validation:
             verification_notes.extend([
-                '권한값 저장/조회 위치가 확인되지 않아 Console PoC code는 생성하지 않았습니다.',
-                'requireAuth/checkSession 구현 파일 확인이 필요합니다.',
-                'sessionStorage/localStorage 조작 PoC는 현재 코드 근거로 검증되지 않았습니다.',
+                'auth value storage/read location not confirmed: Console PoC not generated',
+                'requireAuth/checkSession implementation file needs manual confirmation',
+                'sessionStorage/localStorage manipulation PoC is not confirmed by current code evidence',
             ])
-        verification_notes.extend([f'{d} 구현 파일이 ZIP에 없어 requireAuth 동작을 확정할 수 없습니다.' for d in missing_deps])
+        verification_notes.extend([f'{d} implementation file missing from ZIP; requireAuth behavior cannot be confirmed' for d in missing_deps])
 
         if needs_manual_validation:
             poc_code = """(() => {
@@ -1109,31 +1511,31 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     }
     return originalFetch.call(this, input, init);
   };
-  console.log('[PoC] fetch hook installed. 정상 로그인/페이지 이동을 수행하고 Console 로그를 확인하세요.');
+  console.log('[PoC] fetch hook installed. Perform a normal login/page navigation and check Console logs.');
 })();"""
 
         return ReadableFinding(
             id=self._id(f.path + 'a'),
-            title='클라이언트 권한 값 조작을 통한 접근 우회 가능성',
+            title='client-side auth value manipulation may bypass access control',
             vulnerability_type='Client-side Authorization Bypass',
             severity=_auth_bypass_severity(f.content),
             confidence=('low' if needs_manual_validation else 'medium'),
             affected_files=[f.path],
-            summary=('클라이언트 저장소 권한값 기반 분기 가능성이 보입니다.' if not needs_manual_validation else '클라이언트 권한 분기 우회 가능성은 있으나 추가 확인 필요'),
-            evidence=self._ev(f, '권한 분기 정황'),
+            summary=('client-side storage-based auth branch detected' if not needs_manual_validation else 'client-side auth branch bypass possible but needs manual confirmation'),
+            evidence=self._ev(f, 'auth branch evidence'),
             console_poc=ConsoleSafePoc(
                 poc_type='browser_console',
-                description='세션 저장값 조작 확인',
-                preconditions=['로그인 세션'],
-                steps=['Console 실행', '코드 실행', '새로고침'],
+                description='check session storage manipulation',
+                preconditions=['logged-in session'],
+                steps=['run in Console', 'execute the code', 'reload the page'],
                 code=poc_code,
-                expected_result='화면 분기 변화 확인',
-                safety='새 요청을 생성하지 않고 기존 요청을 관찰한다.',
+                expected_result='confirm UI branch change',
+                safety='observes existing requests without creating new ones',
             ),
-            attack_scenario=['저장소 값 조작'],
-            impact='클라이언트 단 통제 우회 가능성',
-            root_cause='클라이언트 상태 의존',
-            remediation='서버 권한 검증 강제',
+            attack_scenario=['storage value manipulation'],
+            impact='client-side control bypass possible',
+            root_cause='relies on client-side state',
+            remediation='enforce server-side authorization',
             verification_notes=verification_notes,
             verification_playbook=_build_playbook(f, auth=True),
         )
@@ -1147,26 +1549,26 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         start_line, end_line, snippet = flow
         return ReadableFinding(
             id=self._id(f.path + 'x'),
-            title='외부 입력이 DOM sink로 전달될 가능성',
+            title='user-controlled input may reach DOM sink',
             vulnerability_type='DOM XSS',
             severity='high',
             confidence='medium',
             affected_files=[f.path],
-            summary='외부 입력이 위험 sink로 전달될 수 있습니다.',
-            evidence=[ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='source-sink 조합', data_flow=['source -> state/storage -> sink', 'method: DOM', 'endpoint: DOM sink: innerHTML', 'sink: innerHTML'])],
+            summary='user-controlled input may reach a dangerous DOM sink',
+            evidence=[ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='source-sink flow', data_flow=['source -> state/storage -> sink', 'method: DOM', 'endpoint: DOM sink: innerHTML', 'sink: innerHTML'])],
             console_poc=ConsoleSafePoc(
                 poc_type='browser_console',
-                description='hash 기반 확인',
-                preconditions=['페이지 접근 가능'],
-                steps=['Console 실행', '코드 실행', '새로고침'],
+                description='hash-based verification',
+                preconditions=['page is accessible'],
+                steps=['run in Console', 'execute the code', 'reload the page'],
                 code="location.hash = '<img src=x onerror=alert(1)>'; location.reload();",
-                expected_result='alert 실행 여부',
-                safety='alert 수준의 비파괴 스크립트 실행 여부만 확인한다.',
+                expected_result='confirm alert fires',
+                safety='checks only whether an alert-level non-destructive script executes',
             ),
-            attack_scenario=['외부 입력 제어', 'DOM sink 전달'],
-            impact='스크립트 실행 가능성',
-            root_cause='검증/인코딩 부재',
-            remediation='안전한 DOM API 사용',
+            attack_scenario=['user controls external input', 'input reaches DOM sink'],
+            impact='arbitrary script execution possible',
+            root_cause='missing input validation/encoding',
+            remediation='use safe DOM API (textContent or DOMPurify)',
         )
 
     def _classify_api_candidate(self, candidate: ApiCallCandidate, source_path: str = '') -> dict[str, str]:
@@ -1184,63 +1586,63 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         if (method in {'POST', 'PUT', 'PATCH', 'DELETE'}) and (payment_keys & (endpoint_tokens | set(params_l))):
             return {
                 'vulnerability_type': 'Payment/Point Manipulation Candidate',
-                'title': '결제/포인트 요청 파라미터 조작 가능성',
-                'impact': '결제/포인트 관련 비즈니스 로직 오남용 가능성',
-                'root_cause': '클라이언트 파라미터 기반 요청 제어',
-                'remediation': '서버측 금액/포인트/결제 파라미터 검증 강화',
+                'title': 'payment/point request parameter manipulation possible',
+                'impact': 'payment/point business logic abuse possible',
+                'root_cause': 'request controlled by client-side parameters',
+                'remediation': 'strengthen server-side amount/point/payment parameter validation',
                 'severity': 'high' if method in {'POST', 'PUT', 'PATCH', 'DELETE'} else 'medium',
             }
         if method == 'GET' and (idor_keys & (endpoint_tokens | set(params_l))):
             return {
                 'vulnerability_type': 'IDOR / Unauthorized Data Access Candidate',
-                'title': '식별자 기반 조회 요청의 접근 제어 확인 필요',
-                'impact': '타 사용자 데이터 조회 가능성',
-                'root_cause': '식별자 기반 조회 요청의 권한 검증 불확실',
-                'remediation': '서버측 객체 단위 권한 검증 적용',
+                'title': 'access control check required for identifier-based query',
+                'impact': 'unauthorized access to other user data possible',
+                'root_cause': 'authorization uncertain for identifier-based query',
+                'remediation': 'apply server-side object-level authorization',
                 'severity': 'medium',
             }
         if method in {'POST', 'PUT', 'PATCH', 'DELETE'} and (state_keys & (endpoint_tokens | set(params_l))):
             return {
                 'vulnerability_type': 'State/Status Manipulation Candidate',
-                'title': '상태/권한 변경 요청 조작 가능성',
-                'impact': '권한/상태 값 위변조 가능성',
-                'root_cause': '클라이언트 제어 값에 대한 서버 검증 불확실',
-                'remediation': '상태/권한 변경 API 서버 검증 및 감사 로깅 강화',
+                'title': 'state/auth change request manipulation possible',
+                'impact': 'authorization/state value forgery possible',
+                'root_cause': 'server validation uncertain for client-controlled values',
+                'remediation': 'strengthen server validation and audit logging for state/auth change API',
                 'severity': 'high',
             }
         if 'verify-identity' in endpoint_l and 'findpassword' not in source_path.lower():
             return {
                 'vulnerability_type': 'Identity Verification / Action Authorization Bypass Candidate',
-                'title': '본인 인증/행위 검증 흐름 우회 가능성 검증 필요',
-                'impact': '인증/행위 검증 우회 시 권한 없는 작업 가능성',
-                'root_cause': '본인 인증/행위 검증 흐름의 서버 검증 불확실',
-                'remediation': '행위 승인/본인인증 검증을 서버에서 강제하고 토큰 재검증 적용',
+                'title': 'identity/action verification flow bypass needs confirmation',
+                'impact': 'unauthorized action possible if identity/action verification is bypassed',
+                'root_cause': 'server validation uncertain for identity/action verification flow',
+                'remediation': 'enforce server-side action/identity verification and re-validate tokens',
                 'severity': 'high',
             }
         if recovery_keys & endpoint_tokens:
             return {
                 'vulnerability_type': 'Account Recovery Flow Abuse Candidate',
-                'title': '계정 복구/인증 코드 흐름 검증 필요',
-                'impact': '계정 복구 흐름 악용 가능성',
-                'root_cause': '복구/인증 코드 요청 흐름의 서버 검증 불확실',
-                'remediation': '복구/코드 검증 API에 rate-limit/토큰 검증 강화',
+                'title': 'account recovery/verification code flow needs confirmation',
+                'impact': 'account recovery flow abuse possible',
+                'root_cause': 'server validation uncertain for recovery/verification code flow',
+                'remediation': 'strengthen rate-limiting/token validation for recovery/code verification API',
                 'severity': 'medium',
             }
         if method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
             return {
                 'vulnerability_type': 'Client-side Validation Bypass',
-                'title': '클라이언트 검증값 조작을 통한 요청 변조 가능성',
-                'impact': '비즈니스 로직 오남용',
-                'root_cause': '클라이언트 검증 의존',
-                'remediation': '서버 검증 강제',
+                'title': 'request mutation via client-side validation value manipulation possible',
+                'impact': 'business logic abuse possible',
+                'root_cause': 'relies on client-side validation',
+                'remediation': 'enforce server-side validation',
                 'severity': 'medium',
             }
         return {
             'vulnerability_type': 'Generic API Review Candidate',
-            'title': 'API 요청 후보 수동 검토 필요',
-            'impact': '요청 흐름 오남용 가능성',
-            'root_cause': '프론트 소스만으로 서버 검증 여부 판단 불가',
-            'remediation': '백엔드 권한/유효성 검증 정책 교차 검토',
+            'title': 'API request candidate requires manual review',
+            'impact': 'request flow abuse possible',
+            'root_cause': 'cannot confirm server validation from frontend source alone',
+            'remediation': 'cross-check backend authorization/validation policy',
             'severity': 'low',
         }
 
@@ -1271,7 +1673,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             start_line=candidate.start_line,
             end_line=candidate.end_line,
             snippet=candidate.snippet,
-            reason='검증값+요청 API 조합',
+            reason='validation value + API call combination',
             data_flow=flow,
         )]
 
@@ -1279,7 +1681,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         conf = 'low'
         poc_type = 'manual_check'
         poc_code = None
-        safety = '실제 변경 요청을 수행하지 않는다.'
+        safety = 'does not perform actual state-changing requests'
         page_hint, action_hint, function_name = _infer_page_action_hints(f.path, candidate.snippet, function_name=function_name)
         page_hint, action_hint, _, _ = infer_interaction_context(
             source_path=f.path,
@@ -1304,7 +1706,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             poc_type = 'browser_console'
             poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
             conf = 'medium'
-            safety = '조회형 요청으로 응답 status/body만 확인한다.'
+            safety = 'Read-only request. Inspect only response status/body.'
         elif method == 'GET' and not important_get:
             return None
         elif method in {'POST', 'PUT', 'PATCH'}:
@@ -1312,31 +1714,31 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 poc_type = 'browser_console'
                 poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
                 conf = 'medium'
-                notes.append('변조 검증은 window.SSS_POC.armMutation() 실행 후 진행하세요.')
-                safety = '기본값 false guard로 즉시 실행되지 않으며, 승인된 테스트 계정/테스트 데이터에서만 실행해야 한다.'
+                notes.append('Run mutation verification only after window.SSS_REVIEW_POC.armMutation() and explicit approval.')
+                safety = 'The default guard prevents immediate mutation. Use only with approved test accounts and test data.'
                 if self._is_base_variable_endpoint(endpoint):
-                    notes.append('API_BASE 값을 실제 대상 URL로 변경해야 합니다.')
+                    notes.append('replace API_BASE with the actual target URL')
         elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):
             if endpoint != 'UNKNOWN':
                 poc_type = 'browser_console'
                 poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
                 conf = 'medium'
-            notes.append('고위험 요청은 replay/mutation이 차단되며 observe mode만 제공됩니다.')
+            notes.append('High-risk requests block replay/mutation and provide observe mode only.')
 
-        if action_hint == '대상 기능 버튼 클릭':
-            notes.append('정확한 버튼/화면을 자동 추론하지 못했습니다. source_path/function_name 기준 수동 확인 필요.')
+        if action_hint == 'target action':
+            notes.append('Exact button/page was not inferred. Confirm manually using source_path/function_name.')
 
         classification = self._classify_api_candidate(candidate, source_path=f.path)
         steps = [
-            'Console에 코드 전체 붙여넣기',
-            '[SSS PoC] 설치 완료 로그 확인',
-            _format_page_step(page_hint),
-            f'{action_hint} 수행',
-            'window.SSS_POC.list()로 캡처 요청 확인',
-            '필요 시 window.SSS_POC.armMutation() 실행',
-            f'{action_hint} 다시 수행',
-            '변조 전/후 payload와 서버 응답 비교',
-            'window.SSS_POC.disarm()으로 종료',
+            'Paste the full code into Console',
+            'Confirm the [SSS Review PoC] installed log',
+            _review_page_step(page_hint),
+            f"Perform action: {_english_review_hint(action_hint, 'target action')}",
+            'Run window.SSS_REVIEW_POC.list() to inspect captured requests',
+            'Run window.SSS_REVIEW_POC.armMutation() only if mutation testing is approved',
+            f"Repeat action: {_english_review_hint(action_hint, 'target action')}",
+            'Compare payload and server response before/after mutation',
+            'Finish with window.SSS_REVIEW_POC.disarm()',
         ]
         return ReadableFinding(
             id=self._id(f"{f.path}:{method}:{endpoint}:{sink}:{','.join(sorted(parameters))}:{classification['vulnerability_type']}"),
@@ -1345,18 +1747,18 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             severity=classification['severity'],
             confidence=conf,
             affected_files=[f.path],
-            summary='요청 전송 전 값 조작 가능성 정황입니다.',
+            summary='Potential request value manipulation before transmission.',
             evidence=ev,
             console_poc=ConsoleSafePoc(
                 poc_type=poc_type,
-                description='브라우저 Console에 붙여넣으면 실제 UI에서 발생하는 fetch/XHR/axios 요청을 관찰하고, 승인된 테스트 환경에서 payload 변조 검증을 수행할 수 있는 PoC입니다.',
-                preconditions=['승인된 테스트 계정', '테스트 데이터 또는 테스트 주문', 'Console에서 [SSS PoC] 설치 완료 로그 확인', '변조 검증 전 window.SSS_POC.armMutation()을 명시적으로 실행'],
+                description='Browser Console PoC that observes fetch/XHR/axios requests from the real UI and supports approved payload mutation verification.',
+                preconditions=['Approved test account', 'Test data or test order', 'Confirm the [SSS Review PoC] installed log in Console', 'Before mutation verification, explicitly run window.SSS_REVIEW_POC.armMutation() after approval'],
                 steps=steps,
                 code=poc_code,
-                expected_result='요청 캡처 로그 및 응답 정보를 통해 검증 포인트를 확인하고, armMutation 후 재실행 시 payload 변조 적용 여부를 확인',
+                expected_result='Captured request logs and response details identify verification points. After armMutation and repeated action, compare whether payload mutation was applied.',
                 safety=safety,
             ),
-            attack_scenario=['파라미터 조작'],
+            attack_scenario=['parameter manipulation'],
             impact=classification['impact'],
             root_cause=classification['root_cause'],
             remediation=classification['remediation'],
@@ -1366,12 +1768,12 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             poc_generation_reason=('endpoint unknown' if endpoint == 'UNKNOWN' else 'endpoint/method available with safe observer PoC'),
             observational_poc=(None if endpoint == 'UNKNOWN' else ConsoleSafePoc(
                 poc_type='browser_console',
-                description='관찰형 PoC: 요청 캡처/응답 확인',
-                preconditions=['승인된 테스트 환경'],
-                steps=['Console 코드 실행', '정상 UI 동작 수행', 'window.SSS_POC.list() 확인'],
+                description='Observational PoC: capture request and inspect response.',
+                preconditions=['Approved test environment'],
+                steps=['Run the Console code', 'Perform the normal UI action', 'Run window.SSS_REVIEW_POC.list()'],
                 code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint),
-                expected_result='요청 URL/method/payload/status 캡처',
-                safety='mutation/replay는 arm 호출 전 비활성',
+                expected_result='Request URL/method/payload/status is captured.',
+                safety='Mutation/replay remains disabled before an explicit arm call.',
             )),
             manual_poc_plan=(_build_manual_poc_plan(f.path, function_name, endpoint, method) if endpoint == 'UNKNOWN' else []),
         )
@@ -1383,7 +1785,7 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         self.client = client
         self.last_debug = AiAnalysisDebug(backend='gemini')
 
-    def analyze(self, files: list[FileContent]) -> list[ReadableFinding]:
+    def analyze(self, files: list[FileContent], project_map=None) -> list[ReadableFinding]:
         def _summary(item: dict) -> dict:
             evidence = item.get('evidence') or []
             ev0 = evidence[0] if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict) else {}
@@ -1427,7 +1829,7 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         self.last_debug.called = True
         self.last_debug.call_count += 1
         try:
-            project_map = build_project_understanding(safe_files)
+            project_map = project_map or build_project_understanding(safe_files)
             raw_text = self.client.analyze(build_candidate_analysis_prompt(safe_files, candidates, project_map))
         except Exception as exc:
             self.last_debug.errors.append(f'call failed: {type(exc).__name__}')
@@ -1463,7 +1865,7 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
                 if any(x in code for x in DANGEROUS_POC_PATTERNS) or not _is_allowed_guarded_poc_code(code):
                     poc['code'] = None
                     notes = item.get('verification_notes') or []
-                    notes.append('위험 요청 가능성이 있어 Console PoC code를 제거했습니다.')
+                    notes.append('potentially dangerous request detected: Console PoC code removed')
                     item['verification_notes'] = notes
                     self.last_debug.errors.append('safety: Dangerous Console PoC code removed')
 
@@ -1487,16 +1889,40 @@ def get_console_poc_analyzer() -> ConsolePocAnalyzer:
 
 
 
+def _find_unresolved_poc_placeholders(*values: str | None) -> list[str]:
+    found: list[str] = []
+    tracked_placeholders = [p for p in UNRESOLVED_POC_PLACEHOLDERS if p != 'UNKNOWN']
+    for value in values:
+        text = str(value or '')
+        stripped = text.strip()
+        if stripped == 'UNKNOWN' or re.fullmatch(r'(GET|POST|PUT|PATCH|DELETE|DOM)\s+UNKNOWN', stripped, flags=re.IGNORECASE):
+            found.append('UNKNOWN')
+        for placeholder in tracked_placeholders:
+            if placeholder in text and placeholder not in found:
+                found.append(placeholder)
+        for placeholder in re.findall(r'\{(?:API_BASE_URL|API_BASE|BASE_URL|apiBase|userId|sessionData\.userId|auctionItem\.orderId|orderId|test_[^}]+)\}', text):
+            if placeholder not in found:
+                found.append(placeholder)
+        for token in ('test_user_id', 'test_order_id', 'TEST_USER_ID', 'TEST_ORDER_ID'):
+            if re.search(rf'(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])', text) and token not in found:
+                found.append(token)
+    return found
+
+
 def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePocAnalyzer | None = None) -> ReadableAnalysisResult:
     selected = select_console_relevant_files(files)
     analyzer = analyzer or get_console_poc_analyzer()
-    findings = analyzer.analyze(selected)
+    project_map_files = [f for f in selected if not _is_build_or_third_party_path(f.path, f.content)]
+    project_map = build_project_understanding(project_map_files)
+    try:
+        findings = analyzer.analyze(selected, project_map=project_map)
+    except TypeError:
+        findings = analyzer.analyze(selected)
     verification_playbooks: list[ConsoleVerificationPlaybookSummary] = []
     executive_findings: list[ReadableFinding] = []
     review_candidates: list[ReadableFinding] = []
     seen_flow: set[tuple[str, str, str, str, str, str]] = set()
     playbook_candidates: list[tuple[int, ConsoleVerificationPlaybookSummary]] = []
-    project_map = build_project_understanding(selected)
 
     def _is_compressed_or_library_evidence(finding: ReadableFinding, function_name: str | None) -> bool:
         if not finding.evidence:
@@ -1548,11 +1974,11 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             surrounding_block,
             ui_matches or None,
         )
-        if page_hint == '해당 기능 화면' and page_obj and page_obj.page_hint:
+        if page_hint == 'target feature page' and page_obj and page_obj.page_hint:
             page_hint = page_obj.page_hint
-        if page_hint == '해당 기능 화면':
+        if page_hint == 'target feature page':
             page_hint = fallback_page
-        if action_hint == '대상 기능 버튼 클릭':
+        if action_hint == 'target action':
             action_hint = fallback_action
         is_low_conf = f.confidence == 'low'
         is_disabled_only = bool(f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass')
@@ -1573,8 +1999,13 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             or (fn_low.startswith(('load', 'fetch', 'get', 'init', 'initialize', 'request')) and fn_low not in explicit_action_fn)
             or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
         )
-        is_generic_action = action_hint == '대상 기능 버튼 클릭'
-        is_generic_page = page_hint == '해당 기능 화면'
+        is_generic_action = _is_generic_action_hint(action_hint)
+        is_generic_page = _is_generic_page_hint(page_hint)
+        unresolved_placeholders = _find_unresolved_poc_placeholders(
+            endpoint,
+            f.console_poc.code if f.console_poc else None,
+            f.observational_poc.code if f.observational_poc else None,
+        )
         endpoint_norm = endpoint.lower().split('?', 1)[0].rstrip('/')
         endpoint_norm = re.sub(r'^\{api_base\}', '', endpoint_norm)
         is_session_get = method == 'GET' and (
@@ -1600,7 +2031,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         if api_match and (api_match.ui_event_handler or api_match.ui_event_type):
             score += 3
             score_reasons.append('ui_event_connected')
-        if api_match and api_match.ui_event_text and action_hint != '대상 기능 버튼 클릭':
+        if api_match and api_match.ui_event_text and action_hint != 'target action':
             score += 2
             score_reasons.append('ui_text_matches_action')
         if api_match and api_match.risk_category:
@@ -1609,8 +2040,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         if api_match and any(p.lower() in {'amount', 'price', 'userid', 'orderid', 'status', 'code', 'email', 'password'} for p in (api_match.parameters or [])):
             score += 2
             score_reasons.append('sensitive_payload')
-        score += 2 if action_hint != '대상 기능 버튼 클릭' else -2
-        score += 1 if page_hint != '해당 기능 화면' else -2
+        score += 2 if action_hint != 'target action' else -2
+        score += 1 if page_hint != 'target feature page' else -2
         score += 2 if endpoint != 'UNKNOWN' else -2
         score += -3 if is_generic_type else 0
         score += -3 if is_session_get else 0
@@ -1618,8 +2049,9 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         score += -2 if is_auto_fn else 0
         should_review = (
             is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
-            (is_generic_action and not is_dom_flow) or (is_generic_page and not is_dom_flow) or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
-            (score < 5 and not is_dom_flow) or
+            bool(unresolved_placeholders) or
+            is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
+            (score < PROMOTION_SCORE_THRESHOLD and not is_dom_flow) or
             (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
         )
         if should_review:
@@ -1643,21 +2075,33 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             else:
                 f.poc_generation_status = 'not_possible'
                 f.poc_generation_reason = 'third-party/static/analytics endpoint or insufficient safe context'
+            if unresolved_placeholders:
+                f.poc_generation_status = 'manual_plan'
+                f.poc_generation_reason = f'manual verification required: unresolved placeholder(s) {", ".join(unresolved_placeholders)}'
+                f.manual_poc_plan = _extend_manual_poc_plan_for_placeholders(
+                    _build_manual_poc_plan(flow[1], function_name, endpoint, method),
+                    unresolved_placeholders,
+                )
+                f.observational_poc = None
+                _add_unique(f.verification_notes, f'Unresolved placeholder blocks promotion: {", ".join(unresolved_placeholders)}')
+            if is_generic_action or is_generic_page:
+                _add_unique(f.verification_notes, 'Generic page/action blocks promotion')
             f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'no_strong_signals'}")
-            if no_code and is_unknown and 'endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.' not in f.verification_notes:
-                f.verification_notes.append('endpoint가 UNKNOWN이라 자동 PoC를 생성하지 않았습니다.')
+            if no_code and is_unknown and 'endpoint is UNKNOWN: auto PoC not generated' not in f.verification_notes:
+                f.verification_notes.append('endpoint is UNKNOWN: auto PoC not generated')
             if is_generic_action:
-                f.verification_notes.append('사용자 동작을 자동 추론하지 못해 수동 검토 후보로 분류했습니다.')
+                f.verification_notes.append('user action could not be inferred automatically: moved to manual review')
             if is_session_get:
-                f.verification_notes.append('자동 세션/초기화 요청으로 판단되어 Playbook에서 제외했습니다.')
+                f.verification_notes.append('classified as auto session/init request: excluded from playbook')
             elif api_match and api_match.risk_category == 'search_recommend':
-                f.verification_notes.append('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.')
+                f.verification_notes.append('classified as auto-query/recommend API: excluded from playbook')
             elif is_auto_fn:
-                f.verification_notes.append('자동 조회/추천검색성 API로 판단되어 Playbook에서 제외했습니다.')
+                f.verification_notes.append('classified as auto-query/recommend API: excluded from playbook')
             if is_compressed:
-                f.verification_notes.append('압축/라이브러리성 코드로 판단되어 수동 검토 후보로 분류했습니다.')
+                f.verification_notes.append('classified as compressed/library code: moved to manual review')
             if is_generic_type:
-                f.verification_notes.append('일반 API 후보라 자동 검증 Playbook에서 제외하고 수동 검토 후보로 분류했습니다.')
+                f.verification_notes.append('generic API candidate: excluded from auto playbook, moved to manual review')
+            _mark_review_candidate(f)
             review_candidates.append(f)
         else:
             f.poc_generation_status = 'executable'
@@ -1672,6 +2116,19 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     f.poc_generation_status = 'manual_plan'
                     f.poc_generation_reason = 'playbook promotion blocked: missing console code'
                     f.manual_poc_plan = _build_manual_poc_plan(flow[1], function_name, endpoint, method)
+                    _mark_review_candidate(f)
+                    review_candidates.append(f)
+                    continue
+                executable_placeholders = _find_unresolved_poc_placeholders(endpoint, executable_poc.code)
+                if executable_placeholders:
+                    f.poc_generation_status = 'manual_plan'
+                    f.poc_generation_reason = f'playbook promotion blocked: unresolved placeholder(s) {", ".join(executable_placeholders)}'
+                    f.manual_poc_plan = _extend_manual_poc_plan_for_placeholders(
+                        _build_manual_poc_plan(flow[1], function_name, endpoint, method),
+                        executable_placeholders,
+                    )
+                    _add_unique(f.verification_notes, f'Unresolved placeholder blocks promotion: {", ".join(executable_placeholders)}')
+                    _mark_review_candidate(f)
                     review_candidates.append(f)
                     continue
                 contract = _apply_v1_contract(
@@ -1704,7 +2161,13 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     data_flow=contract['data_flow'],
                     breakpoint_plan=contract['breakpoint_plan'],
                     poc_injection_plan=contract['poc_injection_plan'],
-                    console_code=executable_poc.code,
+                    console_code=_build_short_console_verification_code(
+                        endpoint=endpoint,
+                        method=method,
+                        page_hint=page_hint,
+                        action_hint=action_hint,
+                        parameters=(api_match.parameters if api_match else []),
+                    ),
                     setup_steps=executable_poc.steps,
                     proof_steps=_proof_steps(method, page_hint, action_hint),
                     success_criteria=_success_criteria(method),
@@ -1725,18 +2188,28 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     # sort, dedup, cap playbooks
     playbook_candidates.sort(key=lambda x: x[0])
     seen_pb: set[tuple[str, str, str]] = set()
+    promoted_playbook_ids: set[str] = set()
     for _, pb in playbook_candidates:
         key = (pb.source_path, pb.endpoint or '', pb.function_name or '')
         if key in seen_pb:
             continue
         seen_pb.add(key)
         verification_playbooks.append(pb)
-        if len(verification_playbooks) >= 7:
+        promoted_playbook_ids.add(pb.id)
+        if len(verification_playbooks) >= MAX_PLAYBOOK_COUNT:
             break
+    for f in findings:
+        if f.id in promoted_playbook_ids:
+            _add_unique(f.verification_notes, 'Confirmed promoted finding')
+            if f.console_poc:
+                f.console_poc.code = None
+        else:
+            f.verification_notes = [note for note in f.verification_notes if note != 'Confirmed promoted finding']
     return ReadableAnalysisResult(
         finding_count=len(findings),
         findings=findings,
         analyzed_focus=['authorization', 'storage manipulation', 'dom xss', 'client-side validation bypass', 'api call tampering'],
+        common_console_helper=_build_common_console_helper(),
         executive_findings=executive_findings,
         verification_playbooks=verification_playbooks,
         review_candidates=review_candidates,
