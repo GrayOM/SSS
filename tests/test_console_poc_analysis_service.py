@@ -242,7 +242,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertNotEqual(findings[0].id, findings[1].id)
 
     def test_get_endpoint_allows_safe_console_poc(self):
-        # No function/UI event → action is generic → no runnable hook; manual_plan review candidate
+        # No function/UI event -> action is generic -> no runnable hook; manual_plan review candidate
         files = [f('src/get.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
@@ -291,7 +291,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
             self.assertTrue(any('replace API_BASE with the actual target URL' in n for n in finding.verification_notes) or finding.console_poc.code is None)
 
     def test_api_base_get_endpoint_no_runnable_poc(self):
-        # {API_BASE} placeholder → unresolved → no runnable PoC code; manual_plan
+        # {API_BASE} placeholder -> unresolved -> no runnable PoC code; manual_plan
         files = [f('src/vget.js', "fetch('{API_BASE}/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
@@ -301,7 +301,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any('Unresolved placeholder' in n or 'Not a runnable proof' in n or 'manual' in n.lower() for n in finding.verification_notes))
 
     def test_api_base_path_variable_no_url_includes_placeholder(self):
-        # {API_BASE} and {userId} are unresolved → no runnable PoC; no url.includes with placeholder
+        # {API_BASE} and {userId} are unresolved -> no runnable PoC; no url.includes with placeholder
         files = [f('src/vpath.js', "axios.post('{API_BASE}/api/user/{userId}/wallet', { amount })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if 'Candidate' in x.vulnerability_type][0]
@@ -523,7 +523,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any(x.vulnerability_type == 'DOM XSS' for x in findings))
 
     def test_post_request_no_hook_when_action_generic(self):
-        # No function/UI event → action is generic → no runnable hook; "Not a runnable proof yet"
+        # No function/UI event -> action is generic -> no runnable hook; "Not a runnable proof yet"
         files = [f('src/post.js', "axios.post('/api/pay', { amount, orderId, userId })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Payment/Point Manipulation Candidate'][0]
@@ -536,7 +536,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
             self.assertNotIn('SSS_REVIEW_POC_STATE', (rc.console_poc.code or ''))
 
     def test_get_endpoint_has_no_hook_code_when_action_generic(self):
-        # No function/UI event → action is generic → no runnable hook code
+        # No function/UI event -> action is generic -> no runnable hook code
         files = [f('src/get2.js', "fetch('/api/user/session')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type == 'Generic API Review Candidate'][0]
@@ -559,7 +559,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
             self.assertNotIn('window.fetch = async function', (c.console_poc.code or ''))
 
     def test_delete_endpoint_no_hook_when_action_generic(self):
-        # No function/UI event → action is generic → no runnable hook code regardless of method
+        # No function/UI event -> action is generic -> no runnable hook code regardless of method
         files = [f('src/del.js', "axios.delete('/api/admin/delete-user/{userId}')")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type in {'State/Status Manipulation Candidate', 'Client-side Validation Bypass', 'Generic API Review Candidate'}][0]
@@ -631,9 +631,9 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(p.page_hint, 'payment/order page')
         self.assertEqual(p.user_action_hint, 'click payment button')
         self.assertEqual(p.function_name, 'handlePayment')
-        self.assertIn('// Page:', p.console_code or '')
-        self.assertIn('// Action:', p.console_code or '')
-        self.assertIn('// Target:', p.console_code or '')
+        self.assertIn('// Page:', p.console_code or '')  # combined as: // Page: X | Action: Y | Target: Z
+        self.assertIn('| Action:', p.console_code or '')
+        self.assertIn('| Target:', p.console_code or '')
         finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
         steps = ' '.join(finding.console_poc.steps if finding.console_poc else [])
         self.assertIn('Open page:', steps)
@@ -671,7 +671,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertNotIn('window.SSS_POC.replay', code)
 
     def test_review_candidate_no_hook_no_function_no_overwrite(self):
-        # No function/UI → action generic → no hook code, no SSS_POC or SSS_REVIEW_POC overwrite
+        # No function/UI -> action generic -> no hook code, no SSS_POC or SSS_REVIEW_POC overwrite
         files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         review = [x for x in result.review_candidates if '/api/orders/123/pay' in ' '.join(sum([e.data_flow for e in x.evidence], []))][0]
@@ -757,7 +757,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any('compressed/library code' in ' '.join(x.verification_notes) for x in result.review_candidates))
 
     def test_generic_action_hint_adds_not_runnable_note(self):
-        # Generic action (doRequest has no matching action inference) → "Not a runnable proof yet" note
+        # Generic action (doRequest has no matching action inference) -> "Not a runnable proof yet" note
         files = [f('src/unknown.js', "function doRequest(){axios.post('/api/pay',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
@@ -925,7 +925,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         assert all((p.console_code is not None and p.console_code != '') for p in result.verification_playbooks)
 
     def test_review_without_function_is_manual_plan_no_code(self):
-        # No function/UI event → action generic → manual_plan; no hook code
+        # No function/UI event -> action generic -> manual_plan; no hook code
         files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         rel = [x for x in result.review_candidates if '/api/orders/123/pay' in '\\n'.join(sum([e.data_flow for e in x.evidence], []))]
@@ -1144,20 +1144,20 @@ function submitOrder(event) {
         code = playbook.console_code or ''
 
         self.assertLess(len(code), 1200)
-        self.assertIn('window.SSS_POC.list()', code)
+        self.assertIn('window.SSS_POC.list()', code)  # still present as single line
         self.assertIn('const match = window.SSS_POC.find({', code)
         self.assertIn('if (!match)', code)
         self.assertIn('window.SSS_POC.find({', code)
         self.assertIn('window.SSS_POC.replay(match.index', code)
-        self.assertIn('Then copy/run:', code)
-        self.assertIn('Do not replay or mutate until approval is granted', code)
+        # 'Then copy/run' removed in compact 9-line format
+        # 'Do not replay' removed in compact 9-line format
         self.assertNotIn('<index>', code)
         self.assertTrue(code.startswith('(async () => {'))
         self.assertFalse(any(line.startswith('const match =') for line in code.splitlines()))
         self.assertIn('Install common_console_helper first', code)
         self.assertNotIn('TEST_VALUE', code)
         self.assertNotIn('  window.SSS_POC.armMutation();', code)
-        self.assertNotIn('await window.SSS_POC.replay', code)
+        self.assertNotIn('await window.SSS_POC.replay', code)  # mutation hint uses no await
         self.assertNotIn('window.fetch = async function', code)
         self.assertNotIn('XMLHttpRequest.prototype.open', code)
         self.assertNotIn('axios.interceptors.request.use', code)
@@ -1168,11 +1168,11 @@ function submitOrder(event) {
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         code = result.verification_playbooks[0].console_code or ''
 
-        self.assertIn('console.log("[SSS PoC] After approval, run: window.SSS_POC.armMutation();");', code)
-        self.assertIn('console.log("[SSS PoC] Then copy/run:",', code)
+        # Compact 9-line format: mutation guidance is a single comment line, not console.log calls
         self.assertIn('window.SSS_POC.replay(match.index', code)
-        self.assertNotIn('  window.SSS_POC.armMutation();', code)
+        self.assertNotIn('  window.SSS_POC.armMutation();', code)   # not standalone; it is in comment
         self.assertNotIn('await window.SSS_POC.replay', code)
+        self.assertIn('Approved mutation only', code)  # mutation hint uses no await
 
     def test_get_finding_specific_console_code_prints_replay_guidance(self):
         code = _build_short_console_verification_code(
@@ -1182,9 +1182,9 @@ function submitOrder(event) {
             action_hint='Click search',
         )
 
-        self.assertIn('Read-only replay guidance', code)
+        self.assertIn('Read-only:', code)  # compact format uses short comment
         self.assertIn('window.SSS_POC.replay(match.index);', code)
-        self.assertNotIn('await window.SSS_POC.replay', code)
+        self.assertNotIn('await window.SSS_POC.replay', code)  # mutation hint uses no await
         self.assertNotIn('  window.SSS_POC.armMutation();', code)
 
     def test_common_helper_replay_is_transport_aware(self):
@@ -1227,9 +1227,9 @@ function submitOrder(event) {
         self.assertEqual(helper.count('window.SSS_POC = {'), 1)
         self.assertIn('find(criteria = {})', helper)
         self.assertIn('replay(index, overrides = {})', helper)
-        self.assertIn('if (!window.SSS_POC || !window.SSS_POC.find)', code)
+        self.assertIn('window.SSS_POC?.find', code)  # compact form uses optional chaining
         self.assertIn('window.SSS_POC.find({', code)
-        self.assertIn('Then copy/run:', code)
+        # 'Then copy/run' removed in compact 9-line format
         self.assertNotIn('window.SSS_POC =', code)
         self.assertNotIn('window.SSS_REVIEW_POC', code)
 
@@ -1322,10 +1322,10 @@ function submitOrder(event) {
         self.assertIn(RESOLVE_BEFORE_POC_NOTE, source)
         self.assertIn('Needs runtime capture before proof', source)
 
-    # ── New PoC simplification tests ─────────────────────────────
+    # -- New PoC simplification tests --------------------------------
 
     def test_promoted_finding_has_no_hook_code_in_console_poc(self):
-        """Promoted ReadableFinding.console_poc.code must be None — short code is in playbook."""
+        """Promoted ReadableFinding.console_poc.code must be None - short code is in playbook."""
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         promoted_ids = {p.id for p in result.verification_playbooks}
@@ -1413,6 +1413,179 @@ function submitOrder(event) {
                 code = (poc.code or '') if poc else ''
                 self.assertNotIn('window.SSS_POC = {', code,
                                   f"finding [{finding.vulnerability_type}].{attr}.code re-defines window.SSS_POC")
+
+
+    # -- Real-world regression tests (loTO / NAFAL patterns) --------
+
+    def test_promoted_playbook_console_code_is_at_most_10_lines(self):
+        """Promoted console_code must be <= 10 pasteable lines."""
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for pb in result.verification_playbooks:
+            lines = (pb.console_code or '').splitlines()
+            self.assertLessEqual(len(lines), 10,
+                f"Promoted console_code has {len(lines)} lines (max 10):\n{pb.console_code}")
+
+    def test_promoted_playbook_console_code_has_sss_poc_find(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for pb in result.verification_playbooks:
+            self.assertIn('window.SSS_POC.find(', pb.console_code or '',
+                          "Promoted console_code must call window.SSS_POC.find()")
+
+    def test_promoted_playbook_console_code_no_hook_installer(self):
+        HOOK_SIGS = ['window.fetch = async function', 'XMLHttpRequest.prototype.open',
+                     'axios.interceptors.request.use', 'window.SSS_POC =', 'SSS_REVIEW_POC_STATE']
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for pb in result.verification_playbooks:
+            code = pb.console_code or ''
+            for sig in HOOK_SIGS:
+                self.assertNotIn(sig, code,
+                    f"Promoted console_code must not contain hook installer: {sig!r}")
+
+    def test_loto_like_all_manual_plan_no_playbooks(self):
+        """loTO-like input: all endpoints unresolved -> no playbooks, all manual_plan."""
+        # loTO pattern: endpoints via API_BASE_URL variable and dynamic paths
+        files = [
+            f('src/LoginPage.js',
+              "function doLogin() { axios.post(API_BASE_URL + '/login', { email, password }); }"),
+            f('src/Dashboard.js',
+              "function loadDashboard() { axios.get(API_BASE_URL + '/dashboard'); }"),
+            f('src/Profile.js',
+              "const endpoint = API_URLS.PROFILE; axios.post(endpoint, { userId });"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+                         "loTO-like input should produce zero promoted playbooks")
+        # All review candidates must be manual_plan
+        for rc in result.review_candidates:
+            self.assertEqual(rc.poc_generation_status, 'manual_plan',
+                f"Expected manual_plan for unresolved endpoint, got {rc.poc_generation_status}")
+            self.assertIsNone(rc.console_poc.code if rc.console_poc else None,
+                "manual_plan candidate must not have runnable console code")
+
+    def test_nafal_like_unknown_endpoints_no_runnable_poc(self):
+        """NAFAL-like input: UNKNOWN endpoints -> no promoted playbooks, manual verification only."""
+        files = [
+            f('src/AdminPage.js',
+              "const userType = sessionStorage.getItem('userType'); if (userType !== 'ADMIN') { navigate('/'); }"),
+            f('src/service.js',
+              "const endpoint = buildApiUrl(action); apiClient.post(endpoint, payload);"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        for rc in result.review_candidates:
+            poc_code = (rc.console_poc.code or '') if rc.console_poc else ''
+            obs_code = (rc.observational_poc.code or '') if rc.observational_poc else ''
+            for sig in ['window.fetch = async function', 'XMLHttpRequest.prototype.open',
+                        'SSS_REVIEW_POC_STATE', 'TARGET_ENDPOINT =']:
+                self.assertNotIn(sig, poc_code + obs_code,
+                    f"NAFAL-like candidate must not contain hook: {sig!r}")
+
+
+    # -- Mojibake regression: generated PoC code must be ASCII-only ----------------
+
+    def test_short_console_code_is_ascii_only(self):
+        """Promoted playbook console_code must contain no non-ASCII characters."""
+        code = _build_short_console_verification_code(
+            endpoint='/api/pay',
+            method='POST',
+            page_hint='payment page',
+            action_hint='click pay button',
+        )
+        non_ascii = [repr(c) for c in code if ord(c) > 127]
+        self.assertFalse(non_ascii,
+            f'Short console code contains non-ASCII chars: {non_ascii[:5]}')
+
+    def test_common_console_helper_is_ascii_only(self):
+        """common_console_helper must contain no non-ASCII characters."""
+        code = _build_common_console_helper()
+        non_ascii = [repr(c) for c in code if ord(c) > 127]
+        self.assertFalse(non_ascii,
+            f'common_console_helper contains non-ASCII chars: {non_ascii[:5]}')
+
+    def test_short_console_code_no_em_dash(self):
+        """_build_short_console_verification_code must not embed em-dash."""
+        code = _build_short_console_verification_code(
+            endpoint='/api/pay',
+            method='POST',
+            page_hint='payment page',
+            action_hint='click pay button',
+        )
+        self.assertNotIn('\u2014', code, 'Short console code must not contain em-dash')
+        self.assertIn('No match yet - perform', code)
+
+    def test_promoted_playbook_console_code_is_ascii_only(self):
+        """All promoted playbook console_code fields must be ASCII-only."""
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(result.verification_playbooks)
+        for pb in result.verification_playbooks:
+            code = pb.console_code or ''
+            non_ascii = [repr(c) for c in code if ord(c) > 127]
+            self.assertFalse(non_ascii,
+                f'Playbook console_code has non-ASCII: {non_ascii[:5]!r}')
+
+    def test_claude_md_no_mojibake(self):
+        """CLAUDE.md must not contain em-dash, en-dash, or arrow characters."""
+        from pathlib import Path
+        claude_md = (Path(__file__).resolve().parents[1] / 'CLAUDE.md').read_text(encoding='utf-8')
+        MOJIBAKE = {'\u2014': 'EM DASH', '\u2013': 'EN DASH', '\u2192': 'RIGHT ARROW',
+                    '\u2500': 'BOX DRAWING', '\u26a0': 'WARNING SIGN', '\ufffd': 'REPLACEMENT CHAR'}
+        for char, name in MOJIBAKE.items():
+            self.assertNotIn(char, claude_md,
+                f'CLAUDE.md contains U+{ord(char):04X} {name}')
+
+
+    # -- Edge-case: observational downgrade when no promoted playbooks ---------------
+
+    def test_observational_downgraded_to_manual_plan_when_no_playbooks(self):
+        """When verification_playbooks == 0, any observational review candidate must
+        be downgraded to manual_plan so the UI never shows 'install common helper'
+        text when the helper itself is hidden."""
+        # Bare axios call: non-generic endpoint gives resolved page/action hints but
+        # function_name=None forces should_review=True -> goes to review as observational.
+        files = [f('src/WalletPage.js', "axios.post('/api/wallet/charge', { amount })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+            'fixture should produce zero promoted playbooks')
+        for rc in result.review_candidates:
+            self.assertNotEqual(rc.poc_generation_status, 'observational',
+                f'observational must be downgraded when no playbooks; got {rc.poc_generation_status}')
+            obs_code = (rc.observational_poc.code or '') if rc.observational_poc else ''
+            self.assertFalse(obs_code,
+                'downgraded candidate must have no observational_poc code')
+            self.assertNotIn('common_console_helper', obs_code)
+
+    def test_observational_downgraded_has_manual_poc_plan(self):
+        """Downgraded observational candidate must have a manual_poc_plan."""
+        files = [f('src/WalletPage.js', "axios.post('/api/wallet/charge', { amount })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        for rc in result.review_candidates:
+            if 'downgraded' in (rc.poc_generation_reason or ''):
+                self.assertTrue(rc.manual_poc_plan,
+                    'downgraded candidate must have a manual_poc_plan')
+                self.assertTrue(any('No promoted playbook' in n for n in rc.verification_notes),
+                    'downgraded candidate must have the network-tab guidance note')
+
+    def test_observational_not_downgraded_when_playbooks_exist(self):
+        """When playbooks ARE promoted, observational candidates must remain observational."""
+        files = [
+            f('src/FindPassword.js',
+              "function verifyCode(){ axios.post('/api/verify-code', { code }); }"),
+            f('src/WalletPage.js',
+              "axios.post('/api/wallet/charge', { amount })"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        # If there is at least one promoted playbook, observational candidates keep their status.
+        if result.verification_playbooks:
+            obs = [rc for rc in result.review_candidates
+                   if rc.poc_generation_status == 'observational']
+            # Any remaining observational candidate must not be marked downgraded.
+            for rc in obs:
+                self.assertNotIn('downgraded', rc.poc_generation_reason or '')
 
 
 if __name__ == '__main__':

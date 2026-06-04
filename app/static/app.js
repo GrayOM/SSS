@@ -88,15 +88,22 @@ function renderVerificationPlaybooks(playbooks) {
   </section>`;
 }
 
-function renderCommonConsoleHelper(readable) {
+function renderCommonConsoleHelper(readable, hasPlaybooks) {
   const helper = readable?.common_console_helper || '';
+  if (!hasPlaybooks) {
+    return `<div class="card" style="border-left:4px solid #b91c1c;">
+      <h3>No browser-console-runnable PoC was generated</h3>
+      <p>Only manual review candidates were found. Use the verification steps below - do not paste the Common Console Helper into your browser for these findings.</p>
+      <p><b>Why:</b> No finding had a concrete endpoint, page, and user action confirmed from source code. Each candidate requires manual verification before any PoC can be constructed.</p>
+    </div>`;
+  }
   if (!helper) return '';
   return `<div class="card">
-    <h3>Common Console Helper</h3>
-    <p><b>Step 1:</b> paste common_console_helper once.</p>
-    <p><b>Step 2:</b> perform the documented page/action.</p>
-    <p><b>Step 3:</b> run the short finding-specific console_code.</p>
-    <p><b>Step 4:</b> use mutation/replay only after approval.</p>
+    <h3>Common Console Helper - paste once before running any playbook</h3>
+    <p><b>Step 1:</b> paste common_console_helper once into the browser Console. After pasting, the console will show <code>undefined</code> - this is normal. Look for the <code>[SSS PoC] common helper installed</code> group log to confirm success.</p>
+    <p><b>Step 2:</b> navigate to the documented page and perform the documented page/action.</p>
+    <p><b>Step 3:</b> run the short finding-specific console_code from the playbook below.</p>
+    <p><b>Step 4:</b> use mutation/replay only after approval, in an approved test environment with test data.</p>
     ${renderVerificationCode(helper)}
   </div>`;
 }
@@ -134,9 +141,10 @@ function renderManualReviewCandidates(candidates) {
     const safePocCode = isSafeReviewCode(poc.code) ? poc.code : null;
     return `<div class="card">
       <h3>${esc(f.title)}</h3>
-      <p><b>Manual Review Candidate</b> — <b>Not automatically confirmed vulnerability</b></p>
+      <p><b>Manual Review Candidate</b> - <b>Not automatically confirmed vulnerability</b></p>
+      ${isManualPlan ? `<p style="color:#b91c1c;font-weight:700;">No runnable Console PoC - manual verification only</p>` : ''}
       <p><b>Type:</b> ${esc(f.vulnerability_type)} / <b>Risk:</b> ${esc(f.severity)} / <b>Confidence:</b> ${esc(f.confidence)}</p>
-      ${notRunnableNotes.length ? `<p style="color:#b91c1c;font-weight:700;">⚠ ${notRunnableNotes.map(esc).join(' / ')}</p>` : ''}
+      ${notRunnableNotes.length ? `<p style="color:#b91c1c;">${notRunnableNotes.map(esc).join(' / ')}</p>` : ''}
       ${f.poc_generation_reason ? `<p><b>Why no runnable PoC:</b> ${esc(f.poc_generation_reason)}</p>` : ''}
       <p><b>Source location:</b> ${esc(formatLocation(f))}</p>
       <p><b>function_name:</b> ${esc(f.function_name || 'N/A')}</p>
@@ -146,10 +154,10 @@ function renderManualReviewCandidates(candidates) {
       <p><b>root_cause:</b> ${esc(f.root_cause || '')}</p>
       <div><b>data_flow:</b> ${renderDataFlow(f.data_flow, ev.data_flow || [])}</div>
       <div><b>breakpoint_plan:</b> ${renderPlan(f.breakpoint_plan)}</div>
-      <p><b>Attack scenario:</b> ${(f.attack_scenario || []).map(esc).join(' → ')}</p>
+      <p><b>Attack scenario:</b> ${(f.attack_scenario || []).map(esc).join(' -> ')}</p>
       ${isManualPlan ? renderManualPocPlan(f.manual_poc_plan) : ''}
       ${isObservational && safeObsCode ? `
-      <p><b>Runtime request discovery hint</b> — <i>Install common_console_helper first. This is still not a confirmed vulnerability.</i></p>
+      <p><b>Runtime request discovery hint</b> - <i>Install common_console_helper first. This is still not a confirmed vulnerability.</i></p>
       ${renderVerificationCode(safeObsCode)}
       ${obsPoc.steps && obsPoc.steps.length ? `<p><b>Steps:</b> ${obsPoc.steps.map(esc).join(' / ')}</p>` : ''}
       ${obsPoc.expected_result ? `<p><b>Expected:</b> ${esc(obsPoc.expected_result)}</p>` : ''}
@@ -172,7 +180,7 @@ function renderFindings(body) {
   const reviewCandidates = body.readable_analysis?.review_candidates ?? [];
   const playbooksHtml = renderVerificationPlaybooks(playbooks);
   const reviewCandidatesHtml = renderManualReviewCandidates(reviewCandidates);
-  const commonHelperHtml = renderCommonConsoleHelper(body.readable_analysis);
+  const commonHelperHtml = renderCommonConsoleHelper(body.readable_analysis, playbooks.length > 0);
   findingsBox.innerHTML = `${commonHelperHtml}${playbooksHtml}${reviewCandidatesHtml}`;
 }
 

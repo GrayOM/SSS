@@ -623,26 +623,9 @@ def _build_short_console_verification_code(
     action_hint: str,
     parameters: list[str] | None = None,
 ) -> str:
+    """9-line pasteable console snippet. Requires common_console_helper installed first."""
     endpoint_js = json.dumps(endpoint or '')
     method_js = json.dumps((method or '').upper())
-    lines = [
-        '(async () => {',
-        '  if (!window.SSS_POC || !window.SSS_POC.find) {',
-        '    console.warn("[SSS PoC] Install common_console_helper first.");',
-        '    return;',
-        '  }',
-        '  // Install common_console_helper once before running this finding-specific check.',
-        f'  // Page: {page_hint}',
-        f'  // Action: {action_hint}',
-        f'  // Target: {method or "UNKNOWN"} {endpoint or "UNKNOWN"}',
-        '  window.SSS_POC.list();',
-        f'  const match = window.SSS_POC.find({{ urlIncludes: {endpoint_js}, method: {method_js} }});',
-        '  if (!match) {',
-        '    console.warn("[SSS PoC] target request not captured yet. Perform the documented UI action, then run again.");',
-        '    return;',
-        '  }',
-        '  console.log(match);',
-    ]
     override_examples: list[str] = []
     for p in (parameters or []):
         if not p or not re.fullmatch(r'[A-Za-z_$][A-Za-z0-9_$]*', p):
@@ -655,25 +638,27 @@ def _build_short_console_verification_code(
         elif low in {'code', 'verificationcode'}:
             override_examples.append(f'{p}: "000000"')
     if override_examples:
-        example = ', '.join(override_examples[:4])
-        replay_command = f'window.SSS_POC.replay(match.index, {{ body: {{ {example} }} }});'
+        replay_args = f', {{ body: {{ {", ".join(override_examples[:4])} }} }}'
     else:
-        replay_command = 'window.SSS_POC.replay(match.index);'
-    replay_command_js = json.dumps(replay_command)
+        replay_args = ''
     if (method or '').upper() != 'GET':
-        lines.extend([
-            '  console.warn("[SSS PoC] Do not replay or mutate until approval is granted.");',
-            '  console.log("[SSS PoC] After approval, run: window.SSS_POC.armMutation();");',
-            f'  console.log("[SSS PoC] Then copy/run:", {replay_command_js});',
-            '  console.log("[SSS PoC] Finish with: window.SSS_POC.disarm();");',
-        ])
+        action_hint_line = (
+            f'  // Approved mutation only: window.SSS_POC.armMutation();'
+            f' window.SSS_POC.replay(match.index{replay_args}); window.SSS_POC.disarm();'
+        )
     else:
-        lines.extend([
-            '  console.log("[SSS PoC] Read-only replay guidance. Copy/run only after confirming it is safe:");',
-            f'  console.log("[SSS PoC]", {replay_command_js});',
-        ])
-    lines.append('})();')
-    return '\n'.join(lines)
+        action_hint_line = f'  // Read-only: window.SSS_POC.replay(match.index);'
+    return '\n'.join([
+        '(async () => {',
+        f'  if (!window.SSS_POC?.find) {{ console.warn("[SSS PoC] Install common_console_helper first."); return; }}',
+        f'  // Page: {page_hint} | Action: {action_hint} | Target: {method or "UNKNOWN"} {endpoint or "UNKNOWN"}',
+        '  window.SSS_POC.list();',
+        f'  const match = window.SSS_POC.find({{ urlIncludes: {endpoint_js}, method: {method_js} }});',
+        f'  if (!match) {{ console.warn("[SSS PoC] No match yet - perform the UI action, then run again."); return; }}',
+        '  console.log("[SSS PoC] Captured:", match);',
+        action_hint_line,
+        '})();',
+    ])
 
 
 def _english_review_hint(value: str | None, fallback: str) -> str:
@@ -1101,7 +1086,7 @@ def _build_safe_network_poc(endpoint: str, page_hint: str, action_hint: str) -> 
 def _build_capture_hint(endpoint: str, method: str, page_hint: str, action_hint: str) -> str:
     """Short 5-line comment for review candidates. References common_console_helper only."""
     return '\n'.join([
-        '// Capture hint — install common_console_helper once first, then:',
+        '// Capture hint - install common_console_helper once first, then:',
         f'// 1. {_review_page_step(page_hint)}',
         f'// 2. Perform: {action_hint}',
         '// 3. window.SSS_POC.list()',
@@ -2093,7 +2078,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 f.poc_generation_reason = 'review candidate: short capture hint (install common_console_helper first)'
                 f.observational_poc = ConsoleSafePoc(
                     poc_type='browser_console',
-                    description='Request capture hint — install common_console_helper first.',
+                    description='Request capture hint - install common_console_helper first.',
                     preconditions=['common_console_helper installed', 'Approved test environment'],
                     steps=[
                         _review_page_step(page_hint),
@@ -2103,7 +2088,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     ],
                     code=_build_capture_hint(endpoint, method, page_hint, action_hint),
                     expected_result=f'Captured request for {method} {endpoint} is visible in window.SSS_POC.captured.',
-                    safety='Comments only — no hook installer. Requires common_console_helper to be active.',
+                    safety='Comments only - no hook installer. Requires common_console_helper to be active.',
                 )
             elif endpoint == 'UNKNOWN' or method == 'UNKNOWN' or is_compressed or not has_snippet:
                 f.poc_generation_status = 'manual_plan'
@@ -2245,6 +2230,28 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             f.observational_poc = None
         else:
             f.verification_notes = [note for note in f.verification_notes if note != 'Confirmed promoted finding']
+    # When no playbooks are promoted, common_console_helper is hidden from the UI.
+    # Any review candidate still marked observational would reference a hidden helper,
+    # so downgrade to manual_plan to keep guidance consistent.
+    if not verification_playbooks:
+        for f in review_candidates:
+            if f.poc_generation_status == 'observational':
+                f.poc_generation_status = 'manual_plan'
+                prev_reason = f.poc_generation_reason or ''
+                f.poc_generation_reason = (
+                    prev_reason.rstrip('; ') +
+                    '; downgraded: no promoted playbook, common helper not shown'
+                ).lstrip('; ')
+                f.observational_poc = None
+                if not f.manual_poc_plan:
+                    src = f.evidence[0].source_path if f.evidence else 'UNKNOWN'
+                    flows = f.evidence[0].data_flow if f.evidence else []
+                    ep = next((x[len('endpoint: '):] for x in flows if x.startswith('endpoint: ')), 'UNKNOWN')
+                    meth = next((x[len('method: '):] for x in flows if x.startswith('method: ')), 'UNKNOWN')
+                    fn = next((x[len('function: '):] for x in flows if x.startswith('function: ')), None)
+                    f.manual_poc_plan = _build_manual_poc_plan(src, fn, ep, meth)
+                _add_unique(f.verification_notes,
+                            'No promoted playbook: use Network tab and breakpoints instead of Console helper')
     return ReadableAnalysisResult(
         finding_count=len(findings),
         findings=findings,

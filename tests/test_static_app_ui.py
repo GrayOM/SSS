@@ -84,3 +84,113 @@ def test_static_app_js_promoted_playbooks_use_short_console_code():
     assert 'pb.console_code' in js or 'console_code' in js
     # The promoted section must appear before manual review section
     assert js.index('Promoted Verification Playbooks') < js.index('Manual Review Candidates')
+
+
+# -- loTO / NAFAL real-world regression: zero-playbook UI behavior ----------
+
+def test_static_app_js_no_helper_shown_when_no_playbooks():
+    js = _app_js()
+
+    # renderCommonConsoleHelper must accept hasPlaybooks argument
+    assert 'hasPlaybooks' in js
+    assert 'renderCommonConsoleHelper(body.readable_analysis, playbooks.length > 0)' in js
+
+
+def test_static_app_js_zero_playbook_message():
+    js = _app_js()
+
+    assert 'No browser-console-runnable PoC was generated' in js
+    assert 'Only manual review candidates were found' in js
+    # The zero-playbook message must not invite the user to paste anything
+    # (the word "paste" only appears in the helper block that is hidden when no playbooks)
+    # Verify the zero-playbook branch does NOT contain "paste common_console_helper"
+    zero_block_start = js.index('No browser-console-runnable PoC was generated')
+    zero_block_end   = js.index('Only manual review candidates were found')
+    zero_block = js[zero_block_start:zero_block_end + 200]
+    assert 'paste common_console_helper' not in zero_block
+
+
+def test_static_app_js_helper_undefined_explanation():
+    js = _app_js()
+
+    # When helper IS shown, explain that undefined output is normal
+    assert 'undefined' in js
+    assert '[SSS PoC] common helper installed' in js
+
+
+def test_static_app_js_manual_plan_no_runnable_poc_banner():
+    js = _app_js()
+
+    assert 'No runnable Console PoC' in js
+    assert 'manual verification only' in js
+    # The banner must be conditional on isManualPlan
+    assert "isManualPlan ? `<p" in js or "isManualPlan ?" in js
+
+
+def test_static_app_js_manual_plan_no_paste_into_console():
+    js = _app_js()
+
+    # "Paste into Console" wording must never appear inside manual_plan card template
+    # It only appears inside the helper block (shown only when hasPlaybooks === true)
+    # and inside the observational/capture sections (not isManualPlan paths)
+    # Check that the manual_plan branch (renderManualPocPlan) does not emit "Paste into Console"
+    assert 'renderManualPocPlan' in js
+    manual_fn_start = js.index('function renderManualPocPlan')
+    manual_fn_end   = js.index('\n}', manual_fn_start) + 2
+    manual_fn = js[manual_fn_start:manual_fn_end]
+    assert 'Paste into Console' not in manual_fn
+    assert 'paste' not in manual_fn.lower()
+
+
+def test_static_app_js_unresolved_endpoint_wording():
+    js = _app_js()
+
+    # Review card must include explicit "No runnable Console PoC" label
+    assert 'No runnable Console PoC' in js
+    # Reason field shown for all review candidates
+    assert 'poc_generation_reason' in js
+
+
+def test_static_app_js_no_code_block_for_manual_plan():
+    js = _app_js()
+
+    # For manual_plan: only renderManualPocPlan is called - no renderVerificationCode
+    # Verify: the renderVerificationCode call in manual review is guarded by isObservational/safePocCode
+    # (i.e., it never fires when isManualPlan is true)
+    assert 'isObservational && safeObsCode' in js
+    assert '!isManualPlan && !isObservational && safePocCode' in js
+    # isManualPlan path calls renderManualPocPlan, not renderVerificationCode
+    manual_plan_branch = 'isManualPlan ? renderManualPocPlan'
+    assert manual_plan_branch in js
+
+
+# -- Mojibake regression: app.js must be ASCII-only outside Korean summary labels ------
+
+def test_static_app_js_no_mojibake_chars():
+    """app.js must not contain em-dash, en-dash, right-arrow, box-drawing, or warning-sign."""
+    js = _app_js()
+    MOJIBAKE = {
+        '\u2014': 'EM DASH',
+        '\u2013': 'EN DASH',
+        '\u2192': 'RIGHT ARROW',
+        '\u2500': 'BOX DRAWING LIGHT HORIZONTAL',
+        '\u26a0': 'WARNING SIGN',
+        '\ufffd': 'REPLACEMENT CHARACTER',
+    }
+    for char, name in MOJIBAKE.items():
+        assert char not in js, f'app.js contains U+{ord(char):04X} {name}'
+
+
+def test_static_app_js_helper_title_uses_ascii_dash():
+    """Helper h3 title must use ASCII hyphen, not em-dash."""
+    js = _app_js()
+    assert 'Common Console Helper - paste once before running any playbook' in js
+    assert 'Common Console Helper \u2014' not in js
+
+
+def test_static_app_js_manual_banner_uses_ascii_dash():
+    """Manual-plan banner must use ASCII hyphen, not em-dash or warning sign."""
+    js = _app_js()
+    assert 'No runnable Console PoC - manual verification only' in js
+    assert '\u26a0' not in js
+    assert '\u2014' not in js
