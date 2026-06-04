@@ -1,6 +1,7 @@
 import re
 
 from app.models.schemas import ApiCallCandidate, CandidateExtractionResult, FileContent
+from app.services.poc_templates import normalize_endpoint
 
 _METHODS = ['get', 'post', 'put', 'delete', 'patch']
 _META_KEYS = {'method', 'url', 'data', 'body', 'headers', 'credentials', 'withCredentials', 'mode', 'cache', 'expr'}
@@ -16,11 +17,12 @@ def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
     notes: list[str] = []
     value = raw.strip()
     value = re.sub(r'\$\{([^}]+)\}', r'{\1}', value)
-    has_base_variable = bool(re.match(r'^\{?(API_BASE|BASE_URL|apiBase)\}?', value))
+    has_base_variable = bool(re.match(r'^\{?(API_BASE_URL|API_BASE|BASE_URL|apiBase)\}?', value, flags=re.IGNORECASE))
     if has_base_variable:
+        normalized = normalize_endpoint(value)
+        if normalized.startswith('/') and normalized != '/UNKNOWN_PATH':
+            return normalized, notes
         notes.append('base URL variable requires manual review')
-        if re.match(r'^\{?(API_BASE|BASE_URL)\}?', value) and ' ' not in value:
-            return value, notes
     value = re.sub(r'^\{?[A-Za-z_][A-Za-z0-9_]*\}?\s*\+\s*', '', value)
     value = re.sub(r'^\{apiBase\}', '', value, flags=re.IGNORECASE)
     if '/api/' in value:
@@ -143,6 +145,7 @@ def _extract_concat_endpoint(snip: str) -> tuple[str, list[str]] | None:
 def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtractionResult:
     candidates: list[ApiCallCandidate] = []
     patterns = [
+        (r'(axios\.create\s*\([^)]*\))\.(get|post|put|delete|patch)\(', 'axios.create.{method}'),
         (r'(axios)\.(get|post|put|delete|patch)\(', 'axios.{method}'),
         (r'(apiClient|request|httpClient|client)\.(get|post|put|delete|patch)\(', '{sink}.{method}'),
         (r'(fetch)\(', 'fetch'),

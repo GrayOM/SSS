@@ -78,8 +78,11 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertNotIn('\\n\\n\\n\\n', prompt)
         self.assertIn('JSON only', prompt)
         self.assertIn('GET requests may include read-only browser_console PoC.', prompt)
-        self.assertIn('POST/PUT/PATCH requests may include guarded executable browser_console PoC.', prompt)
+        self.assertIn('POST/PUT/PATCH requests must include a guarded executable PoC', prompt)
         self.assertIn('DELETE and irreversible actions must use manual_check or preview only.', prompt)
+        # New: source-to-sink chain requirement
+        self.assertIn('source->sink data-flow chain', prompt)
+        self.assertIn('source_expr', prompt)
         self.assertIn('Respond with fields: id,title,vulnerability_type', prompt)
         self.assertIn('id should be a short stable unique string.', prompt)
         self.assertIn('If unsure, generate a deterministic id from vulnerability_type + endpoint + source_path.', prompt)

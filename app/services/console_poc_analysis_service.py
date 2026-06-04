@@ -8,6 +8,11 @@ from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCall
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 from app.services.json_utils import extract_json_payload
+from app.services.poc_templates import (
+    MAX_POC_LINES, INTERCEPTOR_SIGS,
+    build_dom_xss_poc, build_storage_auth_poc, build_request_replay_poc, is_interceptor_free,
+    normalize_endpoint,
+)
 from app.services.prompt_builder import build_candidate_analysis_prompt, build_console_poc_analysis_prompt
 from app.services.source_intelligence import build_project_understanding
 
@@ -35,6 +40,7 @@ GENERIC_HINT_ACTION_KIND = 'generic_action_hint'
 GENERIC_HINT_PAGE_KIND = 'generic_page_hint'
 UNRESOLVED_POC_PLACEHOLDERS = (
     '{API_BASE_URL}',
+    '{UNKNOWN_PATH}',
     '{userId}',
     '{sessionData.userId}',
     '{auctionItem.orderId}',
@@ -1476,11 +1482,29 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
     def _mk_auth_bypass(self, f: FileContent, all_files: list[FileContent], missing_deps: list[str]) -> ReadableFinding:
         has_storage_evidence = _has_storage_auth_evidence(all_files, f)
         needs_manual_validation = bool(missing_deps) or not has_storage_evidence
-        poc_code = (
-            "sessionStorage.setItem('user', JSON.stringify({ userType: 'ADMIN' })); location.reload();"
-            if has_storage_evidence and not missing_deps
-            else None
-        )
+        poc_code: str | None = None
+        if has_storage_evidence and not missing_deps:
+            # Detect the actual storage key and pattern from the source.
+            content_low = f.content.lower()
+            storage = 'localStorage' if ('localstorage' in content_low and 'sessionstorage' not in content_low) else 'sessionStorage'
+
+            # Look for getItem('key') to determine the storage key.
+            key_m = re.search(
+                r'(?:sessionStorage|localStorage)\.getItem\s*\([\'"]([^\'"]+)[\'"]',
+                f.content, re.IGNORECASE,
+            )
+            detected_key = key_m.group(1) if key_m else None
+
+            if detected_key and detected_key.lower() in {'user', 'userinfo', 'authuser', 'currentuser'}:
+                # JSON-object key: the value is JSON.parse'd and has a field like userType.
+                poc_code = build_storage_auth_poc(storage, detected_key, 'userType', 'ADMIN')
+            elif detected_key and detected_key.lower() in {'usertype', 'user_type', 'role', 'user_role'}:
+                # Plain-string key: the value is a raw string like 'ADMIN'.
+                val_js = json.dumps('ADMIN')
+                poc_code = f"{storage}.setItem({json.dumps(detected_key)}, {val_js}); location.reload();"
+            else:
+                # Key unknown or ambiguous: do not generate a potentially wrong PoC.
+                poc_code = None
         verification_notes = []
         if needs_manual_validation:
             verification_notes.extend([
@@ -1543,6 +1567,14 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         if flow is None:
             return None
         start_line, end_line, snippet = flow
+        # Detect the source expression from the snippet for a more targeted PoC.
+        src_expr = 'location.hash'
+        snip_low = snippet.lower()
+        if 'location.search' in snip_low:
+            src_expr = 'location.search'
+        elif 'postmessage' in snip_low or 'event.data' in snip_low:
+            src_expr = 'postMessage/event.data'
+        poc_code = build_dom_xss_poc(source_expr=src_expr)
         return ReadableFinding(
             id=self._id(f.path + 'x'),
             title='user-controlled input may reach DOM sink',
@@ -1551,20 +1583,32 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             confidence='medium',
             affected_files=[f.path],
             summary='user-controlled input may reach a dangerous DOM sink',
-            evidence=[ReadableEvidence(source_path=f.path, start_line=start_line, end_line=end_line, snippet=snippet, reason='source-sink flow', data_flow=['source -> state/storage -> sink', 'method: DOM', 'endpoint: DOM sink: innerHTML', 'sink: innerHTML'])],
+            evidence=[ReadableEvidence(
+                source_path=f.path, start_line=start_line, end_line=end_line,
+                snippet=snippet, reason='source-sink flow confirmed by static pattern',
+                data_flow=[
+                    f'source: {src_expr} (line {start_line})',
+                    'sink: innerHTML / DOM sink (line ' + str(end_line) + ')',
+                    'method: DOM', 'endpoint: DOM sink: innerHTML', 'sink: innerHTML',
+                ],
+            )],
             console_poc=ConsoleSafePoc(
                 poc_type='browser_console',
-                description='hash-based verification',
-                preconditions=['page is accessible'],
-                steps=['run in Console', 'execute the code', 'reload the page'],
-                code="location.hash = '<img src=x onerror=alert(1)>'; location.reload();",
-                expected_result='confirm alert fires',
-                safety='checks only whether an alert-level non-destructive script executes',
+                description='Single-line direct PoC - no setup required',
+                preconditions=['page is accessible in the browser'],
+                steps=[
+                    'Open browser DevTools Console on the target page',
+                    'Paste the PoC code and press Enter',
+                    'Observe whether the payload executes (console.log fires)',
+                ],
+                code=poc_code,
+                expected_result='console.log(1) fires, confirming script execution via the DOM sink',
+                safety='non-destructive: uses console.log, not alert or data-exfiltration',
             ),
-            attack_scenario=['user controls external input', 'input reaches DOM sink'],
-            impact='arbitrary script execution possible',
-            root_cause='missing input validation/encoding',
-            remediation='use safe DOM API (textContent or DOMPurify)',
+            attack_scenario=['user controls external input', 'input reaches DOM sink without encoding'],
+            impact='arbitrary script execution possible in victim browser',
+            root_cause='missing input validation/encoding before DOM sink assignment',
+            remediation='use safe DOM API (textContent) or DOMPurify sanitizer',
         )
 
     def _classify_api_candidate(self, candidate: ApiCallCandidate, source_path: str = '') -> dict[str, str]:
@@ -1708,39 +1752,72 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             notes.append('Not a runnable proof yet: user action could not be inferred from source code')
             notes.append('Confirm the page and triggering user action manually before using any PoC')
 
-        if not action_is_generic:
-            if method == 'GET' and endpoint != 'UNKNOWN' and important_get:
-                poc_type = 'browser_console'
-                poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
-                conf = 'medium'
-                safety = 'Read-only request. Inspect only response status/body.'
-            elif method in {'POST', 'PUT', 'PATCH'} and endpoint != 'UNKNOWN':
-                poc_type = 'browser_console'
-                poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
-                conf = 'medium'
-                notes.append('Run mutation verification only after window.SSS_REVIEW_POC.armMutation() and explicit approval.')
-                safety = 'The default guard prevents immediate mutation. Use only with approved test accounts and test data.'
-                if self._is_base_variable_endpoint(endpoint):
-                    notes.append('replace API_BASE with the actual target URL')
-            elif method == 'DELETE' or self._is_irreversible_or_high_risk(method, endpoint, parameters):
-                if endpoint != 'UNKNOWN':
+        # Normalize the endpoint: strip leading base-URL variable so
+        # {API_BASE_URL}/login -> /login before passing to the PoC builder.
+        norm_ep = normalize_endpoint(endpoint) if endpoint != 'UNKNOWN' else 'UNKNOWN'
+
+        # Build a direct PoC when:
+        #   (a) action hint is concrete, OR
+        #   (b) function_name is known even if action hint is generic
+        #       (the PoC is self-contained; button text isn't needed).
+        # Exception: bare calls with no function context stay manual_plan.
+        has_concrete_context = not action_is_generic or (function_name is not None)
+
+        # Build the shortest possible self-contained PoC using poc_templates.
+        if has_concrete_context:
+            if method == 'DELETE' or self._is_irreversible_or_high_risk(method, norm_ep, parameters):
+                notes.append('High-risk endpoint: observe-only, no replay PoC generated.')
+                poc_code = None
+            elif method == 'GET' and norm_ep != 'UNKNOWN' and important_get:
+                direct = build_request_replay_poc(method, norm_ep)
+                if direct:
                     poc_type = 'browser_console'
-                    poc_code = _build_network_hook_mutation_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
+                    poc_code = direct
                     conf = 'medium'
-                notes.append('High-risk requests block replay/mutation and provide observe mode only.')
+                    safety = 'Read-only GET request. Inspect response status/body only.'
+            elif method in {'POST', 'PUT', 'PATCH'} and norm_ep != 'UNKNOWN':
+                primary = next(
+                    (p for p in parameters
+                     if p.lower() in {'amount', 'price', 'totalamount', 'usepoints', 'status', 'code', 'role', 'userid', 'orderid'}),
+                    parameters[0] if parameters else '',
+                )
+                test_val: int | str = 1 if primary.lower() in {'amount', 'price', 'totalamount', 'usepoints'} else 'TEST_VALUE'
+                direct = build_request_replay_poc(method, norm_ep, primary, test_val)
+                if direct:
+                    poc_type = 'browser_console'
+                    poc_code = direct
+                    conf = 'medium'
+                    safety = 'CONFIRM_AUTHORIZED_TEST is False by default. Set to true only in an approved test environment.'
+                    notes.append('Set CONFIRM_AUTHORIZED_TEST=true only after explicit approval in an isolated test environment.')
+
+        is_direct_poc = poc_code is not None and is_interceptor_free(poc_code)
+        # An executable status requires a concrete (possibly normalized) endpoint.
+        poc_gen_status = (
+            'executable' if is_direct_poc and norm_ep not in ('UNKNOWN', '')
+            else 'manual_plan' if (endpoint == 'UNKNOWN' or not poc_code)
+            else 'observational'
+        )
+        if is_direct_poc:
+            steps = [
+                'Open browser DevTools Console on the target page',
+                'Paste the PoC code and press Enter',
+                'For mutation PoCs: set CONFIRM_AUTHORIZED_TEST=true only after explicit approval',
+                'Observe the response status in the Console output',
+            ]
+            description = 'Direct self-contained PoC - no helper installation required'
+            expected = 'Server responds with 200/201 or meaningful error; compare payload before/after.'
+        else:
+            steps = [
+                _review_page_step(page_hint),
+                'Identify the request in the browser Network tab (URL, method, payload)',
+                'Set a breakpoint in DevTools Sources at the call site',
+                f"Perform action: {_english_review_hint(action_hint, 'target action')}",
+                'Check request payload and server response status',
+            ]
+            description = 'Discovery aid - install and observe, then build direct PoC from captured data'
+            expected = 'Captured request data is visible in Console; use payload values to construct a direct PoC.'
 
         classification = self._classify_api_candidate(candidate, source_path=f.path)
-        steps = [
-            'Paste the full code into Console',
-            'Confirm the [SSS Review PoC] installed log',
-            _review_page_step(page_hint),
-            f"Perform action: {_english_review_hint(action_hint, 'target action')}",
-            'Run window.SSS_REVIEW_POC.list() to inspect captured requests',
-            'Run window.SSS_REVIEW_POC.armMutation() only if mutation testing is approved',
-            f"Repeat action: {_english_review_hint(action_hint, 'target action')}",
-            'Compare payload and server response before/after mutation',
-            'Finish with window.SSS_REVIEW_POC.disarm()',
-        ]
         return ReadableFinding(
             id=self._id(f"{f.path}:{method}:{endpoint}:{sink}:{','.join(sorted(parameters))}:{classification['vulnerability_type']}"),
             title=classification['title'],
@@ -1752,11 +1829,11 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             evidence=ev,
             console_poc=ConsoleSafePoc(
                 poc_type=poc_type,
-                description='Browser Console PoC that observes fetch/XHR/axios requests from the real UI and supports approved payload mutation verification.',
-                preconditions=['Approved test account', 'Test data or test order', 'Confirm the [SSS Review PoC] installed log in Console', 'Before mutation verification, explicitly run window.SSS_REVIEW_POC.armMutation() after approval'],
+                description=description,
+                preconditions=['Approved test account', 'Test data or test order'],
                 steps=steps,
                 code=poc_code,
-                expected_result='Captured request logs and response details identify verification points. After armMutation and repeated action, compare whether payload mutation was applied.',
+                expected_result=expected,
                 safety=safety,
             ),
             attack_scenario=['parameter manipulation'],
@@ -1765,11 +1842,12 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             remediation=classification['remediation'],
             verification_notes=notes,
             verification_playbook=_build_playbook(f, candidate=candidate, page_hint=page_hint, action_hint=action_hint, function_name=function_name),
-            poc_generation_status=('manual_plan' if (endpoint == 'UNKNOWN' or action_is_generic) else 'observational'),
+            poc_generation_status=poc_gen_status,
             poc_generation_reason=(
                 'endpoint unknown' if endpoint == 'UNKNOWN'
                 else 'Not a runnable proof yet: user action could not be resolved' if action_is_generic
-                else 'endpoint/method available; observational PoC assigned by orchestrator'
+                else 'direct CONFIRM-guarded replay PoC' if is_direct_poc
+                else 'endpoint/method available; interceptor discovery aid assigned'
             ),
             observational_poc=None,
             manual_poc_plan=(_build_manual_poc_plan(f.path, function_name, endpoint, method) if (endpoint == 'UNKNOWN' or action_is_generic) else []),
@@ -1876,6 +1954,50 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
         return out
 
 
+def _build_playbook_poc(
+    vuln_type: str,
+    method: str,
+    endpoint: str,
+    parameters: list[str],
+) -> str:
+    """
+    Return the shortest self-contained PoC code suitable for the playbook
+    console_code field.
+
+    - DOM XSS: 1-2 line template PoC.
+    - API mutation with concrete endpoint: CONFIRM-guarded direct fetch.
+    - Fallback (dynamic/unknown endpoint): SSS_POC capture flow.
+    """
+    if vuln_type == 'DOM XSS':
+        return build_dom_xss_poc()
+
+    if vuln_type == 'Client-side Authorization Bypass':
+        return build_storage_auth_poc()
+
+    # Normalize before passing to the replay builder so base-URL prefixes and
+    # path params are handled correctly.
+    norm_ep = normalize_endpoint(endpoint) if endpoint and endpoint != 'UNKNOWN' else endpoint
+    if norm_ep and norm_ep != 'UNKNOWN':
+        primary = next(
+            (p for p in parameters
+             if p.lower() in {'amount', 'price', 'totalamount', 'usepoints', 'status', 'code', 'userid', 'orderid'}),
+            parameters[0] if parameters else '',
+        )
+        test_val: int | str = 1 if primary.lower() in {'amount', 'price', 'totalamount', 'usepoints'} else 'TEST_VALUE'
+        direct = build_request_replay_poc(method, norm_ep, primary, test_val)
+        if direct:
+            return direct
+
+    # Fallback: SSS_POC capture + find flow (requires common_console_helper).
+    return _build_short_console_verification_code(
+        endpoint=endpoint,
+        method=method,
+        page_hint='target feature page',
+        action_hint='target action',
+        parameters=parameters,
+    )
+
+
 def get_console_poc_analyzer() -> ConsolePocAnalyzer:
     backend = settings.ANALYZER_BACKEND.lower()
     if backend == 'mock':
@@ -1884,6 +2006,23 @@ def get_console_poc_analyzer() -> ConsolePocAnalyzer:
         return GeminiConsolePocAnalyzer(GeminiClient(settings.GEMINI_API_KEY, settings.GEMINI_MODEL))
     raise ValueError(f'Unsupported readable analysis backend: {settings.ANALYZER_BACKEND}')
 
+
+
+def _compute_common_helper(
+    playbooks: list,
+    review_candidates: list,
+) -> 'str | None':
+    """Return the common_console_helper only when at least one playbook or
+    observational review candidate actually needs it (i.e. references SSS_POC).
+    Otherwise return None so the UI does not show a 226-line block."""
+    for pb in playbooks:
+        code = pb.console_code or ''
+        if 'window.SSS_POC.find(' in code or any(sig in code for sig in INTERCEPTOR_SIGS):
+            return _build_common_console_helper()
+    for rc in review_candidates:
+        if rc.poc_generation_status == 'observational':
+            return _build_common_console_helper()
+    return None
 
 
 def _find_unresolved_poc_placeholders(*values: str | None) -> list[str]:
@@ -1998,11 +2137,21 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         )
         is_generic_action = _is_generic_action_hint(action_hint)
         is_generic_page = _is_generic_page_hint(page_hint)
-        unresolved_placeholders = _find_unresolved_poc_placeholders(
-            endpoint,
-            f.console_poc.code if f.console_poc else None,
-            f.observational_poc.code if f.observational_poc else None,
-        )
+        # Compute unresolved placeholders. When the finding already has a
+        # self-contained direct PoC (interceptor-free), only the PoC code
+        # matters — base-URL prefixes and REPLACE_WITH_* constants in the code
+        # are not blocking. We pass the normalized endpoint (not raw) so that
+        # {API_BASE_URL}/login is treated as /login (no placeholders).
+        _poc_code_chk = f.console_poc.code if f.console_poc else None
+        _obs_code_chk = f.observational_poc.code if f.observational_poc else None
+        if _poc_code_chk and is_interceptor_free(_poc_code_chk):
+            unresolved_placeholders = _find_unresolved_poc_placeholders(_poc_code_chk)
+        else:
+            unresolved_placeholders = _find_unresolved_poc_placeholders(
+                normalize_endpoint(endpoint),
+                _poc_code_chk,
+                _obs_code_chk,
+            )
         endpoint_norm = endpoint.lower().split('?', 1)[0].rstrip('/')
         endpoint_norm = re.sub(r'^\{api_base\}', '', endpoint_norm)
         is_session_get = method == 'GET' and (
@@ -2044,20 +2193,59 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         score += -3 if is_session_get else 0
         score += -3 if is_compressed else 0
         score += -2 if is_auto_fn else 0
+
+        # A finding with a short self-contained PoC (no global hook) can be
+        # promoted on proof quality alone, bypassing cosmetic hint gates.
+        poc_code_val = f.console_poc.code if f.console_poc else None
+        has_short_direct_poc = (
+            poc_code_val is not None
+            and len(poc_code_val.splitlines()) <= MAX_POC_LINES
+            and is_interceptor_free(poc_code_val)
+        )
+        # A self-contained PoC bypasses the placeholder/function-none gates only when:
+        #   - not compressed/library code (always excluded),
+        #   - function_name known (auto-fns excluded), not a Generic Candidate, AND
+        #   - either action hint is concrete, OR there is an explicit UI event type
+        #     (e.g. onClick from a real button) so we know a real user action exists.
+        # This lets {API_BASE_URL}/login+button reach the playbook while keeping
+        # bare functions with no button (doRequest, doLogin) in review.
+        is_confirmed_short_poc = has_short_direct_poc and not is_compressed and (
+            f.vulnerability_type in {'DOM XSS', 'Client-side Authorization Bypass'}
+            or (
+                function_name is not None
+                and not is_auto_fn
+                and not is_generic_type
+                and (
+                    not is_generic_action
+                    or (api_match is not None and api_match.ui_event_type is not None)
+                )
+            )
+        )
+
         should_review = (
-            is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
-            bool(unresolved_placeholders) or
-            is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
-            (score < PROMOTION_SCORE_THRESHOLD and not is_dom_flow) or
-            (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
+            not is_confirmed_short_poc and (
+                is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
+                bool(unresolved_placeholders) or
+                is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
+                (score < PROMOTION_SCORE_THRESHOLD and not is_dom_flow) or
+                (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
+            )
         )
         if should_review:
-            # Clear the full SSS_REVIEW_POC hook code when demoting to review candidate.
-            # Do not clear bespoke short PoC code (auth bypass, DOM XSS, etc.).
+            # Clear PoC code when demoting to review:
+            #   - full hook codes (SSS_REVIEW_POC_STATE / TARGET_ENDPOINT)
+            #   - short interceptor-free replay PoCs that have no confirmed user context
+            #     (no function name, or generic action hint with no real button)
+            #     so review candidates never appear to have "runnable" PoC.
             if f.console_poc and f.console_poc.code:
                 code = f.console_poc.code
                 is_full_hook = 'SSS_REVIEW_POC_STATE' in code or 'TARGET_ENDPOINT' in code
-                if is_full_hook:
+                is_unconfirmed_replay = (
+                    is_interceptor_free(code)
+                    and len(code.splitlines()) <= MAX_POC_LINES
+                    and (function_name is None or is_generic_action)
+                )
+                if is_full_hook or is_unconfirmed_replay:
                     f.console_poc = f.console_poc.model_copy(update={'code': None})
 
             has_snippet = bool(f.evidence and (f.evidence[0].snippet or '').strip())
@@ -2143,7 +2331,12 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     _mark_review_candidate(f)
                     review_candidates.append(f)
                     continue
-                executable_placeholders = _find_unresolved_poc_placeholders(endpoint, executable_poc.code)
+                # For short direct PoCs (DOM XSS, storage auth) the endpoint is not
+                # embedded in the code, so only check the code itself for placeholders.
+                if is_confirmed_short_poc:
+                    executable_placeholders = _find_unresolved_poc_placeholders(executable_poc.code)
+                else:
+                    executable_placeholders = _find_unresolved_poc_placeholders(endpoint, executable_poc.code)
                 if executable_placeholders:
                     f.poc_generation_status = 'manual_plan'
                     f.poc_generation_reason = f'playbook promotion blocked: unresolved placeholder(s) {", ".join(executable_placeholders)}'
@@ -2173,7 +2366,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     start_line=contract['start_line'],
                     end_line=contract['end_line'],
                     function_name=(function_name or None),
-                    endpoint=endpoint,
+                    endpoint=(normalize_endpoint(endpoint) if endpoint and endpoint != 'UNKNOWN' else endpoint),
                     method=method,
                     page_hint=page_hint,
                     user_action_hint=action_hint,
@@ -2185,11 +2378,10 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     data_flow=contract['data_flow'],
                     breakpoint_plan=contract['breakpoint_plan'],
                     poc_injection_plan=contract['poc_injection_plan'],
-                    console_code=_build_short_console_verification_code(
-                        endpoint=endpoint,
+                    console_code=_build_playbook_poc(
+                        vuln_type=f.vulnerability_type,
                         method=method,
-                        page_hint=page_hint,
-                        action_hint=action_hint,
+                        endpoint=endpoint,
                         parameters=(api_match.parameters if api_match else []),
                     ),
                     setup_steps=executable_poc.steps,
@@ -2256,7 +2448,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         finding_count=len(findings),
         findings=findings,
         analyzed_focus=['authorization', 'storage manipulation', 'dom xss', 'client-side validation bypass', 'api call tampering'],
-        common_console_helper=_build_common_console_helper(),
+        common_console_helper=_compute_common_helper(verification_playbooks, review_candidates),
         executive_findings=executive_findings,
         verification_playbooks=verification_playbooks,
         review_candidates=review_candidates,

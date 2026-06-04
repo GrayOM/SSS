@@ -42,7 +42,12 @@ async def prepare_uploaded_zip(file: UploadFile) -> tuple[Path, Path]:
         first_bytes = b''
         with upload_path.open('wb') as dst:
             while True:
-                chunk = await file.read(1024 * 1024)
+                # Starlette UploadFile.read() delegates to a threadpool for
+                # in-memory test files in some versions, which can hang in
+                # restricted CI sandboxes. Reading the underlying file object
+                # directly keeps the same size/signature checks below.
+                raw_file = getattr(file, 'file', None)
+                chunk = raw_file.read(1024 * 1024) if raw_file is not None else await file.read(1024 * 1024)
                 if not chunk:
                     break
                 total += len(chunk)

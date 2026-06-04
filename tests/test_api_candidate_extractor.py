@@ -146,6 +146,21 @@ axios.post("/api/pay", fd);
         self.assertIn('/v1/order', endpoints)
         self.assertIn('/api/user/session', endpoints)
 
+    def test_base_url_only_endpoint_patterns_normalize_to_paths(self):
+        content = """
+axios.post('{API_BASE_URL}/login', { email });
+axios.post(`${API_BASE_URL}/admin/add-numbers`, { a, b });
+axios.post(API_BASE_URL + "/generate-lotto", {});
+axios.create({ baseURL: API_BASE_URL }).post("/login", { email, password });
+"""
+        candidates = extract_api_call_candidates([fc(content)]).candidates
+        endpoints = [c.endpoint for c in candidates]
+        self.assertIn('/login', endpoints)
+        self.assertIn('/admin/add-numbers', endpoints)
+        self.assertIn('/generate-lotto', endpoints)
+        self.assertNotIn('{API_BASE_URL}/login', endpoints)
+        self.assertTrue(any(c.sink == 'axios.create.post' and c.endpoint == '/login' for c in candidates))
+
     def test_template_expression_not_parameter_noise(self):
         content = "axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, { amount })"
         cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
@@ -178,11 +193,11 @@ axios.post("/api/pay", fd);
         cand = extract_api_call_candidates([fc(content)]).candidates[0]
         self.assertNotIn('winnerData', cand.parameters)
 
-    def test_template_api_base_has_manual_review_note(self):
+    def test_template_api_base_normalizes_to_path(self):
         content = "axios.post(`${API_BASE}/verify-code`, { code })"
         cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
-        self.assertEqual(cand.endpoint, '{API_BASE}/verify-code')
-        self.assertIn('base URL variable requires manual review', cand.notes)
+        self.assertEqual(cand.endpoint, '/verify-code')
+        self.assertNotIn('base URL variable requires manual review', cand.notes)
 
     def test_get_does_not_attach_formdata_append_but_post_keeps_it(self):
         content = """
@@ -231,7 +246,7 @@ const payload2 = { amount, orderId };
 apiClient.post('/api/pay', payload2);
 """
         cands = extract_api_call_candidates([fc(content)]).candidates
-        verify = [c for c in cands if c.endpoint == '{API_BASE}/verify-code'][0]
+        verify = [c for c in cands if c.endpoint == '/verify-code'][0]
         self.assertIn('payload', verify.parameters)
         self.assertIn('code', verify.parameters)
         self.assertIn('email', verify.parameters)

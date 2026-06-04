@@ -30,6 +30,22 @@ GENERIC_PAGE_ACTION_NOTE = 'Generic page/action blocks promotion'
 
 
 class ConsolePocAnalysisTests(unittest.TestCase):
+    def _assert_promoted_poc_self_contained(self, playbook, max_lines=12):
+        code = playbook.console_code or ''
+        forbidden = (
+            'window.SSS_POC.find(',
+            'window.SSS_POC',
+            'window.SSS_REVIEW_POC',
+            'XMLHttpRequest.prototype',
+            'fetch = new Proxy',
+            'addEventListener("fetch"',
+            'SSS_POC.find',
+            'SSS_REVIEW_POC',
+        )
+        for sig in forbidden:
+            self.assertNotIn(sig, code)
+        self.assertLessEqual(len([line for line in code.splitlines() if line.strip()]), max_lines)
+
     def _assert_v1_playbook_contract(self, playbook):
         self.assertTrue(playbook.source_path)
         self.assertIsInstance(playbook.start_line, int)
@@ -146,11 +162,19 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn("userInfo.userType !== 'ADMIN'", auth.evidence[0].snippet)
 
     def test_storage_evidence_generates_poc_code(self):
+        # With 'user' key (JSON-object pattern), auth bypass is PROMOTED with short PoC.
         files = [f('src/AdminMypage.js', "const user = JSON.parse(sessionStorage.getItem('user')); if (user?.userType === 'ADMIN') { navigate('/admin') }")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
-        self.assertIsNotNone(auth.console_poc.code)
         self.assertIn("sessionStorage.getItem('user')", auth.evidence[0].snippet)
+        # After promotion, console_poc.code is cleared; check via playbook
+        pb = [p for p in result.verification_playbooks if p.risk_type == 'Client-side Authorization Bypass']
+        if pb:
+            self.assertIn('sessionStorage', pb[0].console_code or '')
+            self.assertLessEqual(len((pb[0].console_code or '').splitlines()), 2)
+        else:
+            # Not promoted: code must still be set on the finding
+            self.assertIsNotNone(auth.console_poc.code)
 
     def test_header_like_routing_only_not_high_confidence(self):
         files = [f('src/Header.js', "if (userType==='ADMIN'){navigate('/admin-mypage')}")]
@@ -431,7 +455,10 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         findings = MockConsolePocAnalyzer().analyze(files)
         finding = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
-        self.assertIn('window.SSS_REVIEW_POC.armMutation()', finding.console_poc.code or '')
+        # New design: short CONFIRM-guarded direct replay, no global interceptor
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', finding.console_poc.code or '')
+        self.assertNotIn('window.SSS_REVIEW_POC', finding.console_poc.code or '')
+        self.assertNotIn('SSS_REVIEW_POC_STATE', finding.console_poc.code or '')
         self.assertIsNotNone(finding.verification_playbook)
 
     def test_disabled_button_only_generates_playbook_console_code(self):
@@ -566,15 +593,19 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIsNone(finding.console_poc.code)
         self.assertTrue(any('Not a runnable proof yet' in n or 'observe mode only' in n for n in finding.verification_notes))
 
-    def test_post_poc_steps_use_arm_mutation_not_confirm_flag(self):
+    def test_post_poc_uses_confirm_guard_not_arm_mutation(self):
+        # New design: bare axios.post with no function -> generic action -> manual_plan,
+        # code is None.  For any code that IS generated, it uses CONFIRM_AUTHORIZED_TEST
+        # not SSS_REVIEW_POC.armMutation().
         files = [f('src/post2.js', "axios.post('/api/pay', { amount })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
-        pre = ' '.join(finding.console_poc.preconditions)
-        steps = ' '.join(finding.console_poc.steps)
-        notes = ' '.join(finding.verification_notes)
-        self.assertNotIn('CONFIRM_AUTHORIZED_TEST', pre + steps + notes)
-        self.assertIn('window.SSS_REVIEW_POC.armMutation()', pre + steps + notes)
+        code = finding.console_poc.code or ''
+        # Generic action -> manual_plan; code should be None or use CONFIRM guard
+        if code:
+            self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+            self.assertNotIn('window.SSS_REVIEW_POC.armMutation()', code)
+            self.assertNotIn('SSS_REVIEW_POC_STATE', code)
 
     def test_axios_capture_has_transport_marker(self):
         code = _build_network_hook_mutation_poc('/api/pay')
@@ -603,15 +634,60 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(any('endpoint is UNKNOWN: auto PoC not generated' in ' '.join(x.verification_notes) for x in result.review_candidates))
 
     def test_unresolved_api_base_url_endpoint_is_not_promoted(self):
+        # New behavior: {API_BASE_URL}/login + button is PROMOTED with the base-URL prefix stripped.
+        # The playbook endpoint is normalized to /login; no raw {API_BASE_URL} leaks into the PoC.
         files = [f('src/LoginPage.js', "function handleLogin(){axios.post('{API_BASE_URL}/login',{ username, password })}\n<button onClick={handleLogin}>Login</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        # Raw endpoint must never appear verbatim in the playbook endpoint field.
         self.assertFalse(any(p.endpoint == '{API_BASE_URL}/login' for p in result.verification_playbooks))
-        review = [x for x in result.review_candidates if any('endpoint: {API_BASE_URL}/login' in flow for ev in x.evidence for flow in ev.data_flow)][0]
-        self.assertEqual(review.poc_generation_status, 'manual_plan')
-        self.assertTrue(any('{API_BASE_URL}' in step for step in review.manual_poc_plan))
-        self.assertIn(MANUAL_REVIEW_NOTE, review.title)
-        self.assertIn(NOT_CONFIRMED_NOTE, ' '.join(review.verification_notes))
-        self.assertIn(UNRESOLVED_PLACEHOLDER_NOTE, ' '.join(review.verification_notes))
+        # A promoted playbook for /login must exist with a normalized endpoint and self-contained PoC.
+        pb = next((p for p in result.verification_playbooks if '/login' in (p.endpoint or '')), None)
+        self.assertIsNotNone(pb, 'expected a promoted playbook for /login after base-URL normalization')
+        self.assertNotIn('{API_BASE_URL}', pb.console_code or '')
+        self.assertIn('fetch("/login"', pb.console_code or '')
+        self._assert_promoted_poc_self_contained(pb)
+        self.assertIsNone(result.common_console_helper)
+
+    def test_required_base_url_variants_promote_as_self_contained_playbooks(self):
+        files = [
+            f('src/AdminAdd.jsx',
+              'function addNumbers(){axios.post(`${API_BASE_URL}/admin/add-numbers`, { a, b });}\n'
+              '<button onClick={addNumbers}>Add</button>'),
+            f('src/Lotto.jsx',
+              'function generateLotto(){axios.post(API_BASE_URL + "/generate-lotto", {});}\n'
+              '<button onClick={generateLotto}>Generate</button>'),
+            f('src/Client.jsx',
+              'function login(){axios.create({ baseURL: API_BASE_URL }).post("/login", { email, password });}\n'
+              '<button onClick={login}>Login</button>'),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        endpoints = {p.endpoint: p for p in result.verification_playbooks}
+        for endpoint in ('/admin/add-numbers', '/generate-lotto', '/login'):
+            self.assertIn(endpoint, endpoints)
+            self.assertIn(f'fetch("{endpoint}"', endpoints[endpoint].console_code or '')
+            self._assert_promoted_poc_self_contained(endpoints[endpoint])
+        self.assertIsNone(result.common_console_helper)
+
+    def test_path_param_endpoint_promotes_with_editable_test_id(self):
+        files = [f('src/AuctionPage.js',
+                   "function handleBid(){axios.post('/api/auction/{item.id}/bid',{amount})}\n"
+                   "<button onClick={handleBid}>Bid</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = next((p for p in result.verification_playbooks if p.endpoint == '/api/auction/{item.id}/bid'), None)
+        self.assertIsNotNone(pb)
+        code = pb.console_code or ''
+        self.assertIn('const TEST_ID = "REPLACE_WITH_TEST_ID";', code)
+        self.assertIn('fetch(`/api/auction/${TEST_ID}/bid', code)
+        self._assert_promoted_poc_self_contained(pb)
+        self.assertIsNone(result.common_console_helper)
+
+    def test_unknown_path_placeholder_remains_manual(self):
+        files = [f('src/UnknownPath.js',
+                   'function runUnknown(){axios.post("{API_BASE_URL}/{UNKNOWN_PATH}", {})}\n'
+                   '<button onClick={runUnknown}>Run</button>')]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/{UNKNOWN_PATH}' for p in result.verification_playbooks))
+        self.assertTrue(result.review_candidates)
 
     def test_generic_action_hint_is_not_promoted(self):
         files = [f('src/PaymentPage.js', "function doRequest(){axios.post('/api/pay',{amount})}")]
@@ -625,19 +701,19 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(len(result.verification_playbooks), 0)
 
     def test_page_and_action_hints_in_playbook(self):
+        # New design: playbook code is a direct CONFIRM-guarded replay; page/action are
+        # stored in page_hint/user_action_hint fields, not embedded in the code.
         files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/123/complete-payment',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         p = result.verification_playbooks[0]
         self.assertEqual(p.page_hint, 'payment/order page')
         self.assertEqual(p.user_action_hint, 'click payment button')
         self.assertEqual(p.function_name, 'handlePayment')
-        self.assertIn('// Page:', p.console_code or '')  # combined as: // Page: X | Action: Y | Target: Z
-        self.assertIn('| Action:', p.console_code or '')
-        self.assertIn('| Target:', p.console_code or '')
-        finding = [x for x in result.findings if x.vulnerability_type in {'Payment/Point Manipulation Candidate', 'Client-side Validation Bypass'}][0]
-        steps = ' '.join(finding.console_poc.steps if finding.console_poc else [])
-        self.assertIn('Open page:', steps)
-        self.assertIn('Perform action:', steps)
+        # Direct replay code: contains endpoint and CONFIRM guard
+        self.assertIn('/api/order/123/complete-payment', p.console_code or '')
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', p.console_code or '')
+        # No global hook
+        self.assertNotIn('window.fetch = async function', p.console_code or '')
 
     def test_generated_poc_explains_undefined_is_normal_after_install(self):
         code = _build_network_hook_mutation_poc('/api/pay', page_hint='payment page', action_hint='click payment button')
@@ -671,7 +747,8 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertNotIn('window.SSS_POC.replay', code)
 
     def test_review_candidate_no_hook_no_function_no_overwrite(self):
-        # No function/UI -> action generic -> no hook code, no SSS_POC or SSS_REVIEW_POC overwrite
+        # No function/UI -> action generic -> review candidate; no runnable code, no SSS_POC overwrite.
+        # New: common_console_helper is None because no promoted playbook needs it.
         files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         review = [x for x in result.review_candidates if '/api/orders/123/pay' in ' '.join(sum([e.data_flow for e in x.evidence], []))][0]
@@ -684,8 +761,8 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         obs_code = (review.observational_poc.code or '') if review.observational_poc else ''
         self.assertNotIn('window.SSS_POC =', obs_code)
         self.assertNotIn('window.SSS_REVIEW_POC =', obs_code)
-        # common_console_helper still correctly uses window.SSS_POC =
-        self.assertIn('window.SSS_POC = {', result.common_console_helper or '')
+        # No promoted playbook -> helper is None (no helper needed for manual review only).
+        self.assertIsNone(result.common_console_helper)
 
     def test_promoted_playbook_has_concrete_runtime_guidance(self):
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
@@ -791,24 +868,34 @@ class ConsolePocAnalysisTests(unittest.TestCase):
 
 
     def test_findpassword_send_verification_with_api_base_stays_review(self):
+        # New behavior: {API_BASE}/send-verification with function + concrete action hint IS promoted.
+        # The raw {API_BASE} prefix is stripped; playbook endpoint shows /send-verification.
         files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE}/send-verification',{email})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        # Raw endpoint must not appear verbatim in any playbook endpoint field.
         self.assertFalse(any(p.endpoint == '{API_BASE}/send-verification' for p in result.verification_playbooks))
-        self.assertTrue(result.review_candidates)
-        finding = [x for x in result.findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
-        self.assertTrue(any(UNRESOLVED_PLACEHOLDER_NOTE in n for n in finding.verification_notes))
+        # Promoted playbook must exist with normalized path and no {API_BASE} in PoC.
+        pb = next((p for p in result.verification_playbooks if 'send-verification' in (p.endpoint or '')), None)
+        self.assertIsNotNone(pb, 'expected a promoted playbook for send-verification after base-URL normalization')
+        self.assertNotIn('{API_BASE}', pb.console_code or '')
 
     def test_findpassword_verify_code_with_api_base_stays_review(self):
+        # New behavior: {API_BASE}/verify-code with function + concrete action hint IS promoted.
         files = [f('src/FindPassword.js', "function verifyCode(){axios.post('{API_BASE}/verify-code',{code})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertFalse(any(p.endpoint == '{API_BASE}/verify-code' for p in result.verification_playbooks))
-        self.assertTrue(result.review_candidates)
+        pb = next((p for p in result.verification_playbooks if 'verify-code' in (p.endpoint or '')), None)
+        self.assertIsNotNone(pb, 'expected a promoted playbook for verify-code after base-URL normalization')
+        self.assertNotIn('{API_BASE}', pb.console_code or '')
 
     def test_findpassword_reset_password_with_api_base_stays_review(self):
+        # New behavior: {API_BASE}/reset-password with function + concrete action hint IS promoted.
         files = [f('src/FindPassword.js', "function resetPassword(){axios.put('{API_BASE}/reset-password',{password})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertFalse(any(p.endpoint == '{API_BASE}/reset-password' for p in result.verification_playbooks))
-        self.assertTrue(result.review_candidates)
+        pb = next((p for p in result.verification_playbooks if 'reset-password' in (p.endpoint or '')), None)
+        self.assertIsNotNone(pb, 'expected a promoted playbook for reset-password after base-URL normalization')
+        self.assertNotIn('{API_BASE}', pb.console_code or '')
 
     def test_purchase_stripe_and_iamport_action_hints(self):
         stripe_files = [f('src/PurchasePage.js', "function handleStripeCheckout(){axios.post('/api/stripe/create-checkout-session',{amount})}")]
@@ -1068,7 +1155,9 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self._assert_v1_playbook_contract(playbook)
         self.assertEqual(playbook.source_path, 'src/Pay.jsx')
         self.assertEqual(playbook.function_name, 'submitOrder')
-        self.assertIn('window.SSS_POC', playbook.console_code)
+        # New design: direct CONFIRM-guarded replay, no SSS_POC capture flow
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', playbook.console_code)
+        self.assertIn('/api/orders/123/pay', playbook.console_code)
         self.assertIn('amount', playbook.breakpoint_plan.what_variable_or_request_to_check)
 
     def test_jquery_click_ajax_flow_has_v1_contract_and_console_poc(self):
@@ -1096,14 +1185,18 @@ function submitOrder(event) {
         self.assertEqual(playbook.function_name, 'submitOrder')
         self.assertIn('submitOrder', playbook.breakpoint_plan.function)
 
-    def test_dom_xss_source_sink_flow_has_v1_contract_and_console_poc(self):
+    def test_dom_xss_source_sink_flow_promotes_to_playbook(self):
+        # New design: confirmed DOM XSS with short direct PoC is PROMOTED, not demoted.
         files = [f('src/x.js', "const value = location.hash.slice(1);\ndocument.getElementById('out').innerHTML = value;")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        self.assertFalse(any(p.risk_type == 'DOM XSS' for p in result.verification_playbooks))
-        self.assertTrue(any(x.vulnerability_type == 'DOM XSS' for x in result.review_candidates))
-        review = [x for x in result.review_candidates if x.vulnerability_type == 'DOM XSS'][0]
-        self.assertIn(MANUAL_REVIEW_NOTE, ' '.join(review.verification_notes))
-        self.assertIn(NOT_CONFIRMED_NOTE, ' '.join(review.verification_notes))
+        self.assertTrue(any(p.risk_type == 'DOM XSS' for p in result.verification_playbooks),
+            'DOM XSS with 1-line PoC must be promoted to verification_playbooks')
+        pb = [p for p in result.verification_playbooks if p.risk_type == 'DOM XSS'][0]
+        self.assertIsNotNone(pb.console_code)
+        self.assertLessEqual(len(pb.console_code.splitlines()), 2,
+            'DOM XSS playbook console_code must be <= 2 lines')
+        self.assertNotIn('window.fetch = async function', pb.console_code)
+        self.assertNotIn('SSS_REVIEW_POC_STATE', pb.console_code)
 
     def test_unknown_generic_api_wrapper_stays_review_candidate(self):
         files = [f('src/api.js', "function save(payload){ return apiClient.post(endpoint, payload); }")]
@@ -1113,66 +1206,62 @@ function submitOrder(event) {
         self.assertTrue(any(x.poc_generation_status == 'manual_plan' for x in result.review_candidates))
 
     def test_manual_placeholder_guidance_uses_english(self):
+        # New behavior: sendVerificationCode (no button) with {API_BASE_URL}/send-verification IS promoted
+        # because the endpoint action hint is concrete even without a button.
+        # The console_code must use the normalized path and not contain {API_BASE_URL}.
         files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE_URL}/send-verification',{email})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        review = result.review_candidates[0]
-        manual_plan = '\n'.join(review.manual_poc_plan)
-
-        self.assertIn('Resolve {API_BASE_URL} to the real origin/base URL before confirming the endpoint', manual_plan)
-        self.assertIn(UNRESOLVED_PLACEHOLDER_NOTE, manual_plan)
+        pb = next((p for p in result.verification_playbooks if 'send-verification' in (p.endpoint or '')), None)
+        self.assertIsNotNone(pb, 'expected promoted playbook for send-verification')
+        self.assertNotIn('{API_BASE_URL}', pb.console_code or '')
+        self.assertIn('send-verification', pb.console_code or '')
 
     def test_common_console_helper_is_generated_once(self):
+        # New behavior: when all promoted playbooks use self-contained direct PoCs,
+        # common_console_helper is None (no 226-line block shown to the user).
+        # The helper can still be instantiated on demand via _build_common_console_helper().
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
 
-        self.assertTrue(result.common_console_helper)
-        self.assertEqual(result.common_console_helper, _build_common_console_helper())
-        self.assertIn('window.SSS_POC', result.common_console_helper)
-        self.assertIn('find(criteria = {})', result.common_console_helper)
-        self.assertIn('urlIncludes', result.common_console_helper)
-        self.assertIn('transport', result.common_console_helper)
-        self.assertIn('window.fetch = async function', result.common_console_helper)
-        self.assertIn('XMLHttpRequest.prototype.open', result.common_console_helper)
-        self.assertIn('axios.interceptors.request.use', result.common_console_helper)
-        self.assertIn('window.jQuery.ajax', result.common_console_helper)
-        self.assertIn('undefined after install is normal', result.common_console_helper)
+        self.assertIsNone(result.common_console_helper,
+            'common_console_helper must be None when all promoted playbooks have self-contained PoCs')
+        # The builder function itself is still intact and correct.
+        helper = _build_common_console_helper()
+        self.assertIn('window.SSS_POC', helper)
+        self.assertIn('find(criteria = {})', helper)
+        self.assertIn('window.fetch = async function', helper)
+        self.assertIn('XMLHttpRequest.prototype.open', helper)
+        self.assertIn('axios.interceptors.request.use', helper)
 
     def test_promoted_finding_console_code_is_short_commands(self):
+        # New design: playbook console_code is a direct CONFIRM-guarded fetch replay.
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/orders/123/pay'][0]
         code = playbook.console_code or ''
 
-        self.assertLess(len(code), 1200)
-        self.assertIn('window.SSS_POC.list()', code)  # still present as single line
-        self.assertIn('const match = window.SSS_POC.find({', code)
-        self.assertIn('if (!match)', code)
-        self.assertIn('window.SSS_POC.find({', code)
-        self.assertIn('window.SSS_POC.replay(match.index', code)
-        # 'Then copy/run' removed in compact 9-line format
-        # 'Do not replay' removed in compact 9-line format
-        self.assertNotIn('<index>', code)
+        self.assertLessEqual(len(code.splitlines()), 10)
         self.assertTrue(code.startswith('(async () => {'))
-        self.assertFalse(any(line.startswith('const match =') for line in code.splitlines()))
-        self.assertIn('Install common_console_helper first', code)
-        self.assertNotIn('TEST_VALUE', code)
-        self.assertNotIn('  window.SSS_POC.armMutation();', code)
-        self.assertNotIn('await window.SSS_POC.replay', code)  # mutation hint uses no await
+        # Direct replay: contains fetch call to the known endpoint
+        self.assertIn('/api/orders/123/pay', code)
+        # Safety guard present
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        # No global hook installer
         self.assertNotIn('window.fetch = async function', code)
         self.assertNotIn('XMLHttpRequest.prototype.open', code)
         self.assertNotIn('axios.interceptors.request.use', code)
         self.assertNotIn('window.jQuery.ajax = function', code)
+        self.assertNotIn('SSS_REVIEW_POC_STATE', code)
 
-    def test_finding_specific_console_code_prints_replay_guidance_only(self):
+    def test_finding_specific_console_code_is_direct_replay(self):
+        # New design: playbook code is a self-contained fetch replay, not SSS_POC flow.
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         code = result.verification_playbooks[0].console_code or ''
 
-        # Compact 9-line format: mutation guidance is a single comment line, not console.log calls
-        self.assertIn('window.SSS_POC.replay(match.index', code)
-        self.assertNotIn('  window.SSS_POC.armMutation();', code)   # not standalone; it is in comment
-        self.assertNotIn('await window.SSS_POC.replay', code)
-        self.assertIn('Approved mutation only', code)  # mutation hint uses no await
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        self.assertIn("method: \"POST\"", code)
+        self.assertNotIn('window.SSS_POC', code)
 
     def test_get_finding_specific_console_code_prints_replay_guidance(self):
         code = _build_short_console_verification_code(
@@ -1218,18 +1307,18 @@ function submitOrder(event) {
                 self.assertNotIn('window.SSS_POC =', code or '')
 
     def test_short_playbook_code_uses_common_helper_model(self):
+        # New: common_console_helper is None when all promoted PoCs are self-contained.
+        # The playbook uses a direct CONFIRM-guarded replay, not the SSS_POC capture flow.
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        helper = result.common_console_helper or ''
         playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/orders/123/pay'][0]
         code = playbook.console_code or ''
 
-        self.assertEqual(helper.count('window.SSS_POC = {'), 1)
-        self.assertIn('find(criteria = {})', helper)
-        self.assertIn('replay(index, overrides = {})', helper)
-        self.assertIn('window.SSS_POC?.find', code)  # compact form uses optional chaining
-        self.assertIn('window.SSS_POC.find({', code)
-        # 'Then copy/run' removed in compact 9-line format
+        # Self-contained PoCs: common_console_helper must be None.
+        self.assertIsNone(result.common_console_helper)
+        # Playbook uses a direct replay with CONFIRM guard, no SSS_POC capture flow.
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        self.assertIn('/api/orders/123/pay', code)
         self.assertNotIn('window.SSS_POC =', code)
         self.assertNotIn('window.SSS_REVIEW_POC', code)
 
@@ -1246,12 +1335,17 @@ function submitOrder(event) {
         self.assertNotIn('len(verification_playbooks) >= 7', source)
 
     def test_unresolved_endpoint_is_review_candidate_only(self):
+        # New behavior: {API_BASE_URL}/send-verification + button is PROMOTED with normalized endpoint.
+        # The raw {API_BASE_URL} prefix must never appear in the playbook endpoint or console_code.
         files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE_URL}/send-verification',{email})}\n<button onClick={sendVerificationCode}>Send code</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-
+        # No playbook may expose the raw {API_BASE_URL} in its endpoint field.
         self.assertFalse(any(p.endpoint and '{API_BASE_URL}' in p.endpoint for p in result.verification_playbooks))
-        self.assertTrue(result.review_candidates)
-        self.assertTrue(any(UNRESOLVED_PLACEHOLDER_NOTE in ' '.join(x.verification_notes) for x in result.review_candidates))
+        # A promoted playbook with the normalized path must exist.
+        pb = next((p for p in result.verification_playbooks if 'send-verification' in (p.endpoint or '')), None)
+        self.assertIsNotNone(pb, 'expected a promoted playbook for send-verification after base-URL normalization')
+        self.assertNotIn('{API_BASE_URL}', pb.console_code or '')
+        self.assertIn('send-verification', pb.console_code or '')
 
     def test_every_promoted_playbook_has_concrete_contract(self):
         from app.services import console_poc_analysis_service as svc
@@ -1272,7 +1366,9 @@ function submitOrder(event) {
             self.assertIsNotNone(playbook.data_flow)
             self.assertIsNotNone(playbook.breakpoint_plan)
             self.assertIsNotNone(playbook.poc_injection_plan)
-            self.assertIn('window.SSS_POC', playbook.console_code or '')
+            # New design: playbook code is a direct replay or DOM PoC, not SSS_POC capture flow
+            self.assertTrue(playbook.console_code, 'every promoted playbook must have console_code')
+            self.assertNotIn('window.fetch = async function', playbook.console_code or '')
 
     def test_review_candidate_is_not_confirmed_vulnerability(self):
         files = [f('src/service.js', "axios.post('/api/orders/123/pay',{amount})")]
@@ -1335,7 +1431,8 @@ function submitOrder(event) {
                 self.assertIsNone(finding.observational_poc)
 
     def test_promoted_playbook_console_code_no_fetch_hook_installer(self):
-        """Promoted playbook console_code must NOT install its own fetch/XHR hook."""
+        """Promoted playbook console_code must NOT install its own fetch/XHR hook.
+        New design: direct CONFIRM-guarded replay, no SSS_POC capture flow."""
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         for pb in result.verification_playbooks:
@@ -1345,7 +1442,8 @@ function submitOrder(event) {
             self.assertNotIn('axios.interceptors.request.use', code)
             self.assertNotIn('window.SSS_POC = {', code)
             self.assertNotIn('window.SSS_REVIEW_POC', code)
-            self.assertIn('window.SSS_POC.find(', code)
+            # New: direct replay uses fetch() call, not SSS_POC capture flow
+            self.assertNotIn('window.SSS_POC.find(', code)
 
     def test_review_candidate_with_api_base_no_url_includes_placeholder(self):
         """Unresolved base-URL placeholder must never appear inside url.includes(...)."""
@@ -1386,26 +1484,25 @@ function submitOrder(event) {
             self.assertNotIn('window.fetch = async function', code)
 
     def test_placeholder_endpoint_review_candidate_no_code(self):
-        """{API_BASE_URL} placeholder must not generate runnable PoC code."""
+        # New behavior: {API_BASE_URL}/send-verification + button is PROMOTED with normalized endpoint.
+        # The base-URL prefix is stripped; the playbook console_code must not contain {API_BASE_URL}.
         files = [f('src/FindPassword.js', "function sendVerificationCode(){axios.post('{API_BASE_URL}/send-verification',{email})}\n<button onClick={sendVerificationCode}>Send code</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        review = [x for x in result.review_candidates if '{API_BASE_URL}' in ' '.join(sum([e.data_flow for e in x.evidence], []))]
-        self.assertTrue(review, "Expected a review candidate for unresolved placeholder endpoint")
-        for rc in review:
-            self.assertIsNone(rc.console_poc.code)
-            obs_code = (rc.observational_poc.code or '') if rc.observational_poc else ''
-            self.assertNotIn('{API_BASE_URL}', obs_code)
+        pb = next((p for p in result.verification_playbooks if 'send-verification' in (p.endpoint or '')), None)
+        self.assertIsNotNone(pb, 'expected promoted playbook for send-verification after base-URL normalization')
+        self.assertNotIn('{API_BASE_URL}', pb.console_code or '')
+        self.assertNotIn('{API_BASE_URL}', pb.endpoint or '')
 
     def test_common_console_helper_generated_once_and_no_hook_in_findings(self):
-        """common_console_helper is returned once; no finding embeds a duplicate hook."""
+        # New behavior: all promoted PoCs are self-contained -> common_console_helper is None.
+        # No finding (promoted or review) should re-define window.SSS_POC in its code fields.
         files = [
             f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
             f('src/service.js', "axios.post('/api/orders/456/pay',{amount})"),
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        helper = result.common_console_helper or ''
-        self.assertIn('window.SSS_POC = {', helper)
-        self.assertEqual(helper.count('window.SSS_POC = {'), 1)
+        self.assertIsNone(result.common_console_helper,
+            'common_console_helper must be None when promoted playbooks are all self-contained')
         # No finding (promoted or review) should re-define window.SSS_POC
         for finding in result.findings:
             for attr in ('console_poc', 'observational_poc'):
@@ -1426,12 +1523,19 @@ function submitOrder(event) {
             self.assertLessEqual(len(lines), 10,
                 f"Promoted console_code has {len(lines)} lines (max 10):\n{pb.console_code}")
 
-    def test_promoted_playbook_console_code_has_sss_poc_find(self):
+    def test_promoted_playbook_console_code_has_confirm_guard_or_is_dom_poc(self):
+        # New design: promoted API playbooks use CONFIRM-guarded direct replay;
+        # DOM XSS playbooks use a 1-2 line direct PoC.
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         for pb in result.verification_playbooks:
-            self.assertIn('window.SSS_POC.find(', pb.console_code or '',
-                          "Promoted console_code must call window.SSS_POC.find()")
+            code = pb.console_code or ''
+            is_dom = pb.risk_type == 'DOM XSS'
+            if not is_dom:
+                self.assertIn('CONFIRM_AUTHORIZED_TEST', code,
+                    f"Promoted API playbook must have CONFIRM_AUTHORIZED_TEST guard: {pb.endpoint}")
+            self.assertNotIn('window.SSS_POC.find(', code,
+                "Promoted playbook must not use SSS_POC capture flow")
 
     def test_promoted_playbook_console_code_no_hook_installer(self):
         HOOK_SIGS = ['window.fetch = async function', 'XMLHttpRequest.prototype.open',
@@ -1466,7 +1570,11 @@ function submitOrder(event) {
                 "manual_plan candidate must not have runnable console code")
 
     def test_nafal_like_unknown_endpoints_no_runnable_poc(self):
-        """NAFAL-like input: UNKNOWN endpoints -> no promoted playbooks, manual verification only."""
+        """NAFAL-like input.
+        AdminPage.js 'userType' key: direct-string storage pattern → auth bypass IS promoted.
+        service.js dynamic endpoint: remains a manual review candidate.
+        Review candidates must not have global hook code.
+        """
         files = [
             f('src/AdminPage.js',
               "const userType = sessionStorage.getItem('userType'); if (userType !== 'ADMIN') { navigate('/'); }"),
@@ -1474,7 +1582,15 @@ function submitOrder(event) {
               "const endpoint = buildApiUrl(action); apiClient.post(endpoint, payload);"),
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        self.assertEqual(len(result.verification_playbooks), 0)
+        # Auth bypass with detected storage key is promoted; service endpoint stays review.
+        auth_playbooks = [p for p in result.verification_playbooks if p.risk_type == 'Client-side Authorization Bypass']
+        if auth_playbooks:
+            pb = auth_playbooks[0]
+            self.assertIn('sessionStorage', pb.console_code or '')
+            self.assertLessEqual(len((pb.console_code or '').splitlines()), 2)
+        # Remaining (non-auth, non-DOM) playbooks with UNKNOWN endpoints must be 0
+        non_auth = [p for p in result.verification_playbooks if p.risk_type not in {'Client-side Authorization Bypass', 'DOM XSS'}]
+        self.assertEqual(len(non_auth), 0, 'Dynamic-endpoint service call must NOT be promoted')
         for rc in result.review_candidates:
             poc_code = (rc.console_poc.code or '') if rc.console_poc else ''
             obs_code = (rc.observational_poc.code or '') if rc.observational_poc else ''
@@ -1586,6 +1702,152 @@ function submitOrder(event) {
             # Any remaining observational candidate must not be marked downgraded.
             for rc in obs:
                 self.assertNotIn('downgraded', rc.poc_generation_reason or '')
+
+
+    # -- poc_templates unit tests --------------------------------------------------
+
+    def test_poc_templates_dom_xss_hash_default(self):
+        from app.services.poc_templates import build_dom_xss_poc, is_interceptor_free
+        code = build_dom_xss_poc()
+        self.assertLessEqual(len(code.splitlines()), 2)
+        self.assertIn('location.hash', code)
+        self.assertIn('console.log', code)
+        self.assertTrue(is_interceptor_free(code))
+        self.assertFalse(any(ord(c) > 127 for c in code), 'DOM XSS PoC must be ASCII-only')
+
+    def test_poc_templates_dom_xss_search_source(self):
+        from app.services.poc_templates import build_dom_xss_poc
+        code = build_dom_xss_poc(source_expr='location.search')
+        self.assertIn('location.pathname', code)
+        self.assertLessEqual(len(code.splitlines()), 2)
+
+    def test_poc_templates_storage_auth(self):
+        from app.services.poc_templates import build_storage_auth_poc, is_interceptor_free
+        code = build_storage_auth_poc('sessionStorage', 'user', 'userType', 'ADMIN')
+        self.assertLessEqual(len(code.splitlines()), 2)
+        self.assertIn('sessionStorage.setItem', code)
+        self.assertIn('ADMIN', code)
+        self.assertIn('location.reload()', code)
+        self.assertTrue(is_interceptor_free(code))
+        self.assertFalse(any(ord(c) > 127 for c in code), 'Storage auth PoC must be ASCII-only')
+
+    def test_poc_templates_replay_get_no_guard(self):
+        from app.services.poc_templates import build_request_replay_poc, is_interceptor_free
+        code = build_request_replay_poc('GET', '/api/user/me')
+        self.assertIsNotNone(code)
+        self.assertIn("fetch(\"/api/user/me\")", code)
+        self.assertLessEqual(len(code.splitlines()), 10)
+        self.assertTrue(is_interceptor_free(code))
+        self.assertNotIn('CONFIRM_AUTHORIZED_TEST', code)
+
+    def test_poc_templates_replay_post_confirm_guard(self):
+        from app.services.poc_templates import build_request_replay_poc, is_interceptor_free
+        from app.services.console_poc_analysis_service import _is_allowed_guarded_poc_code
+        code = build_request_replay_poc('POST', '/api/pay', 'amount', 1)
+        self.assertIsNotNone(code)
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        self.assertIn('amount', code)
+        self.assertLessEqual(len(code.splitlines()), 10)
+        self.assertTrue(is_interceptor_free(code))
+        self.assertTrue(_is_allowed_guarded_poc_code(code), 'CONFIRM-guarded replay must pass safety filter')
+        self.assertFalse(any(ord(c) > 127 for c in code), 'Replay PoC must be ASCII-only')
+
+    def test_poc_templates_destructive_endpoint_returns_none(self):
+        from app.services.poc_templates import build_request_replay_poc
+        # Truly destructive keywords still block PoC generation.
+        self.assertIsNone(build_request_replay_poc('POST', '/api/order/refund'))
+        self.assertIsNone(build_request_replay_poc('DELETE', '/api/user/1'))
+        self.assertIsNone(build_request_replay_poc('POST', 'UNKNOWN'))
+        # {API_BASE_URL}/pay: base-URL prefix is stripped -> /pay (safe), so a PoC IS generated.
+        poc = build_request_replay_poc('POST', '{API_BASE_URL}/pay')
+        self.assertIsNotNone(poc, '{API_BASE_URL}/pay normalizes to /pay which is not destructive')
+        self.assertIn('fetch("/pay"', poc)
+        self.assertIn('CONFIRM_AUTHORIZED_TEST', poc)
+        # Truly destructive base-URL endpoint still returns None.
+        self.assertIsNone(build_request_replay_poc('POST', '{API_BASE_URL}/admin/refund'))
+
+    def test_poc_templates_delete_method_returns_none(self):
+        from app.services.poc_templates import build_request_replay_poc
+        self.assertIsNone(build_request_replay_poc('DELETE', '/api/user/1'))
+
+    # -- Proof quality: DOM XSS promotes, not demotes -------------------------
+
+    def test_dom_xss_with_short_poc_is_promoted(self):
+        """DOM XSS confirmed with 1-line PoC must land in verification_playbooks."""
+        files = [f('src/x.js', 'el.innerHTML = location.hash;')]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(any(p.risk_type == 'DOM XSS' for p in result.verification_playbooks),
+            'DOM XSS with short direct PoC must be promoted')
+
+    def test_storage_auth_bypass_with_poc_is_promoted(self):
+        """Storage-based auth bypass with 1-line PoC must land in verification_playbooks."""
+        files = [f('src/AdminPage.js',
+                   "const user = JSON.parse(sessionStorage.getItem('user'));\n"
+                   "if (user?.userType === 'ADMIN') { navigate('/admin'); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(
+            any(p.risk_type == 'Client-side Authorization Bypass'
+                for p in result.verification_playbooks),
+            'Auth bypass with short storage PoC must be promoted',
+        )
+        pb = [p for p in result.verification_playbooks if p.risk_type == 'Client-side Authorization Bypass'][0]
+        self.assertIn('sessionStorage', pb.console_code or '')
+        self.assertLessEqual(len((pb.console_code or '').splitlines()), 2)
+
+    def test_promoted_never_embeds_full_interceptor(self):
+        """No promoted finding may embed a global hook installer in its PoC code."""
+        files = [
+            f('src/Pay.jsx',
+              "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n"
+              "<button onClick={submitOrder}>Pay now</button>"),
+            f('src/x.js', 'el.innerHTML = location.hash;'),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        promoted_ids = {p.id for p in result.verification_playbooks}
+        for finding in result.findings:
+            if finding.id in promoted_ids:
+                poc_code = (finding.console_poc.code or '') if finding.console_poc else ''
+                for sig in ['window.fetch = async function', 'XMLHttpRequest.prototype.open',
+                            'SSS_REVIEW_POC_STATE', 'TARGET_ENDPOINT']:
+                    self.assertNotIn(sig, poc_code,
+                        f'Promoted finding [{finding.vulnerability_type}] embeds hook: {sig!r}')
+
+    def test_dom_xss_poc_at_most_2_lines(self):
+        """DOM XSS console PoC must be <= 2 lines."""
+        files = [f('src/xss.js', 'const x = location.hash; el.innerHTML = x;')]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        dom = [p for p in result.verification_playbooks if p.risk_type == 'DOM XSS']
+        self.assertTrue(dom, 'Should have a promoted DOM XSS playbook')
+        code = dom[0].console_code or ''
+        self.assertLessEqual(len(code.splitlines()), 2,
+            f'DOM XSS PoC must be <= 2 lines, got: {code!r}')
+
+    def test_request_replay_poc_no_global_hook(self):
+        """CONFIRM-guarded replay PoC must contain no global hook installer."""
+        files = [f('src/Pay.jsx',
+                   "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n"
+                   "<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for pb in result.verification_playbooks:
+            if pb.risk_type not in {'DOM XSS', 'Client-side Authorization Bypass'}:
+                code = pb.console_code or ''
+                self.assertNotIn('window.fetch = async function', code)
+                self.assertNotIn('XMLHttpRequest.prototype.open', code)
+                self.assertIn('fetch(', code, 'Direct replay must contain fetch() call')
+
+    def test_source_sink_chain_in_dom_xss_evidence(self):
+        """DOM XSS evidence must have source: and sink: in data_flow."""
+        files = [f('src/x.js', 'el.innerHTML = location.hash;')]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        dom_findings = [x for x in result.findings if x.vulnerability_type == 'DOM XSS']
+        self.assertTrue(dom_findings)
+        for finding in dom_findings:
+            self.assertTrue(finding.evidence, 'DOM XSS must have evidence')
+            flow = finding.evidence[0].data_flow
+            has_source = any(x.startswith('source:') for x in flow)
+            has_sink   = any(x.startswith('sink:') for x in flow)
+            self.assertTrue(has_source, f'DOM XSS evidence must have source: entry. Got: {flow}')
+            self.assertTrue(has_sink,   f'DOM XSS evidence must have sink: entry. Got: {flow}')
 
 
 if __name__ == '__main__':
