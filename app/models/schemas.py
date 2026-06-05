@@ -412,6 +412,7 @@ class FullAnalysisResponse(BaseModel):
     readable_analysis: ReadableAnalysisResult | None = None
     analysis_debug: AiAnalysisDebug | None = None
     analysis_notes: list[str] = Field(default_factory=list)
+    runtime_traffic: 'RuntimeTrafficImportResult | None' = None
 
 
 class AnalysisRunSummary(BaseModel):
@@ -446,3 +447,67 @@ class ApiCallCandidate(BaseModel):
 class CandidateExtractionResult(BaseModel):
     total_candidates: int
     candidates: list[ApiCallCandidate] = Field(default_factory=list)
+
+
+class CapturedHttpResponse(BaseModel):
+    status_code: int | None = None
+    content_type: str | None = None
+    body_preview: str | None = None
+    redacted_headers: dict[str, str] = Field(default_factory=dict)
+
+
+class CapturedHttpRequest(BaseModel):
+    source_format: str
+    method: str
+    full_url: str
+    scheme: str | None = None
+    host: str | None = None
+    path: str
+    query_params: dict[str, list[str]] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    redacted_headers: dict[str, str] = Field(default_factory=dict)
+    cookies_present: bool = False
+    authorization_present: bool = False
+    csrf_token_present: bool = False
+    content_type: str | None = None
+    body_text: str | None = None
+    body_json: Any | None = None
+    body_form: dict[str, list[str]] = Field(default_factory=dict)
+    body_keys: list[str] = Field(default_factory=list)
+    request_index: int
+    timestamp: str | None = None
+    response: CapturedHttpResponse | None = None
+
+
+class RuntimeGeneratedPoc(BaseModel):
+    poc_type: str
+    title: str
+    code: str | None = None
+    safety: str
+    mutation_guidance: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class RuntimeRequestCorrelation(BaseModel):
+    finding_id: str
+    finding_title: str
+    lifecycle_status: str
+    request_index: int
+    method: str
+    source_endpoint: str | None = None
+    captured_path: str
+    score: int
+    reasons: list[str] = Field(default_factory=list)
+    placeholder_mapping: dict[str, str] = Field(default_factory=dict)
+    mutable_parameters: list[str] = Field(default_factory=list)
+    generated_pocs: list[RuntimeGeneratedPoc] = Field(default_factory=list)
+
+
+class RuntimeTrafficImportResult(BaseModel):
+    provided: bool = False
+    source_format: str | None = None
+    request_count: int = 0
+    requests: list[CapturedHttpRequest] = Field(default_factory=list)
+    correlations: list[RuntimeRequestCorrelation] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
