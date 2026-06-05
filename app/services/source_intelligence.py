@@ -32,6 +32,62 @@ def _find_enclosing_function_block(content: str, line_number: int) -> tuple[str 
     return None
 
 
+_MINIFIED_SIGS = ('webpackchunk', '__webpack_require__', '.license.txt', 'sourcemappingurl')
+
+
+def _is_vendor_or_minified(file: FileContent) -> bool:
+    name = file.path.rsplit('/', 1)[-1].lower()
+    path_l = file.path.lower()
+    if any(seg in path_l for seg in ('/vendor/', '/vendors/', '/node_modules/', '/lib/', '/libs/', '/plugins/')):
+        return True
+    if any(name.endswith(suf) for suf in ('.min.js', '.bundle.js', '.chunk.js')):
+        return True
+    import re as _re
+    chunk_re = _re.compile(r'^.+-[a-f0-9]{8,}\.js$')
+    if chunk_re.match(name):
+        return True
+    head = file.content[:4096].lower()
+    return any(sig in head for sig in _MINIFIED_SIGS)
+
+
+def _detect_project_type(files: list[FileContent]) -> str:
+    if not files:
+        return 'unknown'
+    vendor_count = sum(1 for f in files if _is_vendor_or_minified(f))
+    if vendor_count > len(files) * 0.5:
+        return 'bundled_spa'
+    paths = [f.path.lower() for f in files]
+    text = '\n'.join(f.content[:2048] for f in files).lower()
+    if any(p.endswith('.vue') for p in paths) or any(k in text for k in ('@click', 'v-on:', 'v-model', 'createapp(')):
+        return 'source_vue_or_spa'
+    if any(p.endswith(('.jsx', '.tsx')) for p in paths) or any(k in text for k in ('import react', "from 'react'", 'reactdom.createroot', 'usestate(', 'useeffect(')):
+        return 'source_react'
+    if any(k in text for k in ("$.ajax", ".on('click'", '.on("click"', "$(document).ready", "$(function")):
+        return 'jquery_html'
+    exts = {p.rsplit('.', 1)[-1] for p in paths if '.' in p}
+    if exts <= {'html', 'htm'} and 'js' not in exts and 'ts' not in exts:
+        return 'static_html'
+    if 'js' in exts or 'ts' in exts or 'jsx' in exts or 'tsx' in exts:
+        return 'mixed_frontend'
+    return 'unknown'
+
+
+def _detect_api_clients(files: list[FileContent]) -> list[str]:
+    clients: list[str] = []
+    text = '\n'.join(f.content[:4096] for f in files).lower()
+    if 'import axios' in text or "from 'axios'" in text or 'axios.get' in text or 'axios.post' in text:
+        clients.append('axios')
+    if 'window.fetch' in text or "= fetch(" in text or "await fetch(" in text or "fetch('" in text or 'fetch("' in text:
+        clients.append('fetch')
+    if 'xmlhttprequest' in text:
+        clients.append('XMLHttpRequest')
+    if '$.ajax' in text or 'jquery.ajax' in text:
+        clients.append('$.ajax')
+    if 'apiclient.' in text or 'httpclient.' in text:
+        clients.append('api_client_wrapper')
+    return clients
+
+
 def _detect_framework(files: list[FileContent]) -> str | None:
     text = '\n'.join(f.content for f in files).lower()
     if any(f.path.lower().endswith('.vue') for f in files) or any(k in text for k in ['@click', 'v-on:', 'createapp', 'v-model']):
@@ -327,6 +383,7 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
 
     return ProjectUnderstandingResult(
         framework=framework,
+        project_type=_detect_project_type(files),
         normalized_manifest=_build_normalized_manifest(files, framework, routes, pages, ui_events, inv),
         routes=routes,
         pages=pages,

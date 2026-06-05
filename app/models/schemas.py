@@ -172,6 +172,10 @@ class ReadableFinding(BaseModel):
     affected_files: list[str]
     summary: str
     evidence: list[ReadableEvidence]
+    # Finding lifecycle: raw_signal | review_candidate | runtime_verification_candidate | confirmed_finding
+    status: str = 'review_candidate'
+    # Generic security rule category (XSS, IDOR/BOLA, Business Logic Manipulation, ...)
+    category: str | None = None
     console_poc: ConsoleSafePoc | None = None
     vulnerability_title: str | None = None
     source_path: str | None = None
@@ -294,6 +298,8 @@ class BusinessFlow(BaseModel):
 
 class ProjectUnderstandingResult(BaseModel):
     framework: str | None = None
+    # source_react | source_vue_or_spa | jquery_html | static_html | bundled_spa | mixed_frontend | unknown
+    project_type: str = 'unknown'
     normalized_manifest: list[SourceFileManifest] = Field(default_factory=list)
     routes: list[ProjectRoute] = Field(default_factory=list)
     pages: list[ProjectPage] = Field(default_factory=list)
@@ -305,15 +311,37 @@ class ProjectUnderstandingResult(BaseModel):
     unknowns: list[str] = Field(default_factory=list)
 
 
+class ProjectProfile(BaseModel):
+    """Emitted before findings. Describes the scanned project's shape and analysis statistics."""
+    # source_react | source_vue_or_spa | jquery_html | static_html | bundled_spa | mixed_frontend | unknown
+    project_type: str = 'unknown'
+    languages: list[str] = Field(default_factory=list)
+    frameworks: list[str] = Field(default_factory=list)
+    api_clients: list[str] = Field(default_factory=list)
+    scanned_files: int = 0
+    analyzed_files: int = 0
+    excluded_vendor_files: int = 0
+    raw_signals: int = 0
+    review_candidates: int = 0
+    runtime_verification_candidates: int = 0
+    confirmed_findings: int = 0
+    duplicate_findings_removed: int = 0
+    noise_ratio: float = 0.0
+    top_blockers: list[str] = Field(default_factory=list)
+
+
 class ReadableAnalysisResult(BaseModel):
     finding_count: int
     findings: list[ReadableFinding]
     analyzed_focus: list[str] = Field(default_factory=list)
     common_console_helper: str | None = None
     executive_findings: list[ReadableFinding] = Field(default_factory=list)
+    # Runtime Verification Candidates: frontend evidence with enough context to verify at runtime.
+    # Not confirmed vulnerabilities — requires real test session to confirm.
     verification_playbooks: list[ConsoleVerificationPlaybookSummary] = Field(default_factory=list)
     review_candidates: list[ReadableFinding] = Field(default_factory=list)
     project_understanding: ProjectUnderstandingResult | None = None
+    project_profile: ProjectProfile | None = None
 
 
 class AnalysisDebugDropReason(BaseModel):

@@ -4,7 +4,7 @@ import re
 from abc import ABC, abstractmethod
 
 from app.core.config import settings
-from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, BreakpointHint, BreakpointPlan, ConsoleSafePoc, ConsoleVerificationPlaybook, ConsoleVerificationPlaybookSummary, FileContent, FindingDataFlow, PocInjectionPlan, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
+from app.models.schemas import AiAnalysisDebug, AnalysisDebugDropReason, ApiCallCandidate, BreakpointHint, BreakpointPlan, ConsoleSafePoc, ConsoleVerificationPlaybook, ConsoleVerificationPlaybookSummary, FileContent, FindingDataFlow, PocInjectionPlan, ProjectProfile, ReadableAnalysisResult, ReadableEvidence, ReadableFinding
 from app.services.ai_clients import GeminiClient, GeminiClientProtocol
 from app.services.api_candidate_extractor import extract_api_call_candidates, extract_ui_handler_candidates
 from app.services.json_utils import extract_json_payload
@@ -14,7 +14,7 @@ from app.services.poc_templates import (
     normalize_endpoint,
 )
 from app.services.prompt_builder import build_candidate_analysis_prompt, build_console_poc_analysis_prompt
-from app.services.source_intelligence import build_project_understanding
+from app.services.source_intelligence import build_project_understanding, _detect_api_clients, _detect_project_type, _is_vendor_or_minified
 
 KEYWORDS = [
     'login', 'auth', 'session', 'token', 'jwt', 'cookie', 'localStorage', 'sessionStorage', 'userType', 'role',
@@ -30,7 +30,7 @@ DANGEROUS_POC_PATTERNS = (
     'delete', 'remove', 'transfer', 'withdraw', 'refund', 'bulk', 'axios.delete',
     'document.cookie=', 'child_process', 'eval(',
 )
-AUTH_SNIPPET_KEYS = ['requireAuth', 'checkSession', 'userInfo.userType', 'userType', 'role', 'isAdmin', 'ADMIN', 'NAFAL', 'navigate']
+AUTH_SNIPPET_KEYS = ['requireAuth', 'checkSession', 'userInfo.userType', 'userType', 'role', 'isAdmin', 'ADMIN', 'navigate']
 DOM_SNIPPET_KEYS = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'location', 'document.URL', 'postMessage', 'input.value']
 VALIDATION_SNIPPET_KEYS = ['axios.post', 'axios.put', 'fetch', 'FormData', 'amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints']
 VALIDATION_PARAMETERS = ['amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints', 'paymentMethod', 'merchant_uid', 'imp_uid']
@@ -48,6 +48,19 @@ UNRESOLVED_POC_PLACEHOLDERS = (
     'test_order_id',
     'UNKNOWN',
 )
+
+
+_VULN_TYPE_TO_CATEGORY: dict[str, str] = {
+    'DOM XSS': 'XSS',
+    'Client-side Authorization Bypass': 'Admin/Role/Permission Bypass',
+    'Client-side Validation Bypass': 'Business Logic Manipulation',
+    'Payment/Point Manipulation Candidate': 'Payment/Price/Point/Coupon Manipulation',
+    'IDOR / Unauthorized Data Access Candidate': 'IDOR/BOLA',
+    'State/Status Manipulation Candidate': 'Business Logic Manipulation',
+    'Account Recovery Flow Abuse Candidate': 'Account Recovery Weakness',
+    'Identity Verification / Action Authorization Bypass Candidate': 'Authentication/Session Weakness',
+    'Generic API Review Candidate': 'Business Logic Manipulation',
+}
 
 
 def _normalize_runtime_hint(value: str | None) -> str:
@@ -118,16 +131,6 @@ def _extract_endpoint(content: str) -> str | None:
     return endpoint
 
 
-def _extract_endpoints(content: str) -> list[str]:
-    endpoints: list[str] = []
-    for m in re.finditer(r'(?:axios\.(?:post|put)|fetch)\(\s*([\'"`])(.+?)\1', content, re.IGNORECASE):
-        endpoint = re.sub(r'\$\{([^}]+)\}', r'{\1}', m.group(2))
-        endpoint = re.sub(r'^\{apiBase\}', '', endpoint, flags=re.IGNORECASE)
-        if '/api/' in endpoint:
-            endpoint = endpoint[endpoint.index('/api/'):]
-        endpoints.append(endpoint)
-    return sorted(set(endpoints))
-
 
 def _extract_relevant_snippet(content: str, keywords: list[str], context_lines: int = 4) -> tuple[int, int, str]:
     lines = content.splitlines() or ['']
@@ -158,7 +161,7 @@ def _extract_auth_branch_snippet(content: str) -> tuple[int, int, str]:
 
     presentation_noise = (
         'getrolebadgecolor', 'badge', 'color', 'notificationrole', 'shouldshownotification',
-        '알림 표시', '역할별 뱃지', '역할별 알림', "return ['admin'", "return ['nafal'", "return 'var(",
+        '알림 표시', '역할별 뱃지', '역할별 알림', "return ['admin'", "return 'var(",
     )
 
     def context_window(idx: int) -> str:
@@ -181,9 +184,11 @@ def _extract_auth_branch_snippet(content: str) -> tuple[int, int, str]:
         r'(userinfo\.(usertype|role)|user\?\.(usertype|role)|\buserType\b|\brole\b|\bisadmin\b).*(===|!==|==|!=|>|<)',
     ]
     tier2_patterns = [
-        r'\bif\b[^{\n]*\b(usertype|role|isadmin)\b[^{\n]*\b(admin|nafal)\b',
-        r'\bif\b[^{\n]*\b(admin|nafal)\b.*\bnavigate\s*\(',
-        r'\bif\b[^{\n]*\b(admin|nafal)\b.*\breturn\b',
+        r'\bif\b[^{\n]*\b(usertype|role|isadmin)\b[^{\n]*\b(admin)\b',
+        r'\bif\b[^{\n]*\b(admin)\b.*\bnavigate\s*\(',
+        r'\bif\b[^{\n]*\b(admin)\b.*\breturn\b',
+        # Generic: role/userType compared to any uppercase constant (e.g. 'MANAGER', 'SUPERUSER')
+        r'\bif\b[^{\n]*\b(usertype|role)\b[^{\n]*["\'][A-Z][A-Z_]{1,}["\']',
     ]
     tier3_patterns = [r'(protectedroute|privateroute)']
 
@@ -360,7 +365,7 @@ def _is_allowed_guarded_poc_code(code: str) -> bool:
 def _has_storage_auth_evidence(files: list[FileContent], primary_file: FileContent) -> bool:
     storage_read_re = re.compile(r'(sessionStorage|localStorage)\.getItem\s*\(|document\.cookie', re.IGNORECASE)
     auth_key_re = re.compile(r'(userType|role|isAdmin)', re.IGNORECASE)
-    admin_branch_re = re.compile(r'(ADMIN|NAFAL)', re.IGNORECASE)
+    admin_branch_re = re.compile(r'\b(ADMIN|SUPERUSER|SUPER_ADMIN|ADMINISTRATOR)\b|isAdmin\s*[=!]=', re.IGNORECASE)
 
     related_files = [primary_file]
     base = primary_file.path.rsplit('/', 1)[0] if '/' in primary_file.path else ''
@@ -921,7 +926,7 @@ def _infer_page_action_hints(path: str, snippet: str, function_name: str | None 
         ('auctionpage', 'auction/bid page'),
         ('findpassword', 'password recovery page'), ('loginpage', 'login page'),
         ('signuppage', 'signup page'), ('itemdetailpage', 'item detail/bid page'),
-        ('nafalmypage', 'mypage/management page'), ('usermypage', 'mypage/management page'), ('adminmypage', 'mypage/management page'),
+        ('usermypage', 'mypage/management page'), ('adminmypage', 'admin/management page'),
     ]
     page_hint = next((v for k, v in page_map if k in p), 'target feature page')
     fn = function_name
@@ -1045,17 +1050,20 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
             limitations=['React/Vue state-based validation may require more than removing DOM disabled', 'check breakpoint at validation return inside handler'],
         )
     endpoint = (candidate.endpoint if candidate else '/api') or '/api'
+    method = (candidate.method if candidate else 'POST') or 'POST'
+    params = (candidate.parameters if candidate else [])
     validation_bps = _find_validation_return_breakpoints(f, candidate)
     vars_from_validation = {w for bp in validation_bps for w in bp.watch_variables}
     vars_from_endpoint = set(re.findall(r'\{([^}]+)\}', (candidate.endpoint if candidate else '') or ''))
     watch = ['payload'] + ((candidate.parameters or []) if candidate else []) + list(vars_from_validation) + list(vars_from_endpoint)
     breakpoints = list(validation_bps)
     breakpoints.append(BreakpointHint(source_path=f.path, start_line=(candidate.start_line if candidate else 1), end_line=(candidate.end_line if candidate else 1), reason='check payload before API call', watch_variables=sorted(set(watch))))
+    short_code = (_build_short_console_verification_code(endpoint, method, page_hint or 'target feature page', action_hint or 'target action', params) if endpoint != 'UNKNOWN' else None)
     return ConsoleVerificationPlaybook(
         strategy='breakpoint_payload_mutation',
         breakpoints=breakpoints,
         console_steps=['set breakpoint in DevTools Sources', 'click the normal UI button', 'check payload value in Scope', 'change to test value', 'check server response after Resume'],
-        console_code=(_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or 'target feature page', action_hint=action_hint or 'target action') if endpoint != 'UNKNOWN' else None),
+        console_code=short_code,
         expected_observation='payload mutation before request is reflected in the body',
         limitations=(['endpoint is UNKNOWN: auto hook code not generated'] if endpoint == 'UNKNOWN' else []),
     )
@@ -1063,38 +1071,25 @@ def _build_playbook(f: FileContent, candidate: ApiCallCandidate | None = None, a
 
 
 
-def _build_observational_network_poc(endpoint: str, method: str, source_path: str, function_name: str | None, page_hint: str, action_hint: str) -> ConsoleSafePoc:
-    return ConsoleSafePoc(
-        poc_type='browser_console',
-        description='Observational PoC: capture and inspect network requests.',
-        preconditions=['Approved test environment', 'Browser DevTools Console access'],
-        steps=[
-            'Paste and run the observational hook code in Console',
-            _review_page_step(page_hint),
-            f"Perform action: {_english_review_hint(action_hint, 'target action')}",
-            'Run window.SSS_REVIEW_POC.list() to inspect captured requests',
-        ],
-        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or 'target page', action_hint=action_hint or 'target action'),
-        expected_result=f'Request URL/method/payload/status is captured (target: {method} {endpoint})',
-        safety='Observational PoC. It does not mutate or replay requests by default. Mutation remains disabled until armMutation() is explicitly called after approval.',
+def _build_safe_network_poc(endpoint: str, page_hint: str, action_hint: str, method: str = '') -> ConsoleSafePoc:
+    """Short capture-hint PoC for promoted findings that lack self-contained code.
+    Requires common_console_helper installed first."""
+    code = _build_short_console_verification_code(
+        endpoint, method or 'UNKNOWN', page_hint or 'target page', action_hint or 'target action'
     )
-
-
-def _build_safe_network_poc(endpoint: str, page_hint: str, action_hint: str) -> ConsoleSafePoc:
     return ConsoleSafePoc(
         poc_type='browser_console',
-        description='Observation-first network PoC.',
-        preconditions=['Approved test environment', 'Browser DevTools Console access'],
+        description='Capture-hint PoC (requires common_console_helper). Install helper once, then use window.SSS_POC.*.',
+        preconditions=['common_console_helper installed in DevTools Console', 'Approved test environment'],
         steps=[
-            'Paste and run the PoC code in Console',
-            'Confirm the [SSS Review PoC] installed log',
+            'Install common_console_helper once (see common_console_helper field)',
             _review_page_step(page_hint),
             f"Perform action: {_english_review_hint(action_hint, 'target action')}",
-            'Run window.SSS_REVIEW_POC.list() to inspect captured requests',
+            'Run window.SSS_POC.list() to inspect captured requests',
         ],
-        code=_build_network_hook_mutation_poc(endpoint, page_hint=page_hint or 'target page', action_hint=action_hint or 'target action'),
-        expected_result='Request URL/method/payload/status is captured in Console.',
-        safety='Default mode is observe-only. Mutation remains disabled until window.SSS_REVIEW_POC.armMutation() is called after approval.',
+        code=code,
+        expected_result=f'Request for {method or "UNKNOWN"} {endpoint} is captured in window.SSS_POC.captured.',
+        safety='Uses common_console_helper API only. Does not reinstall transport hooks.',
     )
 
 
@@ -1479,14 +1474,6 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             else:
                 payload[key] = 'TEST_VALUE'
         return payload
-
-    def _build_readonly_get_poc(self, endpoint: str) -> str:
-        endpoint = self._replace_endpoint_placeholders(endpoint)
-        return _build_network_hook_mutation_poc(endpoint)
-
-    def _build_guarded_mutation_poc(self, method: str, endpoint: str, parameters: list[str]) -> str:
-        endpoint = self._replace_endpoint_placeholders(endpoint)
-        return _build_network_hook_mutation_poc(endpoint)
 
     def _is_irreversible_or_high_risk(self, method: str, endpoint: str, parameters: list[str]) -> bool:
         if method.upper() == 'DELETE':
@@ -2260,6 +2247,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
             )
         )
+        # Assign generic security rule category
+        f.category = _VULN_TYPE_TO_CATEGORY.get(f.vulnerability_type, 'Business Logic Manipulation')
         if should_review:
             # Clear PoC code when demoting to review:
             #   - full hook codes (SSS_REVIEW_POC_STATE / TARGET_ENDPOINT)
@@ -2342,9 +2331,13 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 f.verification_notes.append('classified as compressed/library code: moved to manual review')
             if is_generic_type:
                 f.verification_notes.append('generic API candidate: excluded from auto playbook, moved to manual review')
+            # Lifecycle status: raw_signal for heavily suppressed; review_candidate for rest
+            is_raw_signal = is_generic_type or is_session_get or is_compressed or ux_disabled or is_disabled_only
+            f.status = 'raw_signal' if is_raw_signal else 'review_candidate'
             _mark_review_candidate(f)
             review_candidates.append(f)
         else:
+            f.status = 'runtime_verification_candidate'
             f.poc_generation_status = 'executable'
             f.poc_generation_reason = 'promoted playbook with executable verification PoC'
             f.verification_notes.append(f"playbook_score={score}: {', '.join(score_reasons) if score_reasons else 'baseline'}")
@@ -2352,7 +2345,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 seen_flow.add(flow)
                 executable_poc = f.console_poc
                 if (not executable_poc or not executable_poc.code) and endpoint != 'UNKNOWN' and method != 'UNKNOWN':
-                    executable_poc = _build_safe_network_poc(endpoint, page_hint=page_hint, action_hint=action_hint)
+                    executable_poc = _build_safe_network_poc(endpoint, page_hint=page_hint, action_hint=action_hint, method=method)
                 if not executable_poc or not executable_poc.code:
                     f.poc_generation_status = 'manual_plan'
                     f.poc_generation_reason = 'playbook promotion blocked: missing console code'
@@ -2482,6 +2475,33 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     f.manual_poc_plan = _build_manual_poc_plan(src, fn, ep, meth)
                 _add_unique(f.verification_notes,
                             'No promoted playbook: use Network tab and breakpoints instead of Console helper')
+    # Build ProjectProfile for consumers
+    raw_signal_count = sum(1 for f in findings if f.status == 'raw_signal')
+    rtvc_count = len(verification_playbooks)
+    rc_count = len(review_candidates)
+    total_signals = len(findings)
+    excluded_vendor = sum(1 for f in selected if _is_vendor_or_minified(f))
+    blockers: list[str] = []
+    for f in review_candidates[:5]:
+        notes = [n for n in f.verification_notes if any(k in n for k in ('UNKNOWN', 'generic', 'placeholder', 'score=', 'compressed', 'manual'))]
+        if notes:
+            blockers.append(notes[0][:80])
+    profile = ProjectProfile(
+        project_type=project_map.project_type,
+        languages=sorted({f.path.rsplit('.', 1)[-1].lower() for f in selected if '.' in f.path and f.path.rsplit('.', 1)[-1].lower() in {'js', 'ts', 'jsx', 'tsx', 'html', 'vue', 'mjs', 'cjs'}}),
+        frameworks=([project_map.framework] if project_map.framework else []),
+        api_clients=_detect_api_clients(selected),
+        scanned_files=len(files),
+        analyzed_files=len(selected),
+        excluded_vendor_files=excluded_vendor,
+        raw_signals=raw_signal_count,
+        review_candidates=rc_count,
+        runtime_verification_candidates=rtvc_count,
+        confirmed_findings=0,
+        duplicate_findings_removed=0,
+        noise_ratio=round(raw_signal_count / max(1, total_signals), 2),
+        top_blockers=sorted(set(blockers))[:5],
+    )
     return ReadableAnalysisResult(
         finding_count=len(findings),
         findings=findings,
@@ -2491,4 +2511,5 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         verification_playbooks=verification_playbooks,
         review_candidates=review_candidates,
         project_understanding=project_map,
+        project_profile=profile,
     )

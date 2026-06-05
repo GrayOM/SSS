@@ -2002,6 +2002,178 @@ function requestIamportPay(){
             'First GET proof step must mention navigation, got: %r' % steps[0])
 
 
+    # ── Agent team: generic rules ──────────────────────────────────────────────
+
+    def test_nafal_not_hardcoded_in_core_rules(self):
+        """Core detection lists must not contain fixture-specific role name 'nafal'.
+        Fixture-specific expectations belong only in test files."""
+        from app.services.console_poc_analysis_service import (
+            AUTH_SNIPPET_KEYS,
+            _extract_auth_branch_snippet,
+        )
+        import inspect
+        auth_src = inspect.getsource(_extract_auth_branch_snippet)
+        self.assertNotIn('nafal', ' '.join(AUTH_SNIPPET_KEYS).lower(),
+            'AUTH_SNIPPET_KEYS must not contain nafal')
+        # tier2_patterns and page_map are inside the function source
+        self.assertNotIn("'nafalmypage'", auth_src,
+            'page_map in _infer_page_action_hints must not contain nafalmypage')
+
+    def test_nafal_tier2_patterns_removed(self):
+        """tier2_patterns must not hardcode nafal as a literal role constant."""
+        import inspect
+        from app.services.console_poc_analysis_service import _extract_auth_branch_snippet
+        src = inspect.getsource(_extract_auth_branch_snippet)
+        # nafal must not appear as a literal string in a compiled regex pattern
+        import re as _re
+        pattern_strings = _re.findall(r'r["\']([^"\']+)["\']', src)
+        for ps in pattern_strings:
+            self.assertNotIn('nafal', ps.lower(),
+                f"tier2 pattern contains nafal literal: {ps!r}")
+
+    def test_status_set_for_all_findings(self):
+        """Every ReadableFinding must have status in the valid lifecycle set."""
+        VALID = {'raw_signal', 'review_candidate', 'runtime_verification_candidate', 'confirmed_finding'}
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+            f('src/Auth.js', "const user = JSON.parse(sessionStorage.getItem('user')); if (user.userType !== 'ADMIN') navigate('/');"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for finding in result.findings:
+            self.assertIn(finding.status, VALID,
+                f"Finding [{finding.vulnerability_type}] has invalid status: {finding.status!r}")
+
+    def test_category_set_for_all_findings(self):
+        """Every ReadableFinding must have a non-None category after analysis."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertTrue(result.findings, 'Expected at least one finding')
+        for finding in result.findings:
+            self.assertIsNotNone(finding.category,
+                f"Finding [{finding.vulnerability_type}] has category=None")
+
+    def test_frontend_only_never_confirmed_finding(self):
+        """Frontend-only source analysis must never produce a confirmed_finding status."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+            f('src/Dom.js', "document.getElementById('out').innerHTML = location.hash;"),
+            f('src/Auth.js', "const user = JSON.parse(sessionStorage.getItem('user')); if (user.userType !== 'ADMIN') navigate('/');"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for finding in result.findings:
+            self.assertNotEqual(finding.status, 'confirmed_finding',
+                f"Frontend-only finding [{finding.vulnerability_type}] must not be confirmed_finding")
+
+    def test_runtime_verification_requires_endpoint_and_method(self):
+        """A finding with status=runtime_verification_candidate must have a known endpoint and method."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for pb in result.verification_playbooks:
+            self.assertNotEqual(pb.endpoint, 'UNKNOWN',
+                f"Playbook [{pb.risk_type}] endpoint must not be UNKNOWN")
+            self.assertNotEqual(pb.method, 'UNKNOWN',
+                f"Playbook [{pb.risk_type}] method must not be UNKNOWN")
+        for finding in result.findings:
+            if finding.status == 'runtime_verification_candidate':
+                self.assertIsNotNone(finding.category,
+                    'runtime_verification_candidate must have a category')
+
+    def test_project_profile_populated(self):
+        """ReadableAnalysisResult.project_profile must be populated after analysis."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertIsNotNone(result.project_profile,
+            'project_profile must not be None')
+        pp = result.project_profile
+        self.assertIn(pp.project_type, {
+            'source_react', 'source_vue_or_spa', 'jquery_html', 'static_html',
+            'bundled_spa', 'mixed_frontend', 'unknown',
+        })
+        self.assertIsInstance(pp.scanned_files, int)
+        self.assertIsInstance(pp.analyzed_files, int)
+        self.assertIsInstance(pp.noise_ratio, float)
+
+    def test_project_profile_counts_match_result(self):
+        """ProjectProfile counts must be consistent with actual finding lists."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+            f('src/service.js', "axios.post('/api/orders/pay',{amount})"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pp = result.project_profile
+        self.assertEqual(pp.runtime_verification_candidates, len(result.verification_playbooks),
+            'ProjectProfile.runtime_verification_candidates must match len(verification_playbooks)')
+        self.assertEqual(pp.review_candidates, len(result.review_candidates),
+            'ProjectProfile.review_candidates must match len(review_candidates)')
+
+    def test_review_candidate_verification_playbook_is_short(self):
+        """verification_playbook.console_code for review candidates must be short (<= 12 lines)
+        and must NOT contain global hook installer signatures."""
+        HOOK_SIGS = ['SSS_REVIEW_POC_STATE', 'TARGET_ENDPOINT =',
+                     'window.fetch = async function', 'XMLHttpRequest.prototype.open']
+        files = [
+            f('src/WalletPage.js', "function chargeWallet(){ axios.post('/api/wallet/charge', {amount}) }\n<button onClick={chargeWallet}>Charge</button>"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for finding in result.findings:
+            vp = finding.verification_playbook
+            if not vp or not vp.console_code:
+                continue
+            code = vp.console_code
+            lines = [ln for ln in code.splitlines() if ln.strip()]
+            self.assertLessEqual(len(lines), 12,
+                f"verification_playbook.console_code has {len(lines)} lines (max 12):\n{code}")
+            for sig in HOOK_SIGS:
+                self.assertNotIn(sig, code,
+                    f"verification_playbook.console_code contains hook sig: {sig!r}")
+
+    def test_vendor_minified_file_produces_no_findings(self):
+        """Minified/webpack files must not generate any findings."""
+        big_line = 'a' * 900 + '; b = function(c){return c};'
+        webpack = '__webpack_require__; webpackChunk=[]; module.exports={};'
+        files = [
+            f('dist/vendor-abc12345.js', big_line),
+            f('dist/app.bundle.js', webpack + "fetch('/api/pay',{method:'POST',body:JSON.stringify({amount:100})})"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(result.findings,
+            f"Minified/vendor files must produce no findings, got: {[x.vulnerability_type for x in result.findings]}")
+
+    def test_disabled_isloading_is_raw_signal_or_absent(self):
+        """Disabled UI bypass based solely on isLoading state must be raw_signal or absent."""
+        files = [f('src/Form.jsx',
+            "const [isLoading, setIsLoading] = useState(false);\n"
+            "<button disabled={isLoading} onClick={handleSubmit}>Submit</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        disabled_findings = [x for x in result.findings if 'Client-side Validation Bypass' in x.vulnerability_type or 'disabled' in x.title.lower()]
+        for df in disabled_findings:
+            self.assertIn(df.status, {'raw_signal', 'review_candidate'},
+                f"isLoading-only bypass must not reach runtime_verification_candidate, got: {df.status}")
+            self.assertNotIn(df.id, {pb.id for pb in result.verification_playbooks},
+                "isLoading-only bypass must not be promoted to playbook")
+
+    def test_project_type_react_detected(self):
+        """React project type must be detected from JSX files."""
+        files = [f('src/App.jsx', "import React from 'react'; function App() { return <div>Hello</div>; }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertIsNotNone(result.project_profile)
+        self.assertEqual(result.project_profile.project_type, 'source_react',
+            f"Expected source_react, got {result.project_profile.project_type!r}")
+
+    def test_project_type_bundled_not_promoted(self):
+        """Bundled SPA project type findings must not be promoted to playbooks."""
+        webpack_content = '__webpack_require__; webpackChunk=[]; ' + ('x=1;' * 300)
+        files = [f('dist/app-abc12345.js', webpack_content)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+            'Bundled SPA files must not produce verification playbooks')
+
 
 if __name__ == '__main__':
     unittest.main()
