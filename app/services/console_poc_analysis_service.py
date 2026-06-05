@@ -1269,12 +1269,14 @@ def _proof_steps(method: str, page_hint: str, action_hint: str) -> list[str]:
         return ['paste PoC into Console', _format_page_step(page_hint), 'execute PoC code or reload page', 'confirm DOM sink executes']
     if method in {'POST', 'PUT', 'PATCH'}:
         return [
+            _format_page_step(page_hint),
             'paste the PoC into Console',
             'approve the browser confirmation guard only in an authorized test session',
             'observe response status, content-type, and body preview in Console',
             'compare with the normal request in the Network tab',
         ]
     return [
+        _format_page_step(page_hint),
         'paste the PoC into Console',
         'observe response status, content-type, and body preview in Console',
         'compare with the normal request in the Network tab',
@@ -1973,6 +1975,10 @@ class GeminiConsolePocAnalyzer(ConsolePocAnalyzer):
                     item['verification_notes'] = notes
                     self.last_debug.errors.append('safety: Dangerous Console PoC code removed')
 
+            poc_code = poc.get('code') or '' if isinstance(poc, dict) else ''
+            if poc_code and not is_interceptor_free(poc_code):
+                poc['code'] = None
+
             try:
                 _ensure_finding_id(item)
                 out.append(ReadableFinding(**item))
@@ -1988,7 +1994,7 @@ def _build_playbook_poc(
     method: str,
     endpoint: str,
     parameters: list[str],
-) -> str:
+) -> 'str | None':
     """
     Return the shortest self-contained PoC code suitable for the playbook
     console_code field.
@@ -2017,14 +2023,8 @@ def _build_playbook_poc(
         if direct:
             return direct
 
-    # Fallback: SSS_POC capture + find flow (requires common_console_helper).
-    return _build_short_console_verification_code(
-        endpoint=endpoint,
-        method=method,
-        page_hint='target feature page',
-        action_hint='target action',
-        parameters=parameters,
-    )
+    # No self-contained PoC could be built; caller handles None correctly.
+    return None
 
 
 def get_console_poc_analyzer() -> ConsolePocAnalyzer:
@@ -2252,7 +2252,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         )
 
         should_review = (
-            not is_confirmed_short_poc and (
+            (not is_confirmed_short_poc or (score < 0 and f.vulnerability_type not in {'DOM XSS', 'Client-side Authorization Bypass'})) and (
                 is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
                 bool(unresolved_placeholders) or
                 is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or

@@ -4,7 +4,7 @@ from app.models.schemas import ApiCallCandidate, CandidateExtractionResult, File
 from app.services.poc_templates import normalize_endpoint
 
 _METHODS = ['get', 'post', 'put', 'delete', 'patch']
-_META_KEYS = {'method', 'url', 'data', 'body', 'headers', 'credentials', 'withCredentials', 'mode', 'cache', 'expr'}
+_META_KEYS = {'method', 'url', 'data', 'body', 'headers', 'credentials', 'withCredentials', 'mode', 'cache', 'expr', 'baseURL', 'baseUrl'}
 _RESPONSE_NOISE_KEYS = {
     'data', 'response', 'result', 'winnerData', 'paymentResult', 'productResponse',
     'chargeData', 'verifyRes', 'transactionData', 'walletData', 'existingOrderData',
@@ -29,6 +29,11 @@ def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
         value = value[value.index('/api/'):]
     elif '/v1/' in value:
         value = value[value.index('/v1/'):]
+    # Strip any unrecognized base-URL variable in template-literal form:
+    # e.g. {API_URL}/login -> /login, {REACT_APP_API_URL}/users -> /users
+    _tl_m = re.match(r'^\{[A-Za-z_][A-Za-z0-9_]*\}(/\S+)', value)
+    if _tl_m:
+        return _tl_m.group(1), notes
     if value.startswith(('/', '{')) and (' ' not in value):
         return value, notes
     notes.append('endpoint variable requires manual review')
@@ -214,7 +219,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         response_vars.add(rm.group(1).lower())
                     for key in ('data', 'body', 'params'):
                         pv = re.search(rf'{key}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)', snip)
-                        if pv and method != 'GET' and pv.group(1).lower() not in {'undefined', 'null', 'expr'}:
+                        if pv and method != 'GET' and pv.group(1).lower() not in {'undefined', 'null', 'expr', 'json', 'object', 'array', 'formdata', 'promise', 'math', 'date'}:
                             params.append(pv.group(1))
                             notes.append('payload object requires manual review')
                             params.extend(_extract_payload_keys_nearby(lines, i, pv.group(1)))

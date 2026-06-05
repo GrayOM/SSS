@@ -310,3 +310,196 @@ Command used in this environment: `python(){ python3 "$@"; }; python -m pytest t
 - Promoted proof steps do not mention `window.SSS_POC`, `armMutation`, `list()`, or `common_console_helper`.
 - Promoted finding-level playbook code no longer exposes `SSS_REVIEW_POC_STATE`, `TARGET_ENDPOINT`, or hook installer code.
 - No unmet goals remain.
+
+
+=== SSS ARCHITECTURE ITERATION -- 2026-06-05 ===
+
+## 1. Final architecture decision
+
+SSS is a static-analysis-driven security review tool that produces short,
+self-contained browser Console PoCs for frontend vulnerabilities. The core
+architectural decision is: promoted findings carry a direct fetch-replay or
+DOM/storage PoC (at most 12 lines, no global hook installer). Review candidates
+carry only a manual plan. The common_console_helper block is never shown to the
+user unless at least one promoted playbook actually requires the SSS_POC capture
+flow, which is no longer generated.
+
+## 2. What SSS is now designed to be
+
+- A source-code scanner that extracts API call candidates from frontend JS/JSX/HTML.
+- A promotion engine that upgrades high-confidence candidates to executable playbooks.
+- A playbook generator that emits short, self-contained CONFIRM-guarded fetch replays
+  (or 1-2 line DOM/storage PoCs) that can be pasted directly into browser DevTools.
+- A review-candidate sieve that demotes low-confidence or unresolvable findings to
+  manual_plan with structured guidance (file/function/endpoint, breakpoint hints).
+
+## 3. What SSS is explicitly NOT designed to be
+
+- A fuzzer or runtime attack tool.
+- A backend vulnerability scanner.
+- A tool that generates destructive (DELETE/refund/withdraw/transfer) payloads.
+- A tool that installs global fetch/XHR/axios hooks in promoted playbook PoCs.
+- A reporting tool that conflates review candidates with confirmed findings.
+
+## 4. Pipeline summary
+
+source code (ZIP/files)
+  -> file filter (exclude build artifacts, vendor, minified)
+  -> api_candidate_extractor (extract fetch/axios/$.ajax call sites and UI events)
+  -> source_intelligence (build project_understanding: routes, pages, api_inventory)
+  -> MockConsolePocAnalyzer / GeminiConsolePocAnalyzer (classify and score candidates)
+  -> promotion gate (score >= 5, concrete page/action hints, interceptor-free PoC)
+     -> ConsoleVerificationPlaybookSummary (endpoint, function_name, console_code)
+  -> review sieve (score < 5, generic action, unresolved placeholder, UNKNOWN endpoint)
+     -> ReadableFinding with manual_poc_plan
+  -> ReadableAnalysisResult (findings, verification_playbooks, review_candidates,
+     common_console_helper=None when all PoCs self-contained, project_understanding)
+
+## 5. Files changed
+
+app/services/poc_templates.py
+  - Extended INTERCEPTOR_SIGS to include window.SSS_POC.find(, .replay(, .list(,
+    .armMutation( so is_interceptor_free() catches these capture-flow calls.
+  - Extended _BASE_URL_EXPR_RE to strip any brace-enclosed token whose name ends
+    in _URL, _BASE, _BASEURL, or _BASE_URL (adds {API_URL}, {REACT_APP_API_URL},
+    etc.) in normalize_endpoint().
+
+tests/test_console_poc_analysis_service.py
+  - Added 12 regression tests covering all four changes (A/B/C/D).
+
+## 6. Key functions changed
+
+poc_templates.py::INTERCEPTOR_SIGS
+  Added: 'window.SSS_POC.find(', 'window.SSS_POC.replay(',
+         'window.SSS_POC.list(', 'window.SSS_POC.armMutation('
+
+poc_templates.py::_BASE_URL_EXPR_RE
+  Extended to match {API_URL}, {REACT_APP_API_URL}, and any {TOKEN_URL} pattern
+  in addition to the previously known {API_BASE_URL}, {API_BASE}, {BASE_URL},
+  {apiBase} patterns.
+
+console_poc_analysis_service.py::_build_playbook_poc
+  Returns None (instead of falling back to SSS_POC capture flow) when
+  build_request_replay_poc cannot produce a self-contained PoC.
+
+console_poc_analysis_service.py::_proof_steps
+  First item is now always a Navigate-to step (Navigate to <page_hint>) for
+  both mutation (POST/PUT/PATCH) and read-only (GET) methods.
+
+## 7. Final verify_goal.py output
+
+PASS  G1a: {API_BASE_URL}/login POST promotes
+PASS  G1b: console_code contains fetch("/login"
+PASS  G1c: console_code does NOT contain window.SSS_POC.find(
+PASS  G1d: console_code contains no helper namespace
+PASS  G1e: console_code <=12 lines
+PASS  G1f: common_console_helper is not required
+PASS  G2a: /api/auction/{item.id}/bid POST promotes
+PASS  G2b: console_code contains a REPLACE constant
+PASS  G2c: console_code contains template-literal fetch path
+PASS  G2d: console_code does NOT contain window.SSS_POC.find(
+PASS  G2e: console_code is interceptor-free
+PASS  G2f: console_code <=12 lines
+PASS  G3a: common_console_helper is None when all PoCs self-contained
+PASS  G3b: all promoted PoCs are self-contained (no SSS_POC.find)
+PASS  G3c: playbook /api/orders/pay <=12 lines
+PASS  G3d: playbook /api/orders/pay interceptor-free
+PASS  G3e: ${API_BASE_URL}/admin/add-numbers promotes
+PASS  G3f: API_BASE_URL + "/generate-lotto" promotes
+PASS  G3g: axios.create({ baseURL }).post("/login") promotes
+PASS  G3h: unknown path placeholder remains manual
+PASS  G4a: {API_BASE_URL}/admin/refund POST is NOT promoted
+PASS  G4b: DELETE /api/user/1 is NOT promoted
+PASS  G4c: no promoted PoC code contains destructive action
+
+verify_goal: 23 passed, 0 failed
+
+## 8. Final pytest output
+
+396 passed in 4.03s
+(Baseline was 384; 12 new regression tests added)
+
+## 9. Example promoted finding output (structure, not live data)
+
+ConsoleVerificationPlaybookSummary fields:
+  id: sha256-based hex ID
+  title: 'payment/point request parameter manipulation possible'
+  source_path: 'src/PaymentPage.jsx'
+  start_line: 3
+  end_line: 5
+  function_name: 'handlePayment'
+  endpoint: '/api/order/123/complete-payment'
+  method: 'POST'
+  page_hint: 'payment/order page'
+  user_action_hint: 'click payment button'
+  risk_type: 'Payment/Point Manipulation Candidate'
+  confidence: 'medium'
+  console_code: CONFIRM-guarded direct fetch replay (at most 12 lines)
+  proof_steps: ['Navigate to payment/order page', 'paste the PoC into Console', ...]
+  success_criteria: ['response status/content-type/body preview is visible in Console', ...]
+  failure_criteria: ['server rejects with 400/401/403', ...]
+  evidence_to_capture: ['Console screenshot showing response status/content-type/body preview', ...]
+  data_flow: FindingDataFlow(user_action, handler, api_call_or_sink, missing_guard_or_validation)
+  breakpoint_plan: BreakpointPlan(file, line, function, when_to_pause, what_variable_to_check)
+  poc_injection_plan: PocInjectionPlan(where_to_paste_code, when_to_run, required_user_action)
+
+## 10. Example direct PoC (build_request_replay_poc output format)
+
+For POST /api/order/{orderId}/complete-payment with fields [totalAmount, usePoints]:
+
+  (async () => {
+    if (!confirm("[SSS PoC] Run approved POST /api/order/{orderId}/complete-payment?")) return;
+    const ORDER_ID = "REPLACE_WITH_ORDER_ID";
+    const r = await fetch(`/api/order/${ORDER_ID}/complete-payment`, {
+      method: "POST", credentials: "include",
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ "totalAmount": 1, "usePoints": 1 }),
+    });
+    console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));
+  })();
+
+Rules enforced: no global hook, CONFIRM guard for mutations, REPLACE_WITH_* labels
+for path params, <= 12 lines total.
+
+## 11. Example review candidate output (structure)
+
+ReadableFinding with:
+  title: 'Manual review candidate: payment/point request parameter manipulation possible'
+  poc_generation_status: 'manual_plan'
+  console_poc.code: None (no runnable code for unconfirmed candidates)
+  observational_poc: None (cleared; capture hint only when playbooks exist)
+  manual_poc_plan: [
+    'File: src/service.js',
+    'Function: UNKNOWN',
+    'Request: POST /api/orders/123/pay',
+    'reconfirm data_flow (method/endpoint/function/sink) from evidence',
+    ...
+  ]
+  verification_notes: [
+    'Manual review candidate',
+    'Not an automatically confirmed vulnerability',
+    'Resolve endpoint/page/action before using PoC',
+    'Needs runtime capture before proof',
+    'Not a runnable proof yet: user action could not be inferred from source code',
+    'playbook_score=-3: no_strong_signals',
+  ]
+
+## 12. Remaining limitations
+
+- normalize_endpoint only strips brace-enclosed tokens matching known suffix
+  patterns (_URL, _BASE, etc.). Tokens like {BACKEND_HOST} or {SERVER} are not
+  stripped and will still block promotion.
+- Path parameters use a fixed lookup table; novel param names (e.g. {auctionNo})
+  fall back to a generic PARAM constant which may confuse testers.
+- The promotion score is a heuristic; edge cases (no button, no function name,
+  ambiguous UI event text) may misclassify a promotable finding as review-only.
+- Gemini analyzer output is not tested at unit level (requires a live API key).
+- DOM XSS detection relies on static sink+source co-location; indirect flows
+  through React state or event handlers are not detected.
+
+## 13. Goals that could not be met
+
+None. All 23 verify_goal.py goals pass and all 396 pytest tests pass after adding
+the regression tests and extending normalize_endpoint for unknown base-URL prefixes.
+
+=== END SSS ARCHITECTURE ITERATION -- 2026-06-05 ===

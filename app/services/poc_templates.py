@@ -22,6 +22,10 @@ INTERCEPTOR_SIGS: tuple[str, ...] = (
     'axios.interceptors.request.use',
     'SSS_REVIEW_POC_STATE',
     'TARGET_ENDPOINT =',
+    'window.SSS_POC.find(',
+    'window.SSS_POC.replay(',
+    'window.SSS_POC.list(',
+    'window.SSS_POC.armMutation(',
 )
 
 _DESTRUCTIVE_KEYWORDS = (
@@ -30,9 +34,15 @@ _DESTRUCTIVE_KEYWORDS = (
 )
 
 _BASE_URL_NAMES = ('API_BASE_URL', 'API_BASE', 'BASE_URL', 'apiBase')
+# Matches known base-URL variable prefixes and any brace-enclosed token
+# whose name ends in _URL, _BASE, _BASEURL or _BASE_URL (e.g. {API_URL},
+# {REACT_APP_API_URL}).  The prefix is stripped so that only the path
+# portion of the endpoint is returned by normalize_endpoint().
 _BASE_URL_EXPR_RE = re.compile(
     r'^(?:'
-    r'\$\{\s*(?:API_BASE_URL|API_BASE|BASE_URL|apiBase)\s*\}'
+    r'\$\{\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:_URL|_BASE|_BASEURL|_BASE_URL))\s*\}'
+    r'|\{\s*(?:[A-Za-z_][A-Za-z0-9_]*(?:_URL|_BASE|_BASEURL|_BASE_URL))\s*\}'
+    r'|\$\{\s*(?:API_BASE_URL|API_BASE|BASE_URL|apiBase)\s*\}'
     r'|\{\s*(?:API_BASE_URL|API_BASE|BASE_URL|apiBase)\s*\}'
     r'|(?:API_BASE_URL|API_BASE|BASE_URL|apiBase)'
     r')',

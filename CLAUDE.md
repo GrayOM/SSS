@@ -2,154 +2,122 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Claude Code Workflow Role
+## SSS Project Goal
 
-Claude Code is used as the architecture and usability reviewer for this repository.
+Source-code analysis -> review candidates -> short PoC generation -> browser console verification -> confirmed findings -> report output.
 
-### Primary Responsibilities
+## Rules
 
-- Perform architecture review for proposed or completed changes.
-- Perform real usability review from the perspective of a security assessor using the tool.
-- Identify concrete files, functions, and tests that Codex should modify.
-- Write the final review output to `docs/AI_REVIEW.md`.
-- Call out push blockers clearly.
-
-### Review Output
-
-Claude Code should fill `docs/AI_REVIEW.md` using this structure:
-
-- Critical Issues
-- Implementation Recommendations
-- Files Codex Should Modify
-- Tests Codex Should Add
-- Push Blockers
-
-### Boundaries
-
-- Do not edit files unless explicitly asked.
-- Do not run `git add`, `git commit`, `git push`, or `git merge`.
-- Do not weaken tests or recommend weakening tests to pass.
-- Do not remove PoC requirements or security controls.
-
-### Collaboration With Codex
-
-Claude Code should produce a review that Codex can implement directly. Prefer specific file paths, function names, expected behavior, and test names over broad descriptions.
-
----
+- Never mix review candidates with confirmed findings.
+- A finding is confirmed only after concrete evidence and verification.
+- Browser-console PoCs must be short, pasteable, and finding-specific.
+- Do not duplicate large helper code inside every PoC.
+- `common_console_helper` (`_build_common_console_helper`) contains reusable browser interception logic; finding-specific PoCs call its API (`window.SSS_POC.*`) rather than re-implementing transport hooks.
+- Do not run `git add`, `commit`, `push`, or `merge` unless explicitly asked.
+- Before editing, inspect `git status`.
+- After editing, summarize changed files and tests.
+- Do not weaken security restrictions or tests to make them pass - fix the root cause.
+- Do not leave sample nicknames (`ebs`, `nls`, `cia`, `nafal`, etc.) in fixtures, tests, or docs.
+- Always open files with `encoding="utf-8"` (Windows compatibility).
 
 ## Commands
 
 ```bash
-# Local development
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
+# Run all tests
+make test
+# or
+python -m pytest tests/ -v
+
+# Run a single test file
+python -m pytest tests/test_console_poc_analysis_service.py -v
+
+# Run a single test by name
+python -m pytest tests/test_analysis_service.py::test_name -v
+
+# Start the dev server (local venv)
+source .venv/bin/activate
 uvicorn app.main:app --reload
 
 # Docker
 docker compose build && docker compose up
-
-# Tests
-make test
-python -m pytest tests/ -v
-
-# Single test
-python -m pytest tests/test_console_poc_analysis_service.py::TestClass::test_name -v
-
-# AI fix loop (automated test-fix cycle, max 3 rounds; human reviews final diff)
-./scripts/ai_fix_loop.sh         # Linux/macOS
-./scripts/ai_fix_loop.ps1        # Windows
 ```
 
 ## Architecture
 
-### API Endpoints
+### Pipeline (per `/api/analyze` request)
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/` | UI (Jinja2 template) |
-| `POST` | `/api/upload` | File scan only - returns filtered file list, no analysis |
-| `POST` | `/api/analyze` | Full pipeline (upload -> scan -> chunk -> analyze -> PoC -> persist) |
-| `GET` | `/api/analysis-runs` | List saved runs from SQLite |
-| `GET` | `/api/analysis-runs/{run_id}` | Retrieve a single saved run |
+```
+ZIP upload
+  -> prepare_uploaded_zip        (upload_service: MIME, ZIP Slip, size, symlink checks)
+  -> scan_extracted_directory    (scan_service: extension/path allowlist filtering)
+  -> load_file_contents          (file_content_loader: reads allowed files as FileContent[])
+  -> build_chunks                (chunk_service: splits files into CodeChunk[] with overlap)
+  -> analyze_chunks              (analysis_service: MockAnalyzer or GeminiAnalyzer per chunk)
+  -> analyze_console_exploitability  (console_poc_analysis_service: produces ReadableFinding[])
+  -> save_analysis_run           (analysis_run_repository: persists to SQLite)
+  -> FullAnalysisResponse        (response_mapper: strips raw content before JSON return)
+```
 
-### Analysis Pipeline
+### Two parallel analysis paths
 
-`POST /api/analyze` (ZIP upload) runs through these stages in sequence - each wraps a distinct service:
+| Path | Service | Output | Purpose |
+|---|---|---|---|
+| Chunk analyzer | `analysis_service.py` | `VulnerabilityFinding[]` | Pattern/Gemini per-chunk findings |
+| Console PoC analyzer | `console_poc_analysis_service.py` | `ReadableFinding[]` | Browser-console-oriented, promotion-scored |
 
-1. **Upload & extraction** - `upload_service.py` + `zip_service.py`: validates MIME, ZIP Slip, member count, size, symlinks; unpacks to tmpfs workspace.
-2. **File scan** - `scan_service.py` -> `file_filter_service.py`: applies extension allowlist (`.js`, `.html`, `.ts`, `.vue`, etc.) and path exclusions (`node_modules`, `dist`, `*.min.js`, webpack hashes, etc.).
-3. **Content load** - `file_content_loader.py`: reads included files with `encoding="utf-8"`.
-4. **Chunking** - `chunk_service.py`: splits each file into 200-line chunks with 20-line overlap (configurable via `MAX_CHUNK_LINES` / `CHUNK_OVERLAP_LINES`).
-5. **Legacy analysis** - `analysis_service.py`: per-chunk pattern analysis; returns `AnalysisResult` with `VulnerabilityFinding` items. Backend selected by `ANALYZER_BACKEND` env var (`mock` or `gemini`).
-6. **Console PoC analysis** - `console_poc_analysis_service.py`: produces `ReadableAnalysisResult` with `ReadableFinding`, `ConsoleVerificationPlaybook`, and generated PoC code. Backend selected by `POC_BACKEND` env var. This is the primary output consumed by the UI.
-7. **Safe response** - `response_mapper.py`: strips raw file `content` before API response.
-8. **Persistence** - `analysis_run_repository.py`: saves result to SQLite (`ANALYSIS_DB_PATH`).
+`readable_analysis` (console PoC path) is the primary output for security diagnostics; `analysis` (chunk path) is legacy.
 
-The `FullAnalysisResponse` schema in `app/models/schemas.py` is the single source of truth for the API contract.
+### Key service files
 
-### Two Analyzer Backends
+- `source_intelligence.py` - builds `ProjectUnderstandingResult` (framework detection, route/page/API manifest, risk categorization)
+- `api_candidate_extractor.py` - extracts `ApiCallCandidate[]` and `UiEventCandidate[]` from JS/HTML source
+- `console_poc_analysis_service.py` - promotion scoring, `_build_common_console_helper`, `_build_network_hook_mutation_poc`, `_build_short_console_verification_code`; also contains `MockConsolePocAnalyzer` and `GeminiConsolePocAnalyzer`
+- `poc_templates.py` - reusable PoC template builders (`build_dom_xss_poc`, `build_storage_auth_poc`, `build_request_replay_poc`)
+- `prompt_builder.py` - constructs Gemini prompts for both chunk analysis and console PoC analysis
+- `response_mapper.py` - strips `content` fields before saving/returning
 
-- `MockAnalyzer` / `MockConsolePocAnalyzer`: pattern-matching fallback; used in tests and when no API key is configured.
-- `GeminiAnalyzer` / `GeminiConsolePocAnalyzer`: calls Gemini API; requires `GEMINI_API_KEY` and `ANALYZER_BACKEND=gemini` / `POC_BACKEND=gemini`.
+### Analyzer backends (configurable via `.env`)
 
-OpenAI and Claude backends are defined in config but **not yet implemented** (`get_analyzer()` raises `ValueError` for unknown backends).
+```
+ANALYZER_BACKEND=mock    # default: pattern-based MockAnalyzer
+ANALYZER_BACKEND=gemini  # GeminiAnalyzer via google-genai
 
-`ai_clients.py` provides `GeminiClient` and `GeminiClientProtocol` (the testable interface); inject `GeminiClientProtocol` rather than constructing `GeminiClient` directly in tests.
+POC_BACKEND=mock         # default: MockPocGenerator
+POC_BACKEND=gemini       # GeminiPocGenerator
 
-### Source Intelligence Layer
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.5-flash-lite   # default
+```
 
-`source_intelligence.py` builds a `ProjectUnderstandingResult` (framework hint, route map, API inventory, UI event candidates) used by `console_poc_analysis_service.py` to generate context-aware PoC code. `api_candidate_extractor.py` feeds raw API-call and UI-handler candidates into this layer.
+### PoC safety contract
 
-### PoC Systems
+- `_is_allowed_guarded_poc_code` enforces the guard policy: mutation PoCs must contain `sss_poc_state`/`sss_review_poc_state` with `armMutation`/`disarm`, or a `confirm()`-gated guard. DELETE/refund/transfer endpoints are always blocked.
+- `UNRESOLVED_POC_PLACEHOLDERS` - findings with unresolved placeholders (`{API_BASE_URL}`, `{userId}`, etc.) are downgraded to manual review candidates, not promoted findings.
+- `PROMOTION_SCORE_THRESHOLD = 5` - findings below this score stay as review candidates.
 
-There are two separate PoC systems:
+### Finding states
 
-**`poc_templates.py`** (primary, used by `console_poc_analysis_service.py`): Typed, self-contained PoC builders that produce JavaScript pasteable directly into browser DevTools Console. Functions: `build_dom_xss_poc`, `build_storage_auth_poc`, `build_request_replay_poc`. Key constants: `MAX_POC_LINES = 12`, `INTERCEPTOR_SIGS` (patterns that must never appear in output), `is_interceptor_free()`. All output is ASCII-only and must pass `_is_allowed_guarded_poc_code()`.
+1. **Review candidate** - title prefixed `"Manual review candidate:"`, needs runtime capture
+2. **Promoted finding** - score >= 5, concrete endpoint/page/action resolved, observational PoC attached
 
-**`poc_service.py`** (legacy): `GeminiPocGenerator` / `MockPocGenerator` for per-`VulnerabilityFinding` PoC generation. Invoked from the legacy analysis path.
+### API surface
 
-### PoC Safety Rules
+| Route | Purpose |
+|---|---|
+| `POST /api/analyze` | Main analysis entry point (ZIP upload) |
+| `GET /api/analysis-runs` | List past analysis runs |
+| `GET /api/analysis-runs/{run_id}` | Single run detail |
+| `GET /` | SPA UI (`app/templates/index.html`) |
 
-- All generated PoC code that makes network requests must include an `SSS_POC_STATE` guard (`mutationArmed / armMutation / disarm` pattern) or equivalent - see `_is_allowed_guarded_poc_code()` in `console_poc_analysis_service.py`.
-- Destructive endpoints (`delete`, `refund`, `withdraw`, `transfer`, `bulk`) are blocked from replay via `BLOCKED_REPLAY` flag.
-- PoC fallback order: executable PoC -> `observational_poc` -> `manual_poc_plan` + reason.
-- `INTERCEPTOR_SIGS` in `poc_templates.py` lists global hook installers that must never appear in PoC output.
+### ZIP security policy
 
-### Prompt Injection Defense
+ZIP Slip defense, MIME type validation, member count limit (`MAX_ZIP_MEMBERS=5000`), uncompressed size limit (`MAX_UNCOMPRESSED_SIZE_MB=200`), symlink blocking, upload size limit (`MAX_UPLOAD_SIZE_MB=20`). These limits must not be weakened.
 
-`prompt_builder.py` HTML-escapes all source code via `html.escape()` and wraps it in `<source_code>` tags. The prompt explicitly instructs the model to treat content inside those tags as data only. This invariant must not be removed or weakened.
+### File inclusion policy
 
-### Quality & Evaluation Layer
+Allowed: `.js .html .json .mjs .cjs .ts .jsx .tsx .vue .ejs .hbs .pug`, plus `package.json`, `Dockerfile`, `docker-compose.yml`, `.env.example`/`.env.sample`.
+Excluded: `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.git`, `__pycache__`, `libs`, `cdn`, `*.min.js`, `*.bundle.js`, `*.chunk.js`, webpack build output, actual `.env` files.
 
-- `analysis_quality_evaluator.py`: scores analysis results against measurable criteria (endpoint resolution, PoC generation rate, generic hint rate, etc.).
-- `corpus_learning_service.py`: wraps quality results into generalization reports identifying common failure patterns (e.g. `endpoint_unknown`, `missing_poc_code`) and suggesting rules to improve - not model fine-tuning.
-- `json_utils.py`: `extract_json_payload()` - robustly extracts JSON from AI responses that may include markdown fences or preamble text.
+### SQLite persistence
 
-### Key Config (`app/core/config.py`)
-
-All settings load from `.env` via `pydantic-settings`. Defaults use `mock` backends, so the app runs without API keys.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `ANALYZER_BACKEND` | `mock` | `mock` or `gemini` |
-| `POC_BACKEND` | `mock` | `mock` or `gemini` |
-| `GEMINI_API_KEY` | (none) | Required for `gemini` backend |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model name |
-| `ANALYSIS_DB_PATH` | `/tmp/...` | SQLite path |
-| `TMP_DIR` | `/tmp/ai_code_analyzer` | Workspace for ZIP extraction |
-| `MAX_UPLOAD_SIZE_MB` | `20` | ZIP upload limit |
-| `MAX_FILE_SIZE_BYTES` | `2097152` | Per-file size limit (2 MB) |
-| `MAX_ZIP_MEMBERS` | `5000` | Max files in a ZIP |
-| `MAX_UNCOMPRESSED_SIZE_MB` | `200` | Max total uncompressed size |
-| `MAX_CHUNK_LINES` | `200` | Lines per chunk |
-| `CHUNK_OVERLAP_LINES` | `20` | Overlap between consecutive chunks |
-
-## Development Rules (from AGENTS.md)
-
-- Never weaken security controls or file upload restrictions to pass tests - fix the root cause.
-- Do not use sample nicknames (`ebs`, `nls`, `cia`, `nafal`) in fixture or test data.
-- All file reads must specify `encoding="utf-8"` (Windows compatibility).
-- `_is_build_or_third_party_path()` guards must be preserved to avoid false positives on minified/vendor code.
-- The AI fix loop (`ai_fix_loop.sh`) must not auto-merge to main; human review of the final diff is mandatory.
+Analysis results are stored at `ANALYSIS_DB_PATH` (default `/tmp/ai_code_analyzer/analysis_runs.sqlite3`). Raw file `content` fields are never persisted.

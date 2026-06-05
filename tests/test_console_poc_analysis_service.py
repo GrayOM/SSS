@@ -1918,5 +1918,90 @@ function requestIamportPay(){
             self.assertTrue(has_sink,   f'DOM XSS evidence must have sink: entry. Got: {flow}')
 
 
+    # -- Regression tests for 2026-06-05 changes ----------------------------
+
+    # Change A: INTERCEPTOR_SIGS extended with window.SSS_POC.find/replay/list/armMutation
+    def test_interceptor_sigs_find_is_not_free(self):
+        from app.services.poc_templates import is_interceptor_free
+        code = 'window.SSS_POC.find({ urlIncludes: "/api/test" })'
+        self.assertFalse(is_interceptor_free(code))
+
+    def test_interceptor_sigs_replay_is_not_free(self):
+        from app.services.poc_templates import is_interceptor_free
+        self.assertFalse(is_interceptor_free('window.SSS_POC.replay(0)'))
+
+    def test_interceptor_sigs_list_is_not_free(self):
+        from app.services.poc_templates import is_interceptor_free
+        self.assertFalse(is_interceptor_free('window.SSS_POC.list()'))
+
+    def test_interceptor_sigs_arm_mutation_is_not_free(self):
+        from app.services.poc_templates import is_interceptor_free
+        self.assertFalse(is_interceptor_free('window.SSS_POC.armMutation()'))
+
+    def test_plain_fetch_is_interceptor_free(self):
+        from app.services.poc_templates import is_interceptor_free
+        code = '(async () => { const r = await fetch("/api/test"); console.log(r.status); })()'
+        self.assertTrue(is_interceptor_free(code))
+
+    # Change B: _build_playbook_poc returns None when no self-contained PoC can be built
+    def test_build_playbook_poc_returns_none_for_ambiguous_fetch(self):
+        content = (
+            "function handleAction(){fetch('/api/endpoint-no-params', {method:'POST'})}\n"
+            "<button onClick={handleAction}>Go</button>"
+        )
+        files = [f('src/Ambiguous.js', content)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for pb in result.verification_playbooks:
+            self.assertNotIn(
+                'window.SSS_POC.find(',
+                pb.console_code or '',
+                'Promoted playbook must not use SSS_POC capture flow',
+            )
+
+    # Change C: normalize_endpoint strips unknown base-URL variable patterns
+    def test_normalize_endpoint_api_url_prefix(self):
+        from app.services.poc_templates import normalize_endpoint
+        self.assertEqual(normalize_endpoint('{API_URL}/login'), '/login')
+
+    def test_normalize_endpoint_react_app_api_url_prefix(self):
+        from app.services.poc_templates import normalize_endpoint
+        self.assertEqual(normalize_endpoint('{REACT_APP_API_URL}/api/users'), '/api/users')
+
+    def test_normalize_endpoint_api_base_url_prefix_still_works(self):
+        from app.services.poc_templates import normalize_endpoint
+        self.assertEqual(normalize_endpoint('{API_BASE_URL}/login'), '/login')
+
+    def test_normalize_endpoint_route_params_untouched(self):
+        from app.services.poc_templates import normalize_endpoint
+        self.assertEqual(normalize_endpoint('/api/{item.id}/bid'), '/api/{item.id}/bid')
+
+    # Change D: _proof_steps starts with navigation step
+    def test_proof_steps_first_item_is_navigation(self):
+        from app.services.console_poc_analysis_service import _proof_steps
+        steps = _proof_steps(
+            method='POST',
+            page_hint='payment/order page',
+            action_hint='click payment button',
+        )
+        self.assertTrue(len(steps) > 0, '_proof_steps must return at least one step')
+        first = steps[0].lower()
+        self.assertIn('navigate', first,
+            'First proof step must mention navigation, got: %r' % steps[0])
+        self.assertIn('payment/order page', steps[0],
+            'First proof step must include page_hint text, got: %r' % steps[0])
+
+    def test_proof_steps_get_first_item_is_navigation(self):
+        from app.services.console_poc_analysis_service import _proof_steps
+        steps = _proof_steps(
+            method='GET',
+            page_hint='wallet/point page',
+            action_hint='click charge button',
+        )
+        self.assertTrue(len(steps) > 0)
+        self.assertIn('navigate', steps[0].lower(),
+            'First GET proof step must mention navigation, got: %r' % steps[0])
+
+
+
 if __name__ == '__main__':
     unittest.main()
