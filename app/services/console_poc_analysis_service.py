@@ -81,6 +81,10 @@ _HIGH_PRIORITY_CATEGORIES = frozenset({
     'Account Recovery Weakness',
     'IDOR/BOLA',
     'Admin/Role/Permission Bypass',
+    # Identity Verification / Action Authorization Bypass maps here; keep it
+    # promotion-eligible at low confidence to match the old 'Authorization'-
+    # substring behavior it replaced.
+    'Authentication/Session Weakness',
 })
 
 
@@ -100,7 +104,12 @@ def _category_for(vuln_type: str) -> str:
     vt = vuln_type.lower()
     if 'xss' in vt or 'cross-site scripting' in vt:
         return 'xss'
-    if any(k in vt for k in ('payment', 'price', 'point', 'coupon', 'balance', 'amount', 'discount', 'order total')):
+    # Use word-boundary for 'point/points' so 'endpoint' does not match.
+    # Narrow 'amount' and 'balance' to compound phrases to avoid false positives
+    # like 'Excessive Amount of Data' or 'Load Balance Misconfiguration'.
+    if (any(k in vt for k in ('payment', 'price', 'coupon', 'discount', 'order total'))
+            or re.search(r'\bpoints?\b', vt)
+            or 'account balance' in vt or 'payment amount' in vt):
         return 'payment_or_value_mutation'
     # Require 'idor', 'bola', or a specific multi-word phrase — never classify on
     # 'access' or 'unauthorized' alone, which appear in many unrelated types.
@@ -2399,7 +2408,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         f.category = _VULN_TYPE_TO_CATEGORY.get(f.vulnerability_type, 'Business Logic Manipulation')
 
         should_review = (
-            (not is_confirmed_short_poc or (score < 0 and f.vulnerability_type not in {'DOM XSS', 'Client-side Authorization Bypass'})) and (
+            (not is_confirmed_short_poc or (score < 0 and f.category not in {'XSS', 'Admin/Role/Permission Bypass'})) and (
                 is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
                 bool(unresolved_placeholders) or
                 is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or

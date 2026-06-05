@@ -1325,7 +1325,7 @@ function submitOrder(event) {
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         code = result.verification_playbooks[0].console_code or ''
-        self.assertIn('if (!confirm("[SSS PoC] Run approved POST /api/orders/123/pay?")) return;', code)
+        self.assertIn('if (!confirm(`[SSS PoC] Run approved POST /api/orders/123/pay?`)) return;', code)
         self.assertNotIn('CONFIRM_AUTHORIZED_TEST = false', code)
 
     def test_stripe_iamport_payload_keys_preserved_in_direct_poc(self):
@@ -1843,6 +1843,86 @@ function requestIamportPay(){
         self.assertTrue(is_interceptor_free(code))
         self.assertTrue(_is_allowed_guarded_poc_code(code), 'confirm-guarded replay must pass safety filter')
         self.assertFalse(any(ord(c) > 127 for c in code), 'Replay PoC must be ASCII-only')
+
+    def test_poc_templates_path_param_naming_userId(self):
+        """Path params like {userId}/{currentUserId} must produce USER_ID const, not TEST_ID.
+
+        'id' is a substring of 'userid', so without careful ordering the generic
+        'id' check fires first and everything becomes TEST_ID.
+        """
+        from app.services.poc_templates import build_request_replay_poc
+        for endpoint in (
+            '/api/user/{userId}/wallet/charge',
+            '/api/user/{currentUserId}/profile',
+            '/api/member/{memberId}/orders',
+            '/api/account/{accountId}/settings',
+        ):
+            code = build_request_replay_poc('POST', endpoint)
+            self.assertIsNotNone(code, f'PoC must be generated for {endpoint}')
+            self.assertIn('USER_ID', code, f'{endpoint} must use USER_ID const, not TEST_ID')
+            self.assertNotIn('TEST_ID', code, f'{endpoint} must not use generic TEST_ID for a user-ID path param')
+
+    def test_poc_templates_path_param_naming_orderId(self):
+        """Path params like {orderId} must produce ORDER_ID const, not TEST_ID."""
+        from app.services.poc_templates import build_request_replay_poc
+        for endpoint in (
+            '/api/order/{orderId}/pay',
+            '/api/auction/{auctionItem.orderId}/complete',
+        ):
+            code = build_request_replay_poc('POST', endpoint)
+            self.assertIsNotNone(code)
+            self.assertIn('ORDER_ID', code, f'{endpoint} must use ORDER_ID const')
+            self.assertNotIn('TEST_ID', code, f'{endpoint} must not use generic TEST_ID for order-ID path param')
+
+    def test_poc_templates_path_param_naming_paymentId(self):
+        """Path params like {paymentId} must produce PAYMENT_ID const, not TEST_ID."""
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/api/payment/{paymentId}/confirm')
+        self.assertIsNotNone(code)
+        self.assertIn('PAYMENT_ID', code, '{paymentId} must use PAYMENT_ID const')
+        self.assertNotIn('TEST_ID', code, '{paymentId} must not use generic TEST_ID')
+
+    def test_poc_templates_confirm_shows_resolved_url(self):
+        """The confirm() dialog must show the resolved URL, not the raw source placeholder.
+
+        Before the fix, consts were declared AFTER the confirm line, so the
+        confirm dialog showed '{item.id}' while the fetch used '${TEST_ID}'.
+        A tester filling in the const value before pasting would see the
+        correct URL in the confirm dialog only if consts come first.
+        """
+        from app.services.poc_templates import build_request_replay_poc
+        import re
+
+        # Endpoint with path param: {item.id} → ${TEST_ID} after substitution
+        code = build_request_replay_poc('POST', '/api/auction/{item.id}/bid', 'amount', 1)
+        self.assertIsNotNone(code)
+        lines = code.splitlines()
+
+        # Const declarations must appear before the confirm line
+        const_line = next((i for i, l in enumerate(lines) if 'const TEST_ID' in l), None)
+        confirm_line = next((i for i, l in enumerate(lines) if 'confirm(' in l), None)
+        self.assertIsNotNone(const_line, 'const TEST_ID declaration must be present')
+        self.assertIsNotNone(confirm_line, 'confirm() guard must be present')
+        self.assertLess(const_line, confirm_line,
+            'const declaration must come before confirm so the dialog shows the resolved URL')
+
+        # The confirm string must use the JS variable reference, not the raw placeholder
+        confirm_str = lines[confirm_line]
+        self.assertNotIn('{item.id}', confirm_str,
+            'confirm dialog must not show raw source placeholder {item.id}')
+        self.assertIn('TEST_ID', confirm_str,
+            'confirm dialog must show the resolved JS const name TEST_ID')
+
+        # Same check for userId-style path param
+        code2 = build_request_replay_poc('POST', '/api/user/{currentUserId}/wallet/charge', 'amount', 1)
+        self.assertIsNotNone(code2)
+        lines2 = code2.splitlines()
+        confirm_line2 = next((i for i, l in enumerate(lines2) if 'confirm(' in l), None)
+        confirm_str2 = lines2[confirm_line2]
+        self.assertNotIn('{currentUserId}', confirm_str2,
+            'confirm dialog must not show raw source placeholder {currentUserId}')
+        self.assertIn('USER_ID', confirm_str2,
+            'confirm dialog must show the resolved JS const name USER_ID')
 
     def test_poc_templates_destructive_endpoint_returns_none(self):
         from app.services.poc_templates import build_request_replay_poc
@@ -2403,12 +2483,18 @@ function requestIamportPay(){
         self.assertEqual(_category_for('recovery token replay'), 'account_recovery')
 
     def test_category_for_payment_includes_coupon_balance_amount_discount(self):
-        """coupon/balance/amount/discount/order total must route to payment_or_value_mutation."""
+        """Specific payment-related terms must route to payment_or_value_mutation;
+        standalone 'balance' and 'amount' must not (too broad — would match
+        'Load Balance' or 'Excessive Amount of Data')."""
         from app.services.console_poc_analysis_service import _category_for
-        for term in ('Coupon Manipulation', 'Balance Tampering', 'Amount Abuse',
+        for term in ('Coupon Manipulation', 'Account Balance Tampering', 'Payment Amount Overflow',
                      'Discount Bypass', 'Order Total Manipulation'):
             self.assertEqual(_category_for(term), 'payment_or_value_mutation',
                 f'Expected payment_or_value_mutation for {term!r}')
+        # These must NOT classify as payment — standalone keywords are too broad.
+        for term in ('Balance Tampering', 'Amount Abuse', 'API Endpoint Manipulation'):
+            self.assertNotEqual(_category_for(term), 'payment_or_value_mutation',
+                f'{term!r} must not be misclassified as payment_or_value_mutation')
 
     # ── Playbook helpers: symmetric branches ─────────────────────────────────
 
@@ -2433,9 +2519,9 @@ function requestIamportPay(){
             '_evidence_to_capture for validation bypass must mention Network tab')
 
     def test_coupon_balance_get_payment_criteria_in_all_three_helpers(self):
-        """Gemini-emitted types with coupon/balance must get payment guidance from all three helpers."""
+        """Gemini-emitted types with coupon/account balance must get payment guidance from all three helpers."""
         from app.services.console_poc_analysis_service import _success_criteria, _failure_criteria, _evidence_to_capture
-        for vuln_type in ('Coupon Balance Manipulation', 'Balance Tampering', 'Discount Abuse'):
+        for vuln_type in ('Coupon Balance Manipulation', 'Account Balance Tampering', 'Discount Abuse'):
             method = 'POST'
             success = '\n'.join(_success_criteria(method, vuln_type)).lower()
             failure = '\n'.join(_failure_criteria(method, vuln_type)).lower()
@@ -2525,16 +2611,26 @@ function requestIamportPay(){
                 f'f.category must not be empty string for [{finding.vulnerability_type}]')
 
     def test_high_priority_categories_preserved_at_low_confidence(self):
-        """Findings with high-priority category must not be demoted purely by low confidence."""
+        """Findings in high-priority categories must not appear in review_candidates.
+
+        The is_low_conf gate must be bypassed for _HIGH_PRIORITY_CATEGORIES, so
+        any finding that lands in review_candidates must have a non-high-priority
+        category.  A high-priority finding in review_candidates means the gate
+        silently swallowed it, which is the regression this test guards against.
+        """
         from app.services.console_poc_analysis_service import _HIGH_PRIORITY_CATEGORIES
         files = [
             f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        for finding in result.findings:
-            if finding.category in _HIGH_PRIORITY_CATEGORIES:
-                # High-priority categories must not be silently filtered out
-                self.assertIsNotNone(finding.category)
+        for candidate in result.review_candidates:
+            self.assertNotIn(
+                candidate.category,
+                _HIGH_PRIORITY_CATEGORIES,
+                f'High-priority category [{candidate.category}] must not be demoted to '
+                f'review_candidates for [{candidate.vulnerability_type}] — '
+                f'is_low_conf gate should be bypassed for high-priority categories',
+            )
 
 
 if __name__ == '__main__':

@@ -172,14 +172,16 @@ def build_request_replay_poc(
 
     def _const_for(token: str) -> str:
         tl = token.lower()
-        if any(k in tl for k in ('item.id', 'itemid', 'productid', 'id')):
-            return 'TEST_ID'
+        # Specific compound patterns must come before the bare 'id' check —
+        # 'id' is a substring of 'userid', 'orderid', 'paymentid', etc.
         if any(k in tl for k in ('userid', 'currentuserid', 'memberid', 'accountid', 'sessiondata.userid')):
             return 'USER_ID'
         if any(k in tl for k in ('orderid', 'orderno', 'auctionitem.orderid')):
             return 'ORDER_ID'
         if 'paymentid' in tl:
             return 'PAYMENT_ID'
+        if any(k in tl for k in ('item.id', 'itemid', 'productid', 'id')):
+            return 'TEST_ID'
         return tl.upper().replace('.', '_').replace('-', '_') or 'PARAM'
 
     def _replacer(m: re.Match) -> str:
@@ -215,11 +217,15 @@ def build_request_replay_poc(
     const_decls.extend(_body_const_decls(body_fields, used))
     body_js = _body_json_expr(body_fields, field, test_value)
 
+    # Const declarations come first so the confirm dialog can use a backtick
+    # template literal that shows the resolved URL (e.g. ${TEST_ID}) rather
+    # than the raw source placeholder ({item.id}).  A tester filling in the
+    # const values before pasting sees the real target URL in the dialog.
     lines = (
-        ['(async () => {',
-         f'  if (!confirm("[SSS PoC] Run approved {m} {norm}?")) return;']
+        ['(async () => {']
         + const_decls
-        + [f'  const r = await fetch({url_expr}, {{',
+        + [f'  if (!confirm(`[SSS PoC] Run approved {m} {url_template}?`)) return;',
+           f'  const r = await fetch({url_expr}, {{',
            f'    method: {json.dumps(m)}, credentials: "include",',
            "    headers: { 'Content-Type': 'application/json' },",
            f'    body: {body_js},',
