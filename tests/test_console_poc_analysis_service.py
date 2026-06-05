@@ -456,7 +456,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         finding = [x for x in findings if x.vulnerability_type == 'Account Recovery Flow Abuse Candidate'][0]
         self.assertIsNotNone(finding.console_poc.code)
         # New design: short CONFIRM-guarded direct replay, no global interceptor
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', finding.console_poc.code or '')
+        self.assertIn('confirm(', finding.console_poc.code or '')
         self.assertNotIn('window.SSS_REVIEW_POC', finding.console_poc.code or '')
         self.assertNotIn('SSS_REVIEW_POC_STATE', finding.console_poc.code or '')
         self.assertIsNotNone(finding.verification_playbook)
@@ -595,7 +595,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
 
     def test_post_poc_uses_confirm_guard_not_arm_mutation(self):
         # New design: bare axios.post with no function -> generic action -> manual_plan,
-        # code is None.  For any code that IS generated, it uses CONFIRM_AUTHORIZED_TEST
+        # code is None. For any code that IS generated, it uses browser confirm()
         # not SSS_REVIEW_POC.armMutation().
         files = [f('src/post2.js', "axios.post('/api/pay', { amount })")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
@@ -603,7 +603,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         code = finding.console_poc.code or ''
         # Generic action -> manual_plan; code should be None or use CONFIRM guard
         if code:
-            self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+            self.assertIn('confirm(', code)
             self.assertNotIn('window.SSS_REVIEW_POC.armMutation()', code)
             self.assertNotIn('SSS_REVIEW_POC_STATE', code)
 
@@ -711,7 +711,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(p.function_name, 'handlePayment')
         # Direct replay code: contains endpoint and CONFIRM guard
         self.assertIn('/api/order/123/complete-payment', p.console_code or '')
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', p.console_code or '')
+        self.assertIn('confirm(', p.console_code or '')
         # No global hook
         self.assertNotIn('window.fetch = async function', p.console_code or '')
 
@@ -1039,6 +1039,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         code = "(async()=>{const CONFIRM_AUTHORIZED_TEST = false; if (!CONFIRM_AUTHORIZED_TEST) { throw new Error('x'); } const res = await fetch('/api/x',{method:'POST'});})();"
         self.assertTrue(_is_allowed_guarded_poc_code(code))
 
+    def test_browser_confirm_direct_fetch_post_allowed_by_filter(self):
+        code = '(async()=>{if(!confirm("[SSS PoC] Run approved POST /api/pay?"))return; await fetch("/api/pay",{method:"POST",body:JSON.stringify({amount:1})});})();'
+        self.assertTrue(_is_allowed_guarded_poc_code(code))
+
+    def test_browser_confirm_destructive_fetch_still_rejected_by_filter(self):
+        code = '(async()=>{if(!confirm("[SSS PoC] Run approved POST /api/refund?"))return; await fetch("/api/refund",{method:"POST"});})();'
+        self.assertFalse(_is_allowed_guarded_poc_code(code))
+
     def test_axios_post_without_guard_rejected(self):
         code = "axios.post('/api/pay', { amount: 1 })"
         self.assertFalse(_is_allowed_guarded_poc_code(code))
@@ -1156,7 +1164,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(playbook.source_path, 'src/Pay.jsx')
         self.assertEqual(playbook.function_name, 'submitOrder')
         # New design: direct CONFIRM-guarded replay, no SSS_POC capture flow
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', playbook.console_code)
+        self.assertIn('confirm(', playbook.console_code)
         self.assertIn('/api/orders/123/pay', playbook.console_code)
         self.assertIn('amount', playbook.breakpoint_plan.what_variable_or_request_to_check)
 
@@ -1245,7 +1253,7 @@ function submitOrder(event) {
         # Direct replay: contains fetch call to the known endpoint
         self.assertIn('/api/orders/123/pay', code)
         # Safety guard present
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        self.assertIn('confirm(', code)
         # No global hook installer
         self.assertNotIn('window.fetch = async function', code)
         self.assertNotIn('XMLHttpRequest.prototype.open', code)
@@ -1259,9 +1267,54 @@ function submitOrder(event) {
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         code = result.verification_playbooks[0].console_code or ''
 
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        self.assertIn('confirm(', code)
         self.assertIn("method: \"POST\"", code)
         self.assertNotIn('window.SSS_POC', code)
+
+    def test_promoted_proof_steps_do_not_mention_helper_flow(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        steps = '\n'.join(result.verification_playbooks[0].proof_steps)
+        self.assertIn('paste the PoC into Console', steps)
+        self.assertIn('approve the browser confirmation guard', steps)
+        self.assertIn('Network tab', steps)
+        for forbidden in ('window.SSS_POC', 'armMutation', 'list()', 'common_console_helper'):
+            self.assertNotIn(forbidden, steps)
+
+    def test_promoted_finding_verification_playbook_uses_short_console_code(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        promoted = [f for f in result.findings if f.id == result.verification_playbooks[0].id][0]
+        code = promoted.verification_playbook.console_code or ''
+        self.assertIn('confirm(', code)
+        self.assertLessEqual(len([line for line in code.splitlines() if line.strip()]), 12)
+        for forbidden in ('SSS_REVIEW_POC_STATE', 'TARGET_ENDPOINT', 'window.fetch = async function', 'XMLHttpRequest.prototype'):
+            self.assertNotIn(forbidden, code)
+
+    def test_direct_poc_uses_browser_confirm_guard(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        code = result.verification_playbooks[0].console_code or ''
+        self.assertIn('if (!confirm("[SSS PoC] Run approved POST /api/orders/123/pay?")) return;', code)
+        self.assertNotIn('CONFIRM_AUTHORIZED_TEST = false', code)
+
+    def test_stripe_iamport_payload_keys_preserved_in_direct_poc(self):
+        files = [f('src/Checkout.jsx', """
+function requestIamportPay(){
+  const payload = { merchant_uid, imp_uid, orderId, productId, amount, buyer_email };
+  axios.post('/api/payments/iamport/complete', payload);
+}
+<button onClick={requestIamportPay}>Pay</button>
+""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/payments/iamport/complete'][0]
+        code = playbook.console_code or ''
+        for key in ('merchant_uid', 'imp_uid', 'orderId', 'productId', 'amount', 'buyer_email'):
+            self.assertIn(key, code)
+        self.assertIn('const TEST_ORDER_ID = "REPLACE_WITH_TEST_ORDER_ID";', code)
+        self.assertIn('const TEST_PRODUCT_ID = "REPLACE_WITH_TEST_PRODUCT_ID";', code)
+        self.assertIn('const TEST_PAYMENT_UID = "REPLACE_WITH_TEST_PAYMENT_UID";', code)
+        self.assertLessEqual(len([line for line in code.splitlines() if line.strip()]), 12)
 
     def test_get_finding_specific_console_code_prints_replay_guidance(self):
         code = _build_short_console_verification_code(
@@ -1316,8 +1369,8 @@ function submitOrder(event) {
 
         # Self-contained PoCs: common_console_helper must be None.
         self.assertIsNone(result.common_console_helper)
-        # Playbook uses a direct replay with CONFIRM guard, no SSS_POC capture flow.
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        # Playbook uses a direct replay with browser confirm guard, no SSS_POC capture flow.
+        self.assertIn('confirm(', code)
         self.assertIn('/api/orders/123/pay', code)
         self.assertNotIn('window.SSS_POC =', code)
         self.assertNotIn('window.SSS_REVIEW_POC', code)
@@ -1532,8 +1585,8 @@ function submitOrder(event) {
             code = pb.console_code or ''
             is_dom = pb.risk_type == 'DOM XSS'
             if not is_dom:
-                self.assertIn('CONFIRM_AUTHORIZED_TEST', code,
-                    f"Promoted API playbook must have CONFIRM_AUTHORIZED_TEST guard: {pb.endpoint}")
+                self.assertIn('confirm(', code,
+                    f"Promoted API playbook must have browser confirm guard: {pb.endpoint}")
             self.assertNotIn('window.SSS_POC.find(', code,
                 "Promoted playbook must not use SSS_POC capture flow")
 
@@ -1738,18 +1791,18 @@ function submitOrder(event) {
         self.assertIn("fetch(\"/api/user/me\")", code)
         self.assertLessEqual(len(code.splitlines()), 10)
         self.assertTrue(is_interceptor_free(code))
-        self.assertNotIn('CONFIRM_AUTHORIZED_TEST', code)
+        self.assertNotIn('confirm(', code)
 
     def test_poc_templates_replay_post_confirm_guard(self):
         from app.services.poc_templates import build_request_replay_poc, is_interceptor_free
         from app.services.console_poc_analysis_service import _is_allowed_guarded_poc_code
         code = build_request_replay_poc('POST', '/api/pay', 'amount', 1)
         self.assertIsNotNone(code)
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', code)
+        self.assertIn('confirm(', code)
         self.assertIn('amount', code)
         self.assertLessEqual(len(code.splitlines()), 10)
         self.assertTrue(is_interceptor_free(code))
-        self.assertTrue(_is_allowed_guarded_poc_code(code), 'CONFIRM-guarded replay must pass safety filter')
+        self.assertTrue(_is_allowed_guarded_poc_code(code), 'confirm-guarded replay must pass safety filter')
         self.assertFalse(any(ord(c) > 127 for c in code), 'Replay PoC must be ASCII-only')
 
     def test_poc_templates_destructive_endpoint_returns_none(self):
@@ -1762,7 +1815,7 @@ function submitOrder(event) {
         poc = build_request_replay_poc('POST', '{API_BASE_URL}/pay')
         self.assertIsNotNone(poc, '{API_BASE_URL}/pay normalizes to /pay which is not destructive')
         self.assertIn('fetch("/pay"', poc)
-        self.assertIn('CONFIRM_AUTHORIZED_TEST', poc)
+        self.assertIn('confirm(', poc)
         # Truly destructive base-URL endpoint still returns None.
         self.assertIsNone(build_request_replay_poc('POST', '{API_BASE_URL}/admin/refund'))
 

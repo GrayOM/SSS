@@ -320,6 +320,15 @@ def _is_allowed_guarded_poc_code(code: str) -> bool:
         return False
 
     has_legacy_guard = 'confirm_authorized_test = false' in low and 'if (!confirm_authorized_test)' in low
+    has_browser_confirm_guard = (
+        'confirm(' in low
+        and re.search(r'if\s*\(\s*!\s*confirm\s*\(', low)
+        and 'fetch(' in low
+        and 'xmlhttprequest' not in low
+        and 'window.sss_poc' not in low
+        and 'window.sss_review_poc' not in low
+        and 'interceptors.request.use' not in low
+    )
     has_sss_poc_guard = all(x in low for x in ('sss_poc_state', 'mutationarmed', 'armmutation', 'disarm'))
     has_sss_review_poc_guard = all(x in low for x in ('sss_review_poc_state', 'mutationarmed', 'armmutation', 'disarm'))
     has_high_risk_observer_guard = all(x in low for x in ('blocked_replay', 'replay blocked: high-risk endpoint', 'captured'))
@@ -344,7 +353,7 @@ def _is_allowed_guarded_poc_code(code: str) -> bool:
         or re.search(r'\.open\s*\(\s*[\'"](post|put|patch)[\'"]', low)
     )
     if is_mutation:
-        return has_legacy_guard or has_sss_poc_guard
+        return has_legacy_guard or has_sss_poc_guard or has_browser_confirm_guard
     return True
 
 
@@ -1258,7 +1267,18 @@ def _apply_v1_contract(
 def _proof_steps(method: str, page_hint: str, action_hint: str) -> list[str]:
     if method == 'DOM':
         return ['paste PoC into Console', _format_page_step(page_hint), 'execute PoC code or reload page', 'confirm DOM sink executes']
-    return ['paste PoC into Console', 'confirm [SSS PoC] install log', _format_page_step(page_hint), f'{action_hint} performed', 'run window.SSS_POC.list()', 'inspect captured request endpoint/method/payload', 'run window.SSS_POC.armMutation()', 'repeat the same user action', 'compare payload and server response before/after mutation']
+    if method in {'POST', 'PUT', 'PATCH'}:
+        return [
+            'paste the PoC into Console',
+            'approve the browser confirmation guard only in an authorized test session',
+            'observe response status, content-type, and body preview in Console',
+            'compare with the normal request in the Network tab',
+        ]
+    return [
+        'paste the PoC into Console',
+        'observe response status, content-type, and body preview in Console',
+        'compare with the normal request in the Network tab',
+    ]
 
 
 def _success_criteria(method: str) -> list[str]:
@@ -1782,13 +1802,13 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                     parameters[0] if parameters else '',
                 )
                 test_val: int | str = 1 if primary.lower() in {'amount', 'price', 'totalamount', 'usepoints'} else 'TEST_VALUE'
-                direct = build_request_replay_poc(method, norm_ep, primary, test_val)
+                direct = build_request_replay_poc(method, norm_ep, primary, test_val, fields=parameters)
                 if direct:
                     poc_type = 'browser_console'
                     poc_code = direct
                     conf = 'medium'
-                    safety = 'CONFIRM_AUTHORIZED_TEST is False by default. Set to true only in an approved test environment.'
-                    notes.append('Set CONFIRM_AUTHORIZED_TEST=true only after explicit approval in an isolated test environment.')
+                    safety = 'Browser confirmation guard blocks execution until the tester approves it in an authorized test environment.'
+                    notes.append('Approve the browser confirmation guard only in an isolated authorized test environment.')
 
         is_direct_poc = poc_code is not None and is_interceptor_free(poc_code)
         # An executable status requires a concrete (possibly normalized) endpoint.
@@ -1801,7 +1821,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             steps = [
                 'Open browser DevTools Console on the target page',
                 'Paste the PoC code and press Enter',
-                'For mutation PoCs: set CONFIRM_AUTHORIZED_TEST=true only after explicit approval',
+                'For mutation PoCs: approve the browser confirmation guard only after explicit authorization',
                 'Observe the response status in the Console output',
             ]
             description = 'Direct self-contained PoC - no helper installation required'
@@ -1984,7 +2004,7 @@ def _build_playbook_poc(
             parameters[0] if parameters else '',
         )
         test_val: int | str = 1 if primary.lower() in {'amount', 'price', 'totalamount', 'usepoints'} else 'TEST_VALUE'
-        direct = build_request_replay_poc(method, norm_ep, primary, test_val)
+        direct = build_request_replay_poc(method, norm_ep, primary, test_val, fields=parameters)
         if direct:
             return direct
 
@@ -2039,7 +2059,7 @@ def _find_unresolved_poc_placeholders(*values: str | None) -> list[str]:
         for placeholder in re.findall(r'\{(?:API_BASE_URL|API_BASE|BASE_URL|apiBase|userId|sessionData\.userId|auctionItem\.orderId|orderId|test_[^}]+)\}', text):
             if placeholder not in found:
                 found.append(placeholder)
-        for token in ('test_user_id', 'test_order_id', 'TEST_USER_ID', 'TEST_ORDER_ID'):
+        for token in ('test_user_id', 'test_order_id'):
             if re.search(rf'(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])', text) and token not in found:
                 found.append(token)
     return found
@@ -2358,6 +2378,12 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     action_hint=action_hint,
                     api_match=api_match,
                 )
+                playbook_console_code = _build_playbook_poc(
+                    vuln_type=f.vulnerability_type,
+                    method=method,
+                    endpoint=endpoint,
+                    parameters=(api_match.parameters if api_match else []),
+                )
                 pb = ConsoleVerificationPlaybookSummary(
                     id=f.id,
                     title=f.title,
@@ -2378,12 +2404,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     data_flow=contract['data_flow'],
                     breakpoint_plan=contract['breakpoint_plan'],
                     poc_injection_plan=contract['poc_injection_plan'],
-                    console_code=_build_playbook_poc(
-                        vuln_type=f.vulnerability_type,
-                        method=method,
-                        endpoint=endpoint,
-                        parameters=(api_match.parameters if api_match else []),
-                    ),
+                    console_code=playbook_console_code,
                     setup_steps=executable_poc.steps,
                     proof_steps=_proof_steps(method, page_hint, action_hint),
                     success_criteria=_success_criteria(method),
@@ -2391,6 +2412,14 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     evidence_to_capture=_evidence_to_capture(method),
                     limitations=(f.verification_playbook.limitations if f.verification_playbook else []),
                 )
+                if f.verification_playbook:
+                    f.verification_playbook = f.verification_playbook.model_copy(
+                        update={
+                            'console_code': playbook_console_code,
+                            'console_steps': pb.proof_steps,
+                            'expected_observation': '; '.join(pb.success_criteria),
+                        }
+                    )
                 pri = {
                     'Payment/Point Manipulation Candidate': 1,
                     'Account Recovery Flow Abuse Candidate': 2,

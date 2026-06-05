@@ -249,3 +249,64 @@ Command used in this environment: `python(){ python3 "$@"; }; python -m pytest t
 - Promoted PoCs are helper-free and do not use `window.SSS_POC.find`.
 - ZIP Slip, path traversal, upload size, signature, content type, and extraction guards were not weakened.
 - No unmet goals remain.
+
+---
+
+## 2026-06-04 Follow-up: Console UX, Proof Steps, and Payload Fidelity
+
+### Final verify_goal.py output
+
+Command used in this environment: `python(){ python3 "$@"; }; python scripts/verify_goal.py`
+(`python` is not installed on PATH here; the shell-local shim invokes `/usr/bin/python3`.)
+
+```text
+verify_goal: 23 passed, 0 failed
+```
+
+### Final pytest summary
+
+Command used in this environment: `python(){ python3 "$@"; }; python -m pytest tests/ -v`
+
+```text
+383 passed in 2.93s
+```
+
+### Files changed
+
+- `app/services/poc_templates.py`
+- `app/services/console_poc_analysis_service.py`
+- `app/services/prompt_builder.py`
+- `tests/test_console_poc_analysis_service.py`
+- `docs/AI_RESULT.md`
+
+### Key functions changed
+
+- `_is_allowed_guarded_poc_code`: allows strict direct `fetch` POST/PUT/PATCH PoCs guarded by browser `confirm()`, while still rejecting `DELETE`, `refund`, `transfer`, `withdraw`, `bulk`, and `delete`.
+- `build_request_replay_poc`: uses one-paste browser confirmation, prints status/content-type/body preview, and includes all extracted safe payload keys.
+- `_proof_steps`: direct API playbooks now describe paste, approve confirmation, observe response, and compare in Network tab; no helper flow wording remains.
+- `analyze_console_exploitability`: promoted findings now get the same short `verification_playbook.console_code` as `result.verification_playbooks`.
+
+### Example generated direct PoC
+
+```javascript
+(async () => {
+  if (!confirm("[SSS PoC] Run approved POST /api/payments/iamport/complete?")) return;
+  const TEST_PAYMENT_UID = "REPLACE_WITH_TEST_PAYMENT_UID";
+  const TEST_ORDER_ID = "REPLACE_WITH_TEST_ORDER_ID";
+  const TEST_PRODUCT_ID = "REPLACE_WITH_TEST_PRODUCT_ID";
+  const r = await fetch("/api/payments/iamport/complete", {
+    method: "POST", credentials: "include",
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ "merchant_uid": TEST_PAYMENT_UID, "imp_uid": TEST_PAYMENT_UID, "orderId": TEST_ORDER_ID, "productId": TEST_PRODUCT_ID, "amount": 1, "buyer_email": "TEST_VALUE" }),
+  });
+  console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));
+})();
+```
+
+### Security review points
+
+- Destructive endpoint blocking remains before guard acceptance.
+- Promoted PoCs remain helper-free and within the 12 non-empty line limit.
+- Promoted proof steps do not mention `window.SSS_POC`, `armMutation`, `list()`, or `common_console_helper`.
+- Promoted finding-level playbook code no longer exposes `SSS_REVIEW_POC_STATE`, `TARGET_ENDPOINT`, or hook installer code.
+- No unmet goals remain.

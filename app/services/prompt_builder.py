@@ -204,7 +204,7 @@ def build_candidate_analysis_prompt(files: list[FileContent], candidates: list[A
         "If endpoint is UNKNOWN, do not claim confirmed vulnerability and include manual verification notes.\n"
         "If server-side checks cannot be confirmed from frontend source only, lower confidence.\n"
         "GET requests may include read-only browser_console PoC.\n"
-        "POST/PUT/PATCH requests must include a guarded executable PoC using CONFIRM_AUTHORIZED_TEST=false by default.\n"
+        "POST/PUT/PATCH requests must include a guarded executable PoC using a browser confirm() approval prompt by default.\n"
         "The PoC must be self-contained (no global fetch/XHR/axios hook install), <= 10 lines, and paste-ready.\n"
         "DELETE and irreversible actions must use manual_check or preview only.\n"
         "Do not generate destructive, bulk, delete, refund, transfer, withdraw, or irreversible PoC code.\n"

@@ -132,6 +132,7 @@ def build_request_replay_poc(
     endpoint: str,
     field: str = '',
     test_value: 'str | int | None' = None,
+    fields: 'list[str] | None' = None,
 ) -> 'str | None':
     """CONFIRM-guarded direct fetch replay, <= MAX_POC_LINES lines.
 
@@ -140,8 +141,8 @@ def build_request_replay_poc(
     constants so the tester can fill them in before running.
 
     For GET: no CONFIRM guard (read-only).
-    For POST/PUT/PATCH: CONFIRM_AUTHORIZED_TEST=false guard satisfies
-    _is_allowed_guarded_poc_code()'s legacy-guard pattern.
+    For POST/PUT/PATCH: browser confirm() guard gives the tester a clear
+    one-paste approval prompt while remaining non-destructive by default.
     """
     if not _is_safe_endpoint(endpoint):
         return None
@@ -196,27 +197,89 @@ def build_request_replay_poc(
         ]
         return '\n'.join(lines)
 
-    # Mutation request -- CONFIRM guard required
-    if field and test_value is not None:
-        val_js = json.dumps(test_value) if isinstance(test_value, (int, float)) else json.dumps(str(test_value))
-        body_js = 'JSON.stringify({ ' + json.dumps(field) + ': ' + val_js + ' })'
-    else:
-        body_js = 'JSON.stringify({})'
+    # Mutation request -- browser confirmation guard required.
+    body_fields = list(fields or [])
+    if field and field not in body_fields:
+        body_fields.insert(0, field)
+
+    const_decls.extend(_body_const_decls(body_fields, used))
+    body_js = _body_json_expr(body_fields, field, test_value)
 
     lines = (
         ['(async () => {',
-         '  const CONFIRM_AUTHORIZED_TEST = false;',
-         "  if (!CONFIRM_AUTHORIZED_TEST) { console.warn('[SSS PoC] Set CONFIRM_AUTHORIZED_TEST=true to run'); return; }"]
+         f'  if (!confirm("[SSS PoC] Run approved {m} {norm}?")) return;']
         + const_decls
         + [f'  const r = await fetch({url_expr}, {{',
            f'    method: {json.dumps(m)}, credentials: "include",',
            "    headers: { 'Content-Type': 'application/json' },",
            f'    body: {body_js},',
            '  });',
-           "  console.log('[SSS PoC]', r.status, await r.text().catch(() => ''));",
+           "  console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));",
            '})();']
     )
     return '\n'.join(lines)
+
+
+def _body_const_decls(fields: list[str], used: set[str]) -> list[str]:
+    decls: list[str] = []
+    for name in fields:
+        const_name = _body_const_name(name)
+        if not const_name or const_name in used:
+            continue
+        label = f'REPLACE_WITH_{const_name}'
+        decls.append(f'  const {const_name} = "{label}";')
+        used.add(const_name)
+    return decls
+
+
+def _body_json_expr(fields: list[str], field: str, test_value: 'str | int | None') -> str:
+    safe_fields = [f for f in fields if _safe_body_key(f)]
+    if not safe_fields and field and test_value is not None:
+        safe_fields = [field]
+    if not safe_fields:
+        return 'JSON.stringify({})'
+    parts: list[str] = []
+    for name in safe_fields[:8]:
+        key_js = json.dumps(name)
+        const_name = _body_const_name(name)
+        if const_name:
+            value_js = const_name
+        elif name.lower() in {'amount', 'price', 'totalamount', 'usepoints', 'quantity', 'qty', 'count', 'a', 'b'}:
+            value_js = '1'
+        elif name == field and test_value is not None:
+            value_js = json.dumps(test_value)
+        else:
+            value_js = json.dumps('TEST_VALUE')
+        parts.append(f'{key_js}: {value_js}')
+    return 'JSON.stringify({ ' + ', '.join(parts) + ' })'
+
+
+def _safe_body_key(name: str) -> bool:
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,60}', name or ''):
+        return False
+    low = name.lower()
+    return low not in {'method', 'url', 'headers', 'credentials', 'withcredentials', 'body', 'data', 'payload', 'options', 'config'}
+
+
+def _body_const_name(name: str) -> str | None:
+    low = name.lower()
+    if 'order' in low and 'id' in low:
+        return 'TEST_ORDER_ID'
+    if 'product' in low and 'id' in low:
+        return 'TEST_PRODUCT_ID'
+    if 'user' in low and 'id' in low:
+        return 'TEST_USER_ID'
+    if 'item' in low and 'id' in low:
+        return 'TEST_ITEM_ID'
+    if 'payment' in low and 'id' in low:
+        return 'TEST_PAYMENT_ID'
+    if 'token' in low:
+        return 'TEST_TOKEN'
+    if low in {'imp_uid', 'merchant_uid'}:
+        return 'TEST_PAYMENT_UID'
+    if low in {'code', 'authcode', 'verifycode', 'verificationcode'}:
+        return 'TEST_CODE'
+    return None
 
 
 def is_interceptor_free(code: str) -> bool:
