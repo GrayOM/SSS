@@ -62,6 +62,64 @@ _VULN_TYPE_TO_CATEGORY: dict[str, str] = {
     'Generic API Review Candidate': 'Business Logic Manipulation',
 }
 
+# Internal category codes used by playbook helper functions.
+_INTERNAL_CATEGORY_MAP: dict[str, str] = {
+    'DOM XSS': 'xss',
+    'Client-side Authorization Bypass': 'authorization',
+    'Client-side Validation Bypass': 'client_side_validation',
+    'Payment/Point Manipulation Candidate': 'payment_or_value_mutation',
+    'IDOR / Unauthorized Data Access Candidate': 'idor_bola',
+    'State/Status Manipulation Candidate': 'role_or_state_mutation',
+    'Account Recovery Flow Abuse Candidate': 'account_recovery',
+    'Identity Verification / Action Authorization Bypass Candidate': 'authorization',
+    'Generic API Review Candidate': 'generic',
+}
+
+# Categories that keep low-confidence findings in the promotion-eligible pool.
+_HIGH_PRIORITY_CATEGORIES = frozenset({
+    'Payment/Price/Point/Coupon Manipulation',
+    'Account Recovery Weakness',
+    'IDOR/BOLA',
+    'Admin/Role/Permission Bypass',
+})
+
+
+def _category_for(vuln_type: str) -> str:
+    """Return an internal category code for *vuln_type*.
+
+    Tries exact lookup first so canonical mock-emitted types always resolve
+    correctly.  Falls back to strict multi-word keyword matching for
+    Gemini-generated free-form strings.
+
+    'access' alone does NOT imply idor_bola.
+    'account' alone does NOT imply account_recovery.
+    """
+    exact = _INTERNAL_CATEGORY_MAP.get(vuln_type)
+    if exact:
+        return exact
+    vt = vuln_type.lower()
+    if 'xss' in vt or 'cross-site scripting' in vt:
+        return 'xss'
+    if any(k in vt for k in ('payment', 'price', 'point', 'coupon', 'balance', 'amount', 'discount', 'order total')):
+        return 'payment_or_value_mutation'
+    # Require 'idor', 'bola', or a specific multi-word phrase — never classify on
+    # 'access' or 'unauthorized' alone, which appear in many unrelated types.
+    if ('idor' in vt or 'bola' in vt
+            or 'object-level authorization' in vt
+            or 'unauthorized data access' in vt
+            or 'object access' in vt):
+        return 'idor_bola'
+    # Require a specific phrase for recovery — 'account' alone is too broad.
+    if any(k in vt for k in ('account recovery', 'password reset', 'verification code', 'recovery token', 'reset password')):
+        return 'account_recovery'
+    if any(k in vt for k in ('state manipulation', 'status manipulation', 'role manipulation', 'role tamper', 'privilege escalation', 'state/status')):
+        return 'role_or_state_mutation'
+    if any(k in vt for k in ('validation bypass', 'client-side validation', 'client side validation')):
+        return 'client_side_validation'
+    if any(k in vt for k in ('authorization bypass', 'auth bypass', 'access control bypass', 'broken access control')):
+        return 'authorization'
+    return 'generic'
+
 
 def _normalize_runtime_hint(value: str | None) -> str:
     return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
@@ -1284,34 +1342,33 @@ def _success_criteria(method: str, vuln_type: str = '') -> list[str]:
             'controlled input reaches the DOM sink and script executes (console.log fires) or clear DOM mutation is observed',
             'OR sanitizer/encoding blocks execution and DOM output is safely escaped',
         ]
-    vt = vuln_type.lower()
-    if 'payment' in vt or 'point' in vt or 'price' in vt or 'coupon' in vt or 'balance' in vt:
+    cat = _category_for(vuln_type)
+    if cat == 'payment_or_value_mutation':
         return [
             'mutated amount/price/quantity/point value is reflected in server-side result, balance, order record, or transaction state',
             'OR server explicitly rejects the mutation with a clear validation or authorization error (not just a generic 5xx)',
         ]
-    if 'idor' in vt or 'unauthorized' in vt or 'access' in vt:
+    if cat == 'idor_bola':
         return [
             'server returns object/user/order data belonging to another user or session',
             'OR server rejects with 401/403 or an explicit object-ownership validation error',
         ]
-    if 'recovery' in vt or 'verification code' in vt or 'account' in vt:
+    if cat == 'account_recovery':
         return [
             'invalid, reused, or brute-forced verification code is accepted by the server',
             'OR reset token is not bound to the requesting user/session/action',
             'OR server rejects invalid flow with rate-limit or token-binding evidence',
         ]
-    if 'state' in vt or 'status' in vt or 'role' in vt or 'permission' in vt or 'authorization' in vt:
+    if cat in ('role_or_state_mutation', 'authorization'):
         return [
             'mutated role/status/state value is accepted or persisted by the server',
             'OR server rejects the change with an explicit authorization or state-transition validation error',
         ]
-    if 'bypass' in vt or 'validation' in vt:
+    if cat == 'client_side_validation':
         return [
             'server accepts the request with a manipulated parameter value that should have been rejected client-side',
             'OR server enforces the constraint and rejects with a clear validation error',
         ]
-    # Generic fallback — still security-impact focused
     return [
         'server response to the manipulated request differs meaningfully from the normal request (different data, status, or behavior)',
         'OR server enforces expected access control and rejects the manipulation with an authorization/validation error',
@@ -1325,11 +1382,31 @@ def _failure_criteria(method: str, vuln_type: str = '') -> list[str]:
             'DOM sink is not invoked by the controlled source',
             'sanitizer strips the payload before assignment',
         ]
-    vt = vuln_type.lower()
-    if 'payment' in vt or 'point' in vt or 'price' in vt:
+    cat = _category_for(vuln_type)
+    if cat == 'payment_or_value_mutation':
         return [
             'server validates the amount/price server-side and rejects the manipulated value',
             'response shows the original server-enforced value, not the client-supplied one',
+        ]
+    if cat == 'idor_bola':
+        return [
+            'server rejects with 403 and an explicit ownership or authorization error',
+            'response contains only data belonging to the requesting user/session',
+        ]
+    if cat == 'account_recovery':
+        return [
+            'server rejects invalid/reused verification codes with rate-limiting or an explicit binding error',
+            'reset token is scoped to the requesting user/session and cannot be replayed',
+        ]
+    if cat in ('role_or_state_mutation', 'authorization'):
+        return [
+            'server enforces the role/state transition server-side and rejects the unauthorized change',
+            'client-side guard removal does not grant access to the protected resource',
+        ]
+    if cat == 'client_side_validation':
+        return [
+            'server enforces the same constraint server-side and rejects the manipulated parameter',
+            'response shows a clear validation error, not a success status',
         ]
     return [
         'server rejects with 400/401/403 and a clear validation or authorization error',
@@ -1347,18 +1424,36 @@ def _evidence_to_capture(method: str, vuln_type: str = '') -> list[str]:
             'Screenshot: DOM mutation or alert proving payload reached the sink',
             'Call Stack: trace showing the input flowing to the sink without encoding',
         ]
-    vt = vuln_type.lower()
-    if 'payment' in vt or 'point' in vt or 'price' in vt:
+    cat = _category_for(vuln_type)
+    if cat == 'payment_or_value_mutation':
         return [
             'Network tab: original request (normal flow) showing expected amount/price',
             'Network tab or Console: manipulated request body showing altered amount/price',
             'Server response: showing reflected value, transaction record, or rejection message',
         ]
-    if 'idor' in vt or 'unauthorized' in vt:
+    if cat == 'idor_bola':
         return [
-            'Network tab: request with another user/object identifier',
+            'Network tab: request with another user/object identifier substituted',
             'Server response: showing data that should not be accessible to the current session',
             'OR server rejection with 403 and ownership-validation message',
+        ]
+    if cat == 'account_recovery':
+        return [
+            'Network tab: recovery/verification request with manipulated code or token',
+            'Server response: showing acceptance or rejection of invalid/reused token',
+            'Screenshot: rate-limit response or token-binding validation error',
+        ]
+    if cat in ('role_or_state_mutation', 'authorization'):
+        return [
+            'Network tab: request with manipulated role/status/state parameter',
+            'Server response: showing accepted or rejected mutation with authorization details',
+            'Screenshot: UI state after bypass attempt (access granted or denied)',
+        ]
+    if cat == 'client_side_validation':
+        return [
+            'Network tab: request with parameter value that violates client-side validation',
+            'Server response: showing validation accepted or rejected server-side',
+            'Console: PoC execution log showing the manipulated request was sent',
         ]
     return [
         'Network tab: normal request URL/method/payload for comparison baseline',
@@ -2300,17 +2395,18 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             )
         )
 
+        # Assign security rule category before should_review so the gate can use it.
+        f.category = _VULN_TYPE_TO_CATEGORY.get(f.vulnerability_type, 'Business Logic Manipulation')
+
         should_review = (
             (not is_confirmed_short_poc or (score < 0 and f.vulnerability_type not in {'DOM XSS', 'Client-side Authorization Bypass'})) and (
                 is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
                 bool(unresolved_placeholders) or
                 is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
                 (score < PROMOTION_SCORE_THRESHOLD and not is_dom_flow) or
-                (is_low_conf and 'Payment' not in f.vulnerability_type and 'Account Recovery' not in f.vulnerability_type and 'IDOR' not in f.vulnerability_type and 'Authorization' not in f.vulnerability_type)
+                (is_low_conf and f.category not in _HIGH_PRIORITY_CATEGORIES)
             )
         )
-        # Assign generic security rule category
-        f.category = _VULN_TYPE_TO_CATEGORY.get(f.vulnerability_type, 'Business Logic Manipulation')
         if should_review:
             # Clear PoC code when demoting to review:
             #   - full hook codes (SSS_REVIEW_POC_STATE / TARGET_ENDPOINT)
@@ -2492,7 +2588,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     'Client-side Validation Bypass': 5,
                 }.get(f.vulnerability_type, 99)
                 playbook_candidates.append((pri, pb))
-            if (f.severity in {'high', 'medium'} and f.confidence != 'low') or any(x in f.vulnerability_type for x in ('Payment', 'Account Recovery', 'IDOR', 'Authorization')):
+            if (f.severity in {'high', 'medium'} and f.confidence != 'low') or f.category in _HIGH_PRIORITY_CATEGORIES:
                 executive_findings.append(f)
     # sort, dedup, cap playbooks
     playbook_candidates.sort(key=lambda x: x[0])

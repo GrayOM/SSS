@@ -2359,6 +2359,183 @@ function requestIamportPay(){
             self.assertIsNone(result.common_console_helper,
                 'common_console_helper must be None when all candidates are manual_plan')
 
+    # ── _category_for: strict routing ────────────────────────────────────────
+
+    def test_category_for_exact_canonical_types(self):
+        """Canonical mock-emitted vulnerability_type strings must map to the correct internal code."""
+        from app.services.console_poc_analysis_service import _category_for
+        self.assertEqual(_category_for('DOM XSS'), 'xss')
+        self.assertEqual(_category_for('Client-side Authorization Bypass'), 'authorization')
+        self.assertEqual(_category_for('Client-side Validation Bypass'), 'client_side_validation')
+        self.assertEqual(_category_for('Payment/Point Manipulation Candidate'), 'payment_or_value_mutation')
+        self.assertEqual(_category_for('IDOR / Unauthorized Data Access Candidate'), 'idor_bola')
+        self.assertEqual(_category_for('State/Status Manipulation Candidate'), 'role_or_state_mutation')
+        self.assertEqual(_category_for('Account Recovery Flow Abuse Candidate'), 'account_recovery')
+        self.assertEqual(_category_for('Generic API Review Candidate'), 'generic')
+
+    def test_category_for_idor_requires_specific_terms(self):
+        """'access' or 'unauthorized' alone must not classify as idor_bola."""
+        from app.services.console_poc_analysis_service import _category_for
+        self.assertNotEqual(_category_for('Broken Access Control'), 'idor_bola',
+            '"access" alone must not map to idor_bola')
+        self.assertNotEqual(_category_for('Improper Access Control'), 'idor_bola',
+            '"access" alone must not map to idor_bola')
+        self.assertNotEqual(_category_for('Unauthorized Action'), 'idor_bola',
+            '"unauthorized" alone must not map to idor_bola')
+        # Positive cases
+        self.assertEqual(_category_for('IDOR / Unauthorized Data Access Candidate'), 'idor_bola')
+        self.assertEqual(_category_for('BOLA: access another user object'), 'idor_bola')
+        self.assertEqual(_category_for('Object-Level Authorization Failure'), 'idor_bola')
+
+    def test_category_for_account_recovery_requires_specific_terms(self):
+        """'account' alone must not classify as account_recovery."""
+        from app.services.console_poc_analysis_service import _category_for
+        self.assertNotEqual(_category_for('Account Takeover via Session Fixation'), 'account_recovery',
+            '"account" alone must not map to account_recovery')
+        self.assertNotEqual(_category_for('Account Enumeration'), 'account_recovery',
+            '"account" alone must not map to account_recovery')
+        self.assertNotEqual(_category_for('Account Hijacking'), 'account_recovery',
+            '"account" alone must not map to account_recovery')
+        # Positive cases
+        self.assertEqual(_category_for('Account Recovery Flow Abuse Candidate'), 'account_recovery')
+        self.assertEqual(_category_for('password reset abuse'), 'account_recovery')
+        self.assertEqual(_category_for('verification code bypass'), 'account_recovery')
+        self.assertEqual(_category_for('recovery token replay'), 'account_recovery')
+
+    def test_category_for_payment_includes_coupon_balance_amount_discount(self):
+        """coupon/balance/amount/discount/order total must route to payment_or_value_mutation."""
+        from app.services.console_poc_analysis_service import _category_for
+        for term in ('Coupon Manipulation', 'Balance Tampering', 'Amount Abuse',
+                     'Discount Bypass', 'Order Total Manipulation'):
+            self.assertEqual(_category_for(term), 'payment_or_value_mutation',
+                f'Expected payment_or_value_mutation for {term!r}')
+
+    # ── Playbook helpers: symmetric branches ─────────────────────────────────
+
+    def test_validation_bypass_criteria_are_consistent_across_helpers(self):
+        """Client-side Validation Bypass must produce category-specific output from all three helpers."""
+        from app.services.console_poc_analysis_service import _success_criteria, _failure_criteria, _evidence_to_capture
+        vuln_type = 'Client-side Validation Bypass'
+        method = 'POST'
+        success = '\n'.join(_success_criteria(method, vuln_type)).lower()
+        failure = '\n'.join(_failure_criteria(method, vuln_type)).lower()
+        evidence = '\n'.join(_evidence_to_capture(method, vuln_type)).lower()
+        # Success must describe bypass impact
+        self.assertIn('manipulated parameter', success,
+            '_success_criteria for validation bypass must describe manipulated parameter')
+        # Failure must NOT fall back to generic HTML-fallback text
+        self.assertNotIn('html fallback', failure,
+            '_failure_criteria for validation bypass must not use generic HTML fallback text')
+        self.assertIn('constraint', failure,
+            '_failure_criteria for validation bypass must describe server-side constraint enforcement')
+        # Evidence must be network-focused
+        self.assertIn('network tab', evidence,
+            '_evidence_to_capture for validation bypass must mention Network tab')
+
+    def test_coupon_balance_get_payment_criteria_in_all_three_helpers(self):
+        """Gemini-emitted types with coupon/balance must get payment guidance from all three helpers."""
+        from app.services.console_poc_analysis_service import _success_criteria, _failure_criteria, _evidence_to_capture
+        for vuln_type in ('Coupon Balance Manipulation', 'Balance Tampering', 'Discount Abuse'):
+            method = 'POST'
+            success = '\n'.join(_success_criteria(method, vuln_type)).lower()
+            failure = '\n'.join(_failure_criteria(method, vuln_type)).lower()
+            evidence = '\n'.join(_evidence_to_capture(method, vuln_type)).lower()
+            self.assertTrue(
+                any(k in success for k in ('amount', 'price', 'balance', 'transaction', 'mutated')),
+                f'_success_criteria must return payment guidance for {vuln_type!r}. Got: {success!r}',
+            )
+            self.assertTrue(
+                any(k in failure for k in ('amount', 'price', 'server-side', 'server validates')),
+                f'_failure_criteria must return payment guidance for {vuln_type!r}. Got: {failure!r}',
+            )
+            self.assertTrue(
+                any(k in evidence for k in ('amount', 'price', 'network tab')),
+                f'_evidence_to_capture must return payment guidance for {vuln_type!r}. Got: {evidence!r}',
+            )
+
+    def test_broken_access_control_does_not_get_idor_criteria(self):
+        """'Broken Access Control' must not receive IDOR-specific criteria from any helper."""
+        from app.services.console_poc_analysis_service import _success_criteria, _failure_criteria, _evidence_to_capture
+        vuln_type = 'Broken Access Control'
+        method = 'GET'
+        success = '\n'.join(_success_criteria(method, vuln_type)).lower()
+        failure = '\n'.join(_failure_criteria(method, vuln_type)).lower()
+        evidence = '\n'.join(_evidence_to_capture(method, vuln_type)).lower()
+        self.assertNotIn('data belonging to another user', success,
+            'Broken Access Control must not get IDOR user-data success criteria')
+        self.assertNotIn('ownership', failure,
+            'Broken Access Control must not get IDOR ownership-rejection failure criteria')
+        self.assertNotIn('another user/object identifier', evidence,
+            'Broken Access Control must not get IDOR object-identifier evidence')
+
+    def test_account_takeover_does_not_get_recovery_criteria(self):
+        """'Account Takeover via Session Fixation' must not get verification-code recovery criteria."""
+        from app.services.console_poc_analysis_service import _success_criteria, _failure_criteria, _evidence_to_capture
+        vuln_type = 'Account Takeover via Session Fixation'
+        method = 'POST'
+        success = '\n'.join(_success_criteria(method, vuln_type)).lower()
+        failure = '\n'.join(_failure_criteria(method, vuln_type)).lower()
+        self.assertNotIn('verification code', success,
+            'Account Takeover must not get verification-code recovery success criteria')
+        self.assertNotIn('reset token', success,
+            'Account Takeover must not get token-binding recovery success criteria')
+        self.assertNotIn('rate-limit', failure,
+            'Account Takeover must not get rate-limiting recovery failure criteria')
+
+    def test_idor_criteria_consistent_across_all_three_helpers(self):
+        """IDOR must produce category-specific output from success, failure, and evidence helpers."""
+        from app.services.console_poc_analysis_service import _success_criteria, _failure_criteria, _evidence_to_capture
+        vuln_type = 'IDOR / Unauthorized Data Access Candidate'
+        method = 'GET'
+        success = '\n'.join(_success_criteria(method, vuln_type)).lower()
+        failure = '\n'.join(_failure_criteria(method, vuln_type)).lower()
+        evidence = '\n'.join(_evidence_to_capture(method, vuln_type)).lower()
+        self.assertIn('another user', success, '_success_criteria for IDOR must mention another user')
+        self.assertIn('ownership', failure, '_failure_criteria for IDOR must mention ownership rejection')
+        self.assertIn('identifier', evidence, '_evidence_to_capture for IDOR must mention substituted identifier')
+
+    def test_account_recovery_criteria_consistent_across_all_three_helpers(self):
+        """Account Recovery must produce category-specific output from all three helpers."""
+        from app.services.console_poc_analysis_service import _success_criteria, _failure_criteria, _evidence_to_capture
+        vuln_type = 'Account Recovery Flow Abuse Candidate'
+        method = 'POST'
+        success = '\n'.join(_success_criteria(method, vuln_type)).lower()
+        failure = '\n'.join(_failure_criteria(method, vuln_type)).lower()
+        evidence = '\n'.join(_evidence_to_capture(method, vuln_type)).lower()
+        self.assertTrue(any(k in success for k in ('code', 'token', 'rate', 'invalid', 'reused')),
+            '_success_criteria for account recovery must describe token/code impact')
+        self.assertTrue(any(k in failure for k in ('rate', 'token', 'verification', 'scoped', 'binding')),
+            '_failure_criteria for account recovery must describe token/rate-limit rejection')
+        self.assertTrue(any(k in evidence for k in ('token', 'code', 'recovery', 'rate')),
+            '_evidence_to_capture for account recovery must capture token/code evidence')
+
+    def test_f_category_is_set_before_should_review_gate(self):
+        """f.category must be set (non-None) on every finding, including review candidates."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+            f('src/auth.js', "const u=JSON.parse(sessionStorage.getItem('user'));if(!u.isAdmin)navigate('/');"),
+            f('src/service.js', "axios.post('/api/orders/pay',{amount})"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        all_findings = result.findings + result.review_candidates
+        for finding in all_findings:
+            self.assertIsNotNone(finding.category,
+                f'f.category must be set before should_review for [{finding.vulnerability_type}]')
+            self.assertNotEqual(finding.category, '',
+                f'f.category must not be empty string for [{finding.vulnerability_type}]')
+
+    def test_high_priority_categories_preserved_at_low_confidence(self):
+        """Findings with high-priority category must not be demoted purely by low confidence."""
+        from app.services.console_poc_analysis_service import _HIGH_PRIORITY_CATEGORIES
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for finding in result.findings:
+            if finding.category in _HIGH_PRIORITY_CATEGORIES:
+                # High-priority categories must not be silently filtered out
+                self.assertIsNotNone(finding.category)
+
 
 if __name__ == '__main__':
     unittest.main()

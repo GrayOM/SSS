@@ -23,6 +23,10 @@ Source-code analysis -> review candidates -> short PoC generation -> browser con
 ## Commands
 
 ```bash
+# First-time setup
+cp .env.example .env
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
 # Run all tests
 make test
 # or
@@ -49,11 +53,12 @@ docker compose build && docker compose up
 ```
 ZIP upload
   -> prepare_uploaded_zip        (upload_service: MIME, ZIP Slip, size, symlink checks)
+                                  zip_service: actual extraction with path-traversal defense
   -> scan_extracted_directory    (scan_service: extension/path allowlist filtering)
   -> load_file_contents          (file_content_loader: reads allowed files as FileContent[])
   -> build_chunks                (chunk_service: splits files into CodeChunk[] with overlap)
   -> analyze_chunks              (analysis_service: MockAnalyzer or GeminiAnalyzer per chunk)
-  -> analyze_console_exploitability  (console_poc_analysis_service: produces ReadableFinding[])
+  -> analyze_console_exploitability  (console_poc_analysis_service: produces ReadableAnalysisResult)
   -> save_analysis_run           (analysis_run_repository: persists to SQLite)
   -> FullAnalysisResponse        (response_mapper: strips raw content before JSON return)
 ```
@@ -63,18 +68,32 @@ ZIP upload
 | Path | Service | Output | Purpose |
 |---|---|---|---|
 | Chunk analyzer | `analysis_service.py` | `VulnerabilityFinding[]` | Pattern/Gemini per-chunk findings |
-| Console PoC analyzer | `console_poc_analysis_service.py` | `ReadableFinding[]` | Browser-console-oriented, promotion-scored |
+| Console PoC analyzer | `console_poc_analysis_service.py` | `ReadableAnalysisResult` | Browser-console-oriented, promotion-scored |
 
 `readable_analysis` (console PoC path) is the primary output for security diagnostics; `analysis` (chunk path) is legacy.
+
+### ReadableAnalysisResult output structure
+
+`analyze_console_exploitability` returns `ReadableAnalysisResult` with these key fields:
+
+- `executive_findings` - promoted findings (score ≥ 5, concrete PoC attached)
+- `verification_playbooks` - `ConsoleVerificationPlaybookSummary[]` (runtime verification candidates)
+- `review_candidates` - findings needing manual review (prefixed `"Manual review candidate:"`)
+- `common_console_helper` - shared JS setup code for interceptor-based PoCs
+- `project_profile` - `ProjectProfile` with noise ratio, scanned file counts, raw signal counts
 
 ### Key service files
 
 - `source_intelligence.py` - builds `ProjectUnderstandingResult` (framework detection, route/page/API manifest, risk categorization)
 - `api_candidate_extractor.py` - extracts `ApiCallCandidate[]` and `UiEventCandidate[]` from JS/HTML source
 - `console_poc_analysis_service.py` - promotion scoring, `_build_common_console_helper`, `_build_network_hook_mutation_poc`, `_build_short_console_verification_code`; also contains `MockConsolePocAnalyzer` and `GeminiConsolePocAnalyzer`
-- `poc_templates.py` - reusable PoC template builders (`build_dom_xss_poc`, `build_storage_auth_poc`, `build_request_replay_poc`)
+- `poc_templates.py` - self-contained PoC builders (`build_dom_xss_poc`, `build_storage_auth_poc`, `build_request_replay_poc`); `MAX_POC_LINES=12`, `INTERCEPTOR_SIGS` blocklist
+- `poc_service.py` - `MockPocGenerator` and `GeminiPocGenerator`; selected via `POC_BACKEND`
+- `zip_service.py` - low-level ZIP extraction with path-traversal and symlink defense; called by `upload_service`
 - `prompt_builder.py` - constructs Gemini prompts for both chunk analysis and console PoC analysis
 - `response_mapper.py` - strips `content` fields before saving/returning
+- `analysis_quality_evaluator.py` - evaluates finding quality; used by scripts
+- `corpus_learning_service.py` - produces generalization learning reports from sample results
 
 ### Analyzer backends (configurable via `.env`)
 
@@ -94,11 +113,18 @@ GEMINI_MODEL=gemini-2.5-flash-lite   # default
 - `_is_allowed_guarded_poc_code` enforces the guard policy: mutation PoCs must contain `sss_poc_state`/`sss_review_poc_state` with `armMutation`/`disarm`, or a `confirm()`-gated guard. DELETE/refund/transfer endpoints are always blocked.
 - `UNRESOLVED_POC_PLACEHOLDERS` - findings with unresolved placeholders (`{API_BASE_URL}`, `{userId}`, etc.) are downgraded to manual review candidates, not promoted findings.
 - `PROMOTION_SCORE_THRESHOLD = 5` - findings below this score stay as review candidates.
+- `poc_templates.py` builders return pure JS with no interceptor signatures; output must pass `is_interceptor_free()`.
 
-### Finding states
+### Finding lifecycle
 
-1. **Review candidate** - title prefixed `"Manual review candidate:"`, needs runtime capture
-2. **Promoted finding** - score >= 5, concrete endpoint/page/action resolved, observational PoC attached
+```
+raw_signal -> review_candidate -> runtime_verification_candidate -> confirmed_finding
+```
+
+1. **raw_signal** - extracted from source, not yet scored
+2. **review_candidate** - title prefixed `"Manual review candidate:"`, score < 5 or unresolved placeholders
+3. **runtime_verification_candidate** - `ConsoleVerificationPlaybookSummary` generated, needs live session to confirm
+4. **confirmed_finding** - score ≥ 5, concrete endpoint/page/action resolved, PoC attached; appears in `executive_findings`
 
 ### API surface
 
@@ -111,7 +137,7 @@ GEMINI_MODEL=gemini-2.5-flash-lite   # default
 
 ### ZIP security policy
 
-ZIP Slip defense, MIME type validation, member count limit (`MAX_ZIP_MEMBERS=5000`), uncompressed size limit (`MAX_UNCOMPRESSED_SIZE_MB=200`), symlink blocking, upload size limit (`MAX_UPLOAD_SIZE_MB=20`). These limits must not be weakened.
+ZIP Slip defense, MIME type validation, member count limit (`MAX_ZIP_MEMBERS=5000`), uncompressed size limit (`MAX_UNCOMPRESSED_SIZE_MB=200`), per-file size limit (`MAX_FILE_SIZE_BYTES=2MB`), symlink blocking, upload size limit (`MAX_UPLOAD_SIZE_MB=20`). These limits must not be weakened.
 
 ### File inclusion policy
 

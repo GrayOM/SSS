@@ -5,7 +5,8 @@
       "Edit",
       "Write",
       "Bash(*)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Skill(code-review)"
     ],
     "deny": [
       "Read(.env)",
