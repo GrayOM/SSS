@@ -262,5 +262,150 @@ class ZipSecurityTests(unittest.TestCase):
                 settings.MAX_UNCOMPRESSED_SIZE_MB = original
 
 
+class FilterPolicyExtendedTests(unittest.TestCase):
+    """Additional filter policy tests filling gaps in the test suite."""
+
+    # ── Source extensions ─────────────────────────────────────────────────────
+
+    def test_mjs_cjs_included_as_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            for ext in ('.mjs', '.cjs'):
+                p = Path(td) / f'module{ext}'
+                p.write_text('export default 1;')
+                d = should_include_file(p)
+                self.assertTrue(d.include, f'{ext} must be included')
+                self.assertEqual(d.reason_code, 'INCLUDED_SOURCE', f'{ext} reason_code wrong')
+                self.assertEqual(d.priority, 1, f'{ext} must have PRIORITY_SOURCE=1')
+
+    def test_jsx_tsx_included_as_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            for ext in ('.jsx', '.tsx'):
+                p = Path(td) / f'Component{ext}'
+                p.write_text('export default function C(){return <div/>;}')
+                d = should_include_file(p)
+                self.assertTrue(d.include, f'{ext} must be included')
+                self.assertEqual(d.reason_code, 'INCLUDED_SOURCE')
+                self.assertEqual(d.priority, 1)
+
+    def test_vue_included_as_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'App.vue'
+            p.write_text('<template><div/></template>')
+            d = should_include_file(p)
+            self.assertTrue(d.include)
+            self.assertEqual(d.reason_code, 'INCLUDED_SOURCE')
+            self.assertEqual(d.priority, 1)
+
+    # ── Template extensions ───────────────────────────────────────────────────
+
+    def test_html_ejs_hbs_pug_included_as_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            for ext in ('.html', '.hbs', '.pug'):
+                p = Path(td) / f'page{ext}'
+                p.write_text('<div>hello</div>')
+                d = should_include_file(p)
+                self.assertTrue(d.include, f'{ext} must be included')
+                self.assertEqual(d.reason_code, 'INCLUDED_TEMPLATE', f'{ext} reason_code wrong')
+                self.assertEqual(d.priority, 3, f'{ext} must have PRIORITY_TEMPLATE=3 (lower than source)')
+
+    def test_htm_included_as_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'index.htm'
+            p.write_text('<html><body/></html>')
+            d = should_include_file(p)
+            self.assertTrue(d.include)
+            self.assertEqual(d.reason_code, 'INCLUDED_TEMPLATE')
+
+    # ── Env files ─────────────────────────────────────────────────────────────
+
+    def test_env_sample_included(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / '.env.sample'
+            p.write_text('API_KEY=YOUR_KEY_HERE')
+            d = should_include_file(p)
+            self.assertTrue(d.include, '.env.sample must be included')
+            self.assertEqual(d.reason_code, 'INCLUDED_CONFIG')
+
+    def test_env_real_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name in ('.env', 'production.env', 'staging.env'):
+                p = Path(td) / name
+                p.write_text('SECRET=real_value')
+                d = should_include_file(p)
+                self.assertFalse(d.include, f'{name} must be excluded')
+
+    # ── Excluded directories ──────────────────────────────────────────────────
+
+    def test_build_coverage_git_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            for dir_name in ('build', 'coverage', '.git'):
+                src = Path(td) / dir_name / 'output.js'
+                src.parent.mkdir(parents=True)
+                src.write_text('x=1')
+                d = should_include_file(src)
+                self.assertFalse(d.include, f'{dir_name}/ must be excluded')
+                self.assertEqual(d.reason_code, 'EXCLUDED_DIR')
+
+    def test_vendor_libs_cdn_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            for dir_name in ('vendor', 'libs', 'cdn'):
+                src = Path(td) / dir_name / 'lib.js'
+                src.parent.mkdir(parents=True)
+                src.write_text('x=1')
+                d = should_include_file(src)
+                self.assertFalse(d.include, f'{dir_name}/ must be excluded')
+
+    # ── Minified / bundle patterns ────────────────────────────────────────────
+
+    def test_chunk_js_and_min_js_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name in ('vendors.chunk.js', 'main.chunk.js', 'app.min.js', 'react.min.js'):
+                p = Path(td) / name
+                p.write_text('a=1')
+                d = should_include_file(p)
+                self.assertFalse(d.include, f'{name} must be excluded')
+                self.assertEqual(d.reason_code, 'EXCLUDED_MINIFIED')
+
+    def test_standalone_bundle_js_excluded(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / 'bundle.js'
+            p.write_text('a=1')
+            d = should_include_file(p)
+            self.assertFalse(d.include, 'bundle.js must be excluded')
+
+    def test_webpack_content_signature_exclusion(self):
+        """Files containing webpack runtime signatures are excluded regardless of name."""
+        with tempfile.TemporaryDirectory() as td:
+            for sig in ('self.webpackChunk', '__webpack_require__', 'webpackJsonp'):
+                p = Path(td) / 'app-abc.js'
+                p.write_text(f'var a=1; {sig}({{}});')
+                d = should_include_file(p)
+                self.assertFalse(d.include, f'webpack sig {sig!r} must exclude file')
+
+    # ── Priority ordering ─────────────────────────────────────────────────────
+
+    def test_source_has_higher_priority_than_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            js = Path(td) / 'a.js'
+            js.write_text('x')
+            html = Path(td) / 'b.html'
+            html.write_text('<p>x</p>')
+            dj = should_include_file(js)
+            dh = should_include_file(html)
+            self.assertLess(dj.priority, dh.priority,
+                'Source files (priority=1) must rank higher than templates (priority=3)')
+
+    def test_source_has_higher_priority_than_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            js = Path(td) / 'a.js'
+            js.write_text('x')
+            pkg = Path(td) / 'package.json'
+            pkg.write_text('{}')
+            dj = should_include_file(js)
+            dp = should_include_file(pkg)
+            self.assertLess(dj.priority, dp.priority,
+                'Source files (priority=1) must rank higher than config (priority=2)')
+
+
 if __name__ == '__main__':
     unittest.main()

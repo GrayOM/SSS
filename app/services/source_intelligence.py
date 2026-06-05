@@ -47,7 +47,13 @@ def _is_vendor_or_minified(file: FileContent) -> bool:
     if chunk_re.match(name):
         return True
     head = file.content[:4096].lower()
-    return any(sig in head for sig in _MINIFIED_SIGS)
+    if any(sig in head for sig in _MINIFIED_SIGS):
+        return True
+    # Single-line files > 800 chars are likely minified (no newlines = minified output)
+    lines = file.content.splitlines() or ['']
+    if max(len(ln) for ln in lines) > 800:
+        return True
+    return False
 
 
 def _detect_project_type(files: list[FileContent]) -> str:
