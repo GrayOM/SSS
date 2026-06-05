@@ -1284,7 +1284,11 @@ def _proof_steps(method: str, page_hint: str, action_hint: str) -> list[str]:
 def _success_criteria(method: str) -> list[str]:
     if method == 'DOM':
         return ['test payload reaches the DOM sink', 'alert fires or clear DOM change is observed in the browser']
-    return ['request payload captured in Console', 'specified field is mutated after armMutation', 'server accepts mutated value with 200/201 or state change', 'or unauthorized object read returns 200']
+    return [
+        'response status/content-type/body preview is visible in Console',
+        'server accepts or rejects the test payload with an explainable status/body',
+        'normal Network request can be compared against the direct fetch request',
+    ]
 
 
 def _failure_criteria(method: str) -> list[str]:
@@ -1296,7 +1300,12 @@ def _failure_criteria(method: str) -> list[str]:
 def _evidence_to_capture(method: str) -> list[str]:
     if method == 'DOM':
         return ['Sources breakpoint location', 'Console PoC execution log', 'DOM change or alert execution screenshot', 'Call Stack showing input reaching sink']
-    return ['Console capture log', 'Network request URL/method', 'payload before mutation', 'payload after mutation', 'server response status/body', 'UI state change']
+    return [
+        'Console screenshot showing response status/content-type/body preview',
+        'Network tab screenshot of the normal request URL/method/payload',
+        'Network tab screenshot of the direct fetch request URL/method/payload',
+        'server response status/body screenshot as evidence',
+    ]
 
 
 def _find_validation_return_breakpoints(f: FileContent, candidate: ApiCallCandidate | None = None) -> list[BreakpointHint]:

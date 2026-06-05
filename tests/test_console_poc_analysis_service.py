@@ -1281,6 +1281,21 @@ function submitOrder(event) {
         for forbidden in ('window.SSS_POC', 'armMutation', 'list()', 'common_console_helper'):
             self.assertNotIn(forbidden, steps)
 
+    def test_direct_api_success_and_evidence_wording_has_no_helper_flow(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = result.verification_playbooks[0]
+        success = '\n'.join(playbook.success_criteria)
+        evidence = '\n'.join(playbook.evidence_to_capture)
+        self.assertIn('response status/content-type/body preview is visible', success)
+        self.assertIn('server accepts or rejects the test payload', success)
+        self.assertIn('normal Network request', success)
+        self.assertIn('response status/content-type/body preview', evidence)
+        self.assertIn('server response status/body screenshot', evidence)
+        for forbidden in ('capture log', 'armMutation', 'payload after mutation', 'window.SSS_POC'):
+            self.assertNotIn(forbidden, success)
+            self.assertNotIn(forbidden, evidence)
+
     def test_promoted_finding_verification_playbook_uses_short_console_code(self):
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
