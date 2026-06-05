@@ -1145,20 +1145,20 @@ def _extend_manual_poc_plan_for_placeholders(plan: list[str], placeholders: list
 
 
 def _mark_review_candidate(finding: ReadableFinding) -> None:
-    finding.verification_notes = [note for note in finding.verification_notes if note != 'Confirmed promoted finding']
+    finding.verification_notes = [note for note in finding.verification_notes if note != 'Selected as runtime verification candidate']
     if not finding.title.startswith('Manual review candidate:'):
         finding.title = f'Manual review candidate: {finding.title}'
-    prefix = 'Manual review candidate - Not an automatically confirmed vulnerability. Resolve endpoint/page/action before using PoC.'
+    prefix = 'Manual review candidate - Not yet verified by runtime evidence. Resolve endpoint/page/action before using PoC.'
     if prefix not in finding.summary:
         finding.summary = f'{prefix} {finding.summary}'
     _add_unique(finding.verification_notes, 'Manual review candidate')
-    _add_unique(finding.verification_notes, 'Not an automatically confirmed vulnerability')
+    _add_unique(finding.verification_notes, 'Not yet verified by runtime evidence')
     _add_unique(finding.verification_notes, 'Resolve endpoint/page/action before using PoC')
     _add_unique(finding.verification_notes, 'Needs runtime capture before proof')
     if finding.observational_poc:
         if not finding.observational_poc.description.startswith('Manual review candidate'):
-            finding.observational_poc.description = f'Manual review candidate (not automatically confirmed): {finding.observational_poc.description}'
-        precondition = 'Endpoint/page/action manually confirmed'
+            finding.observational_poc.description = f'Manual review candidate (runtime evidence needed): {finding.observational_poc.description}'
+        precondition = 'Endpoint/page/action manually confirmed before use'
         if precondition not in finding.observational_poc.preconditions:
             finding.observational_poc.preconditions.insert(0, precondition)
         step = 'Manually confirm endpoint/page/action before using observational PoC'
@@ -1278,30 +1278,92 @@ def _proof_steps(method: str, page_hint: str, action_hint: str) -> list[str]:
     ]
 
 
-def _success_criteria(method: str) -> list[str]:
+def _success_criteria(method: str, vuln_type: str = '') -> list[str]:
     if method == 'DOM':
-        return ['test payload reaches the DOM sink', 'alert fires or clear DOM change is observed in the browser']
+        return [
+            'controlled input reaches the DOM sink and script executes (console.log fires) or clear DOM mutation is observed',
+            'OR sanitizer/encoding blocks execution and DOM output is safely escaped',
+        ]
+    vt = vuln_type.lower()
+    if 'payment' in vt or 'point' in vt or 'price' in vt or 'coupon' in vt or 'balance' in vt:
+        return [
+            'mutated amount/price/quantity/point value is reflected in server-side result, balance, order record, or transaction state',
+            'OR server explicitly rejects the mutation with a clear validation or authorization error (not just a generic 5xx)',
+        ]
+    if 'idor' in vt or 'unauthorized' in vt or 'access' in vt:
+        return [
+            'server returns object/user/order data belonging to another user or session',
+            'OR server rejects with 401/403 or an explicit object-ownership validation error',
+        ]
+    if 'recovery' in vt or 'verification code' in vt or 'account' in vt:
+        return [
+            'invalid, reused, or brute-forced verification code is accepted by the server',
+            'OR reset token is not bound to the requesting user/session/action',
+            'OR server rejects invalid flow with rate-limit or token-binding evidence',
+        ]
+    if 'state' in vt or 'status' in vt or 'role' in vt or 'permission' in vt or 'authorization' in vt:
+        return [
+            'mutated role/status/state value is accepted or persisted by the server',
+            'OR server rejects the change with an explicit authorization or state-transition validation error',
+        ]
+    if 'bypass' in vt or 'validation' in vt:
+        return [
+            'server accepts the request with a manipulated parameter value that should have been rejected client-side',
+            'OR server enforces the constraint and rejects with a clear validation error',
+        ]
+    # Generic fallback — still security-impact focused
     return [
-        'response status/content-type/body preview is visible in Console',
-        'server accepts or rejects the test payload with an explainable status/body',
-        'normal Network request can be compared against the direct fetch request',
+        'server response to the manipulated request differs meaningfully from the normal request (different data, status, or behavior)',
+        'OR server enforces expected access control and rejects the manipulation with an authorization/validation error',
     ]
 
 
-def _failure_criteria(method: str) -> list[str]:
+def _failure_criteria(method: str, vuln_type: str = '') -> list[str]:
     if method == 'DOM':
-        return ['input is safely encoded and script does not execute', 'DOM sink is not invoked', 'sanitizer strips the payload']
-    return ['server rejects with 400/401/403', 'payload mutation is normalised before server processing', 'endpoint is not invoked', 'HTML fallback is returned']
-
-
-def _evidence_to_capture(method: str) -> list[str]:
-    if method == 'DOM':
-        return ['Sources breakpoint location', 'Console PoC execution log', 'DOM change or alert execution screenshot', 'Call Stack showing input reaching sink']
+        return [
+            'input is safely encoded before reaching the sink and script does not execute',
+            'DOM sink is not invoked by the controlled source',
+            'sanitizer strips the payload before assignment',
+        ]
+    vt = vuln_type.lower()
+    if 'payment' in vt or 'point' in vt or 'price' in vt:
+        return [
+            'server validates the amount/price server-side and rejects the manipulated value',
+            'response shows the original server-enforced value, not the client-supplied one',
+        ]
     return [
-        'Console screenshot showing response status/content-type/body preview',
-        'Network tab screenshot of the normal request URL/method/payload',
-        'Network tab screenshot of the direct fetch request URL/method/payload',
-        'server response status/body screenshot as evidence',
+        'server rejects with 400/401/403 and a clear validation or authorization error',
+        'payload mutation is ignored or normalized before server-side processing',
+        'endpoint is not reachable from the tested context',
+        'HTML fallback/redirect is returned (not the expected API response)',
+    ]
+
+
+def _evidence_to_capture(method: str, vuln_type: str = '') -> list[str]:
+    if method == 'DOM':
+        return [
+            'Sources tab: breakpoint location in the file where input reaches the sink',
+            'Console: PoC execution log or screenshot of DOM change / script execution',
+            'Screenshot: DOM mutation or alert proving payload reached the sink',
+            'Call Stack: trace showing the input flowing to the sink without encoding',
+        ]
+    vt = vuln_type.lower()
+    if 'payment' in vt or 'point' in vt or 'price' in vt:
+        return [
+            'Network tab: original request (normal flow) showing expected amount/price',
+            'Network tab or Console: manipulated request body showing altered amount/price',
+            'Server response: showing reflected value, transaction record, or rejection message',
+        ]
+    if 'idor' in vt or 'unauthorized' in vt:
+        return [
+            'Network tab: request with another user/object identifier',
+            'Server response: showing data that should not be accessible to the current session',
+            'OR server rejection with 403 and ownership-validation message',
+        ]
+    return [
+        'Network tab: normal request URL/method/payload for comparison baseline',
+        'Console or Network tab: manipulated request payload and server response status',
+        'Server response body: showing accepted manipulation or explicit rejection message',
     ]
 
 
@@ -2409,9 +2471,9 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     console_code=playbook_console_code,
                     setup_steps=executable_poc.steps,
                     proof_steps=_proof_steps(method, page_hint, action_hint),
-                    success_criteria=_success_criteria(method),
-                    failure_criteria=_failure_criteria(method),
-                    evidence_to_capture=_evidence_to_capture(method),
+                    success_criteria=_success_criteria(method, f.vulnerability_type),
+                    failure_criteria=_failure_criteria(method, f.vulnerability_type),
+                    evidence_to_capture=_evidence_to_capture(method, f.vulnerability_type),
                     limitations=(f.verification_playbook.limitations if f.verification_playbook else []),
                 )
                 if f.verification_playbook:
@@ -2447,12 +2509,12 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             break
     for f in findings:
         if f.id in promoted_playbook_ids:
-            _add_unique(f.verification_notes, 'Confirmed promoted finding')
+            _add_unique(f.verification_notes, 'Selected as runtime verification candidate')
             if f.console_poc:
                 f.console_poc.code = None
             f.observational_poc = None
         else:
-            f.verification_notes = [note for note in f.verification_notes if note != 'Confirmed promoted finding']
+            f.verification_notes = [note for note in f.verification_notes if note != 'Selected as runtime verification candidate']
     # When no playbooks are promoted, common_console_helper is hidden from the UI.
     # Any review candidate still marked observational would reference a hidden helper,
     # so downgrade to manual_plan to keep guidance consistent.

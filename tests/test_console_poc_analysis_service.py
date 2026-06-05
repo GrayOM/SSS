@@ -23,10 +23,11 @@ def f(path, content):
 
 
 MANUAL_REVIEW_NOTE = 'Manual review candidate'
-NOT_CONFIRMED_NOTE = 'Not an automatically confirmed vulnerability'
+NOT_CONFIRMED_NOTE = 'Not yet verified by runtime evidence'
 RESOLVE_BEFORE_POC_NOTE = 'Resolve endpoint/page/action before using PoC'
 UNRESOLVED_PLACEHOLDER_NOTE = 'Unresolved placeholder blocks promotion'
 GENERIC_PAGE_ACTION_NOTE = 'Generic page/action blocks promotion'
+RTVC_NOTE = 'Selected as runtime verification candidate'
 
 
 class ConsolePocAnalysisTests(unittest.TestCase):
@@ -1282,19 +1283,33 @@ function submitOrder(event) {
             self.assertNotIn(forbidden, steps)
 
     def test_direct_api_success_and_evidence_wording_has_no_helper_flow(self):
+        """Success criteria must describe security impact, not just 'response visible'."""
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         playbook = result.verification_playbooks[0]
         success = '\n'.join(playbook.success_criteria)
         evidence = '\n'.join(playbook.evidence_to_capture)
-        self.assertIn('response status/content-type/body preview is visible', success)
-        self.assertIn('server accepts or rejects the test payload', success)
-        self.assertIn('normal Network request', success)
-        self.assertIn('response status/content-type/body preview', evidence)
-        self.assertIn('server response status/body screenshot', evidence)
+        # Old weak wording must be gone
+        self.assertNotIn('response status/content-type/body preview is visible', success,
+            'Weak "status/body visible" must not be the primary success criterion')
+        self.assertNotIn('server accepts or rejects the test payload with an explainable status/body', success,
+            'Generic "accepts or rejects" wording must be replaced with impact-based criteria')
+        # New strong criteria: security impact must be described
+        self.assertTrue(
+            any(kw in success.lower() for kw in ('reflected', 'balance', 'transaction', 'server-side result',
+                                                   'authorization error', 'validation error', 'rejected',
+                                                   'ownership', 'access', 'mutated')),
+            f'Success criteria must describe security impact. Got: {success!r}',
+        )
+        # Evidence must focus on the request/response, not console helper artefacts
         for forbidden in ('capture log', 'armMutation', 'payload after mutation', 'window.SSS_POC'):
             self.assertNotIn(forbidden, success)
             self.assertNotIn(forbidden, evidence)
+        # Evidence must still mention the network request for comparison
+        self.assertTrue(
+            any(kw in evidence.lower() for kw in ('network tab', 'request', 'response', 'payload')),
+            f'Evidence must mention Network tab or request/response. Got: {evidence!r}',
+        )
 
     def test_promoted_finding_verification_playbook_uses_short_console_code(self):
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
@@ -1451,19 +1466,28 @@ function requestIamportPay(){
         self.assertIn(NOT_CONFIRMED_NOTE, review_text)
         self.assertIn('Needs runtime capture before proof', review_text)
 
-    def test_confirmed_note_only_on_appended_playbooks(self):
+    def test_rtvc_note_only_on_promoted_findings(self):
+        """'Selected as runtime verification candidate' appears only on promoted findings, not review candidates."""
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         promoted_ids = {p.id for p in result.verification_playbooks}
 
-        self.assertTrue(promoted_ids)
-        self.assertFalse(any('Confirmed promoted finding' in ' '.join(candidate.verification_notes) for candidate in result.review_candidates))
+        self.assertTrue(promoted_ids, 'expected at least one promoted playbook')
+        # 'Confirmed promoted finding' must be completely gone
+        for finding in result.findings:
+            self.assertNotIn('Confirmed promoted finding', ' '.join(finding.verification_notes),
+                '"Confirmed promoted finding" must no longer appear in any finding')
+        # Review candidates must not have the RTVC note
+        self.assertFalse(any(RTVC_NOTE in ' '.join(c.verification_notes) for c in result.review_candidates),
+            'review candidates must not have the RTVC note')
+        # Promoted findings must have the RTVC note
         for finding in result.findings:
             notes = ' '.join(finding.verification_notes)
             if finding.id in promoted_ids:
-                self.assertIn('Confirmed promoted finding', notes)
+                self.assertIn(RTVC_NOTE, notes,
+                    f'promoted finding must have note: {RTVC_NOTE!r}')
             else:
-                self.assertNotIn('Confirmed promoted finding', notes)
+                self.assertNotIn(RTVC_NOTE, notes)
 
     def test_console_poc_service_has_single_policy_helper_definitions(self):
         import inspect
@@ -2173,6 +2197,167 @@ function requestIamportPay(){
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0,
             'Bundled SPA files must not produce verification playbooks')
+
+
+    # ── Quality gate: lifecycle wording ───────────────────────────────────────
+
+    def test_confirmed_wording_never_appears_in_non_confirmed_findings(self):
+        """The word 'Confirmed' (as a promotion claim) must never appear in
+        verification_notes of any finding unless its status is confirmed_finding."""
+        files = [
+            f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>"),
+            f('src/service.js', "axios.post('/api/orders/pay',{amount})"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for finding in result.findings:
+            notes_text = ' '.join(finding.verification_notes)
+            if finding.status != 'confirmed_finding':
+                self.assertNotIn('Confirmed promoted finding', notes_text,
+                    f'"Confirmed promoted finding" must not appear in [{finding.status}] {finding.vulnerability_type}')
+
+    def test_rtvc_wording_in_promoted_notes(self):
+        """Promoted findings must have 'Selected as runtime verification candidate' in notes."""
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        promoted_ids = {p.id for p in result.verification_playbooks}
+        self.assertTrue(promoted_ids)
+        for finding in result.findings:
+            if finding.id in promoted_ids:
+                self.assertIn(RTVC_NOTE, ' '.join(finding.verification_notes),
+                    f'Promoted finding must have note: {RTVC_NOTE!r}')
+
+    def test_success_criteria_payment_is_impact_based(self):
+        """Payment/price/point success criteria must describe security impact, not just response visibility."""
+        files = [f('src/Pay.jsx', "function handlePayment(){axios.post('/api/orders/pay',{amount,totalAmount})}\n<button onClick={handlePayment}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = next((p for p in result.verification_playbooks if 'Payment' in p.risk_type or 'Validation' in p.risk_type), None)
+        self.assertIsNotNone(pb, 'expected a payment playbook')
+        success = '\n'.join(pb.success_criteria).lower()
+        self.assertNotIn('status/content-type/body preview is visible', success,
+            'Weak visibility criterion must be gone')
+        self.assertTrue(
+            any(k in success for k in ('reflected', 'balance', 'transaction', 'server-side', 'authorization error', 'validation error', 'mutated')),
+            f'Success criteria must describe security impact, not just visibility. Got: {success!r}',
+        )
+
+    def test_success_criteria_dom_xss_is_execution_based(self):
+        """DOM XSS success criteria must require script execution, not just response visibility."""
+        from app.services.console_poc_analysis_service import _success_criteria
+        criteria = _success_criteria('DOM', 'DOM XSS')
+        text = ' '.join(criteria).lower()
+        self.assertIn('executes', text, 'DOM XSS criterion must mention script execution')
+        self.assertIn('sink', text, 'DOM XSS criterion must mention the sink')
+        self.assertNotIn('status/body', text)
+
+    def test_success_criteria_idor_is_access_based(self):
+        from app.services.console_poc_analysis_service import _success_criteria
+        criteria = _success_criteria('GET', 'IDOR / Unauthorized Data Access Candidate')
+        text = ' '.join(criteria).lower()
+        self.assertTrue(
+            any(k in text for k in ('unauthorized', 'ownership', '401', '403', 'user data', 'object')),
+            f'IDOR success criteria must describe access control impact. Got: {text!r}',
+        )
+
+    def test_success_criteria_account_recovery_is_token_based(self):
+        from app.services.console_poc_analysis_service import _success_criteria
+        criteria = _success_criteria('POST', 'Account Recovery Flow Abuse Candidate')
+        text = ' '.join(criteria).lower()
+        self.assertTrue(
+            any(k in text for k in ('code', 'token', 'rate', 'bound', 'invalid', 'reused')),
+            f'Account recovery criteria must describe token/rate-limit impact. Got: {text!r}',
+        )
+
+    # ── Quality gate: PoC gating ──────────────────────────────────────────────
+
+    def test_post_with_generic_action_stays_review_candidate(self):
+        """A bare POST call with no function/UI context must not be promoted."""
+        files = [f('src/service.js', "axios.post('/api/orders/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+            'Bare POST with no function/UI context must not produce a playbook')
+        self.assertGreater(len(result.review_candidates), 0)
+        for rc in result.review_candidates:
+            self.assertIn(rc.poc_generation_status, {'manual_plan', 'observational'},
+                f'Expected manual_plan or observational, got {rc.poc_generation_status}')
+
+    def test_post_with_unresolved_placeholder_stays_manual_plan(self):
+        """A POST with {API_BASE_URL} placeholder must stay manual_plan."""
+        files = [f('src/LoginPage.js',
+                   "function doLogin(){ axios.post(API_BASE_URL + '/login', { email, password }); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+            'Unresolved base URL must produce 0 playbooks')
+        for rc in result.review_candidates:
+            self.assertEqual(rc.poc_generation_status, 'manual_plan',
+                'Unresolved endpoint must be manual_plan')
+            poc_code = (rc.console_poc.code or '') if rc.console_poc else ''
+            self.assertFalse(poc_code.strip(),
+                'manual_plan candidate must have no runnable console code')
+
+    def test_delete_refund_withdraw_transfer_no_replay_poc(self):
+        """High-risk irreversible endpoints must never generate a replay PoC."""
+        from app.services.poc_templates import build_request_replay_poc
+        blocked_cases = [
+            ('DELETE', '/api/orders/123'),
+            ('POST', '/api/refund/process'),
+            ('POST', '/api/transfer/funds'),
+            ('POST', '/api/withdraw'),
+            ('POST', '/api/bulk/delete'),
+        ]
+        for method, endpoint in blocked_cases:
+            result = build_request_replay_poc(method, endpoint)
+            self.assertIsNone(result,
+                f'build_request_replay_poc must return None for {method} {endpoint}')
+
+    def test_get_session_is_not_promoted(self):
+        """GET /api/user/session must not be promoted to a runtime verification candidate."""
+        files = [f('src/app.js', "fetch('/api/user/session')")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+            'GET /api/session must not be promoted')
+        for finding in result.findings:
+            self.assertIn(finding.status, {'raw_signal', 'review_candidate'},
+                'Session check GET must be raw_signal or review_candidate')
+
+    def test_search_recommend_api_is_not_promoted(self):
+        """Search/recommend APIs must not be promoted to runtime verification candidates."""
+        files = [f('src/search.js',
+                   "function search(){ axios.get('/api/recommend_search', { params: { keyword } }) }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+            'Search/recommend API must not be promoted')
+
+    def test_disabled_isloading_not_promoted(self):
+        """disabled={isLoading} button must not produce a promoted playbook."""
+        files = [f('src/Form.jsx',
+                   "const [isLoading, setIsLoading] = useState(false);\n"
+                   "<button disabled={isLoading} onClick={handleSubmit}>Submit</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0,
+            'isLoading-only disabled button must not be promoted')
+
+    def test_no_confirmed_wording_anywhere_in_output(self):
+        """The word 'Confirmed' as a promotion marker must not appear anywhere in the output
+        from a frontend-only analysis session."""
+        files = [
+            f('src/Pay.jsx', "function handlePayment(){axios.post('/api/orders/pay',{amount})}\n<button onClick={handlePayment}>Pay now</button>"),
+            f('src/auth.js', "const u=JSON.parse(sessionStorage.getItem('user'));if(!u.isAdmin)navigate('/');"),
+        ]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        for finding in result.findings:
+            for note in finding.verification_notes:
+                self.assertNotIn('Confirmed promoted', note,
+                    f'Legacy "Confirmed promoted" wording found in [{finding.status}] notes: {note!r}')
+
+    def test_common_console_helper_hidden_when_no_observational_needed(self):
+        """common_console_helper must be None when all candidates are manual_plan."""
+        files = [f('src/service.js', "axios.post('/api/orders/pay',{amount})")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertEqual(len(result.verification_playbooks), 0)
+        # No observational candidates → helper must be hidden
+        if all(rc.poc_generation_status == 'manual_plan' for rc in result.review_candidates):
+            self.assertIsNone(result.common_console_helper,
+                'common_console_helper must be None when all candidates are manual_plan')
 
 
 if __name__ == '__main__':
