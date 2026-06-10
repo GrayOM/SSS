@@ -6,8 +6,8 @@ browser DevTools Console without any prior setup (no common_console_helper
 required).
 
 All output is ASCII-only and passes _is_allowed_guarded_poc_code().
-Destructive or unresolvable inputs return None; callers must fall back to the
-interceptor-based discovery aid.
+Destructive or unresolvable inputs return None; callers must fall back to
+manual review or clearly separated runtime discovery.
 """
 
 import json
@@ -85,7 +85,8 @@ def _is_safe_endpoint(endpoint: str) -> bool:
     """False for UNKNOWN, truly unresolvable, or destructive endpoints.
 
     Base-URL prefixes are stripped first; remaining path params {x} are
-    allowed -- the PoC builder will substitute REPLACE_WITH_* constants.
+    allowed -- the PoC builder will derive runtime values with
+    REPLACE_WITH_* as a final fallback.
     """
     if not endpoint or endpoint == 'UNKNOWN':
         return False
@@ -143,12 +144,13 @@ def build_request_replay_poc(
     field: str = '',
     test_value: 'str | int | None' = None,
     fields: 'list[str] | None' = None,
+    payload_style: str = 'json',
 ) -> 'str | None':
     """CONFIRM-guarded direct fetch replay, <= MAX_POC_LINES lines.
 
     Returns None when endpoint is destructive or truly UNKNOWN.
-    Base-URL prefixes are stripped; path params become labeled REPLACE_WITH_*
-    constants so the tester can fill them in before running.
+    Base-URL prefixes are stripped; path params prefer runtime/page-derived
+    values and keep REPLACE_WITH_* only as a final fallback.
 
     For GET: no CONFIRM guard (read-only).
     For POST/PUT/PATCH: browser confirm() guard gives the tester a clear
@@ -163,35 +165,14 @@ def build_request_replay_poc(
     # Normalize: strip leading base-URL variable
     norm = normalize_endpoint(endpoint)
 
-    # Replace path params {x} with REPLACE_WITH_* JS constants -- single pass.
-    # We find each {token} once, pick the right constant name, then substitute all
-    # at once so already-inserted ${CONST} strings are never re-scanned.
     const_decls: list[str] = []
     used: set[str] = set()
     url_template = norm
 
-    def _const_for(token: str) -> str:
-        tl = token.lower()
-        # Specific compound patterns must come before the bare 'id' check —
-        # 'id' is a substring of 'userid', 'orderid', 'paymentid', etc.
-        if any(k in tl for k in ('userid', 'currentuserid', 'memberid', 'accountid', 'sessiondata.userid')):
-            return 'USER_ID'
-        if any(k in tl for k in ('orderid', 'orderno', 'auctionitem.orderid')):
-            return 'ORDER_ID'
-        if 'paymentid' in tl:
-            return 'PAYMENT_ID'
-        if any(k in tl for k in ('item.id', 'itemid', 'productid', 'id')):
-            return 'TEST_ID'
-        return tl.upper().replace('.', '_').replace('-', '_') or 'PARAM'
-
     def _replacer(m: re.Match) -> str:
         inner = m.group(1)
-        const_name = _const_for(inner)
-        label = f'REPLACE_WITH_{const_name}'
-        if const_name not in used:
-            const_decls.append(f'  const {const_name} = "{label}";')
-            used.add(const_name)
-        return f'${{{const_name}}}'
+        var_name = _declare_runtime_value(inner, const_decls, used)
+        return f'${{{var_name}}}'
 
     url_template = re.sub(r'\{([^}]+)\}', _replacer, norm)
 
@@ -203,8 +184,8 @@ def build_request_replay_poc(
 
     if m == 'GET':
         lines = ['(async () => {'] + const_decls + [
-            f'  const r = await fetch({url_expr});',
-            "  console.log('[SSS PoC]', r.status, await r.text().catch(() => ''));",
+            f'  const r = await fetch({url_expr}, {{ credentials: "include" }});',
+            "  console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));",
             '})();',
         ]
         return '\n'.join(lines)
@@ -214,38 +195,54 @@ def build_request_replay_poc(
     if field and field not in body_fields:
         body_fields.insert(0, field)
 
-    const_decls.extend(_body_const_decls(body_fields, used))
-    body_js = _body_json_expr(body_fields, field, test_value)
+    for body_field in body_fields:
+        if _runtime_var_name(body_field):
+            _declare_runtime_value(body_field, const_decls, used)
+    style = (payload_style or 'json').lower()
+    if style not in {'json', 'formdata', 'urlencoded'}:
+        if not body_fields:
+            return None
+        style = 'json'
 
     # Const declarations come first so the confirm dialog can use a backtick
-    # template literal that shows the resolved URL (e.g. ${TEST_ID}) rather
-    # than the raw source placeholder ({item.id}).  A tester filling in the
-    # const values before pasting sees the real target URL in the dialog.
-    lines = (
-        ['(async () => {']
-        + const_decls
-        + [f'  if (!confirm(`[SSS PoC] Run approved {m} {url_template}?`)) return;',
-           f'  const r = await fetch({url_expr}, {{',
-           f'    method: {json.dumps(m)}, credentials: "include",',
-           "    headers: { 'Content-Type': 'application/json' },",
-           f'    body: {body_js},',
-           '  });',
-           "  console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));",
-           '})();']
-    )
+    # template literal that shows the resolved URL (e.g. ${itemId}) rather
+    # than the raw source placeholder ({item.id}).  A tester can rely on
+    # runtime/page-derived values or fill the fallback before pasting.
+    lines = ['(async () => {'] + const_decls
+    if style == 'formdata':
+        lines.extend(_formdata_lines(body_fields, field, test_value))
+        body_expr = 'fd'
+        header_expr: str | None = None
+    elif style == 'urlencoded':
+        lines.extend(_urlencoded_lines(body_fields, field, test_value))
+        body_expr = 'body.toString()'
+        header_expr = "headers: { 'Content-Type': 'application/x-www-form-urlencoded' }"
+    else:
+        body_expr = _body_json_expr(body_fields, field, test_value)
+        header_expr = "headers: { 'Content-Type': 'application/json' }"
+    option_parts = [f'method: {json.dumps(m)}', 'credentials: "include"']
+    if header_expr:
+        option_parts.append(header_expr)
+    option_parts.append(f'body: {body_expr}')
+    options = '{ ' + ', '.join(option_parts) + ' }'
+    if used:
+        guard_vars = ', '.join(sorted(used))
+        lines.append(f'  if ([{guard_vars}].some(v => String(v).startsWith("REPLACE_WITH_"))) {{ console.warn("[SSS PoC] Fill required runtime values before sending."); return; }}')
+    lines.extend([
+        f'  if (!confirm(`[SSS PoC] Run approved {m} {url_template}?`)) return;',
+        f'  const r = await fetch({url_expr}, {options});',
+        "  console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));",
+        '})();',
+    ])
     return '\n'.join(lines)
 
 
-def _body_const_decls(fields: list[str], used: set[str]) -> list[str]:
-    decls: list[str] = []
-    for name in fields:
-        const_name = _body_const_name(name)
-        if not const_name or const_name in used:
-            continue
-        label = f'REPLACE_WITH_{const_name}'
-        decls.append(f'  const {const_name} = "{label}";')
-        used.add(const_name)
-    return decls
+def _declare_runtime_value(name: str, decls: list[str], used: set[str]) -> str:
+    var_name = _runtime_var_name(name) or 'testValue'
+    if var_name not in used:
+        decls.append(f'  const {var_name} = {_runtime_value_expr(name)};')
+        used.add(var_name)
+    return var_name
 
 
 def _body_json_expr(fields: list[str], field: str, test_value: 'str | int | None') -> str:
@@ -257,9 +254,9 @@ def _body_json_expr(fields: list[str], field: str, test_value: 'str | int | None
     parts: list[str] = []
     for name in safe_fields[:8]:
         key_js = json.dumps(name)
-        const_name = _body_const_name(name)
-        if const_name:
-            value_js = const_name
+        var_name = _runtime_var_name(name)
+        if var_name:
+            value_js = var_name
         elif name.lower() in {'amount', 'price', 'totalamount', 'usepoints', 'quantity', 'qty', 'count', 'a', 'b'}:
             value_js = '1'
         elif name == field and test_value is not None:
@@ -270,6 +267,38 @@ def _body_json_expr(fields: list[str], field: str, test_value: 'str | int | None
     return 'JSON.stringify({ ' + ', '.join(parts) + ' })'
 
 
+def _body_value_expr(name: str, field: str, test_value: 'str | int | None') -> str:
+    var_name = _runtime_var_name(name)
+    if var_name:
+        return var_name
+    low = name.lower()
+    if low in {'amount', 'price', 'totalamount', 'usepoints', 'quantity', 'qty', 'count', 'a', 'b'}:
+        return '1'
+    if name == field and test_value is not None:
+        return json.dumps(test_value)
+    return json.dumps('TEST_VALUE')
+
+
+def _formdata_lines(fields: list[str], field: str, test_value: 'str | int | None') -> list[str]:
+    safe_fields = [f for f in fields if _safe_body_key(f)]
+    if not safe_fields and field and test_value is not None:
+        safe_fields = [field]
+    lines = ['  const fd = new FormData();']
+    for name in safe_fields[:6]:
+        lines.append(f'  fd.append({json.dumps(name)}, {_body_value_expr(name, field, test_value)});')
+    return lines
+
+
+def _urlencoded_lines(fields: list[str], field: str, test_value: 'str | int | None') -> list[str]:
+    safe_fields = [f for f in fields if _safe_body_key(f)]
+    if not safe_fields and field and test_value is not None:
+        safe_fields = [field]
+    lines = ['  const body = new URLSearchParams();']
+    for name in safe_fields[:6]:
+        lines.append(f'  body.set({json.dumps(name)}, {_body_value_expr(name, field, test_value)});')
+    return lines
+
+
 def _safe_body_key(name: str) -> bool:
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,60}', name or ''):
         return False
@@ -277,25 +306,129 @@ def _safe_body_key(name: str) -> bool:
     return low not in {'method', 'url', 'headers', 'credentials', 'withcredentials', 'body', 'data', 'payload', 'options', 'config'}
 
 
-def _body_const_name(name: str) -> str | None:
-    low = name.lower()
+def _runtime_var_name(name: str) -> str | None:
+    low = (name or '').lower().replace('.', '')
     if 'order' in low and 'id' in low:
-        return 'TEST_ORDER_ID'
+        return 'orderId'
     if 'product' in low and 'id' in low:
-        return 'TEST_PRODUCT_ID'
+        return 'productId'
+    if any(token in low for token in ('memberid', 'accountid')):
+        return 'userId'
     if 'user' in low and 'id' in low:
-        return 'TEST_USER_ID'
+        return 'userId'
     if 'item' in low and 'id' in low:
-        return 'TEST_ITEM_ID'
+        return 'itemId'
+    if low in {'id', 'testid'}:
+        return 'itemId'
     if 'payment' in low and 'id' in low:
-        return 'TEST_PAYMENT_ID'
+        return 'paymentId'
+    if 'transaction' in low and 'id' in low:
+        return 'transactionId'
+    if low in {'imp_uid', 'impuid'}:
+        return 'impUid'
+    if low in {'merchant_uid', 'merchantuid'}:
+        return 'merchantUid'
+    if low in {'email', 'emailaddress', 'useremail'}:
+        return 'email'
+    if low in {'phone', 'phonenumber', 'tel', 'mobile', 'mobilephone'}:
+        return 'phone'
     if 'token' in low:
-        return 'TEST_TOKEN'
-    if low in {'imp_uid', 'merchant_uid'}:
-        return 'TEST_PAYMENT_UID'
+        return 'token'
     if low in {'code', 'authcode', 'verifycode', 'verificationcode'}:
-        return 'TEST_CODE'
+        return 'code'
     return None
+
+
+def _runtime_value_expr(name: str) -> str:
+    var_name = _runtime_var_name(name) or 'value'
+    placeholder = {
+        'orderId': 'REPLACE_WITH_ORDER_ID',
+        'productId': 'REPLACE_WITH_PRODUCT_ID',
+        'userId': 'REPLACE_WITH_USER_ID',
+        'itemId': 'REPLACE_WITH_ITEM_ID',
+        'paymentId': 'REPLACE_WITH_PAYMENT_ID',
+        'transactionId': 'REPLACE_WITH_TRANSACTION_ID',
+        'impUid': 'REPLACE_WITH_IMP_UID',
+        'merchantUid': 'REPLACE_WITH_MERCHANT_UID',
+        'email': 'REPLACE_WITH_EMAIL',
+        'phone': 'REPLACE_WITH_PHONE',
+        'token': 'REPLACE_WITH_TOKEN',
+        'code': 'REPLACE_WITH_CODE',
+    }.get(var_name, 'REPLACE_WITH_VALUE')
+    query_key = {
+        'impUid': 'imp_uid',
+        'merchantUid': 'merchant_uid',
+    }.get(var_name, var_name)
+    data_attr = re.sub(r'([A-Z])', r'-\1', var_name).lower()
+    route_prefix = {
+        'orderId': 'orders?',
+        'productId': 'products?',
+        'itemId': '(?:items?|auction)',
+        'paymentId': 'payments?',
+        'userId': 'users?',
+    }.get(var_name, '[^/]+')
+    if var_name in {'paymentId', 'transactionId', 'impUid', 'merchantUid'}:
+        return (
+            f'new URLSearchParams(location.search).get({json.dumps(query_key)}) || '
+            f'document.querySelector("[data-{data_attr}]")?.dataset.{var_name} || '
+            f'document.querySelector("[name=\'{query_key}\']")?.value || '
+            f'window.__INITIAL_STATE__?.{var_name} || '
+            f'{json.dumps(placeholder)}'
+        )
+    if var_name == 'userId':
+        storage = '((s)=>s.userId||s.id)(JSON.parse(sessionStorage.getItem("user")||localStorage.getItem("user")||"{}"))'
+        return (
+            f'{storage} || new URLSearchParams(location.search).get("userId") || '
+            'document.querySelector("[data-user-id]")?.dataset.userId || '
+            'document.querySelector("[name=\'userId\']")?.value || '
+            'window.__INITIAL_STATE__?.user?.id || '
+            f'{json.dumps(placeholder)}'
+        )
+    if var_name == 'token':
+        return (
+            'new URLSearchParams(location.search).get("token") || '
+            'document.querySelector("[name=\'token\']")?.value || '
+            'sessionStorage.getItem("token") || localStorage.getItem("token") || '
+            f'{json.dumps(placeholder)}'
+        )
+    if var_name == 'email':
+        storage = '((s)=>s.email||s.userEmail)(JSON.parse(sessionStorage.getItem("user")||localStorage.getItem("user")||"{}"))'
+        return (
+            'new URLSearchParams(location.search).get("email") || '
+            'document.querySelector("[name=\'email\']")?.value || '
+            'document.querySelector("[type=\'email\']")?.value || '
+            f'{storage} || window.__INITIAL_STATE__?.user?.email || '
+            f'{json.dumps(placeholder)}'
+        )
+    if var_name == 'phone':
+        storage = '((s)=>s.phone||s.phoneNumber||s.mobile)(JSON.parse(sessionStorage.getItem("user")||localStorage.getItem("user")||"{}"))'
+        return (
+            'new URLSearchParams(location.search).get("phone") || '
+            'document.querySelector("[name=\'phone\']")?.value || '
+            'document.querySelector("[name=\'phoneNumber\']")?.value || '
+            'document.querySelector("[type=\'tel\']")?.value || '
+            f'{storage} || window.__INITIAL_STATE__?.user?.phone || '
+            f'{json.dumps(placeholder)}'
+        )
+    if var_name == 'code':
+        return (
+            'new URLSearchParams(location.search).get("code") || '
+            'new URLSearchParams(location.search).get("verifyCode") || '
+            'document.querySelector("[name=\'code\']")?.value || '
+            'document.querySelector("[name=\'verifyCode\']")?.value || '
+            'document.querySelector("[data-code]")?.dataset.code || '
+            'window.__INITIAL_STATE__?.code || '
+            f'{json.dumps(placeholder)}'
+        )
+    route_match = f'location.pathname.match(/(?:{route_prefix})\\/([^/?#]+)/)?.[1]'
+    return (
+        f'new URLSearchParams(location.search).get({json.dumps(query_key)}) || '
+        f'{route_match} || '
+        f'document.querySelector("[data-{data_attr}]")?.dataset.{var_name} || '
+        f'document.querySelector("[name=\'{query_key}\']")?.value || '
+        f'window.__INITIAL_STATE__?.{var_name} || '
+        f'{json.dumps(placeholder)}'
+    )
 
 
 def is_interceptor_free(code: str) -> bool:

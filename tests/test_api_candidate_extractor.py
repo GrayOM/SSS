@@ -161,6 +161,16 @@ axios.create({ baseURL: API_BASE_URL }).post("/login", { email, password });
         self.assertNotIn('{API_BASE_URL}/login', endpoints)
         self.assertTrue(any(c.sink == 'axios.create.post' and c.endpoint == '/login' for c in candidates))
 
+    def test_base_url_variables_strip_but_route_variables_are_preserved(self):
+        api = extract_api_call_candidates([fc("axios.post(`${API_URL}/login`, { username })")]).candidates[0]
+        self.assertEqual(api.endpoint, '/login')
+
+        tenant = extract_api_call_candidates([fc("axios.post(`${tenantId}/api/orders`, { amount })")]).candidates[0]
+        self.assertEqual(tenant.endpoint, '{tenantId}/api/orders')
+
+        org_user = extract_api_call_candidates([fc("axios.get(`${orgId}/v1/users/${userId}`)")]).candidates[0]
+        self.assertEqual(org_user.endpoint, '{orgId}/v1/users/{userId}')
+
     def test_template_expression_not_parameter_noise(self):
         content = "axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, { amount })"
         cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
@@ -254,6 +264,24 @@ axios.post('/api/pay', fd);
         self.assertIn('page', get_c.parameters)
         self.assertIn('size', get_c.parameters)
         self.assertIn('amount', post_c.parameters)
+        self.assertEqual(post_c.payload_style, 'formdata')
+
+    def test_payload_style_formdata_urlencoded_and_json(self):
+        content = """
+const fd = new FormData();
+fd.append('receipt', file);
+fd.append('amount', amount);
+axios.post('/api/upload', fd);
+const body = new URLSearchParams();
+body.append('code', code);
+fetch('/verify-code', { method: 'POST', body });
+axios.post('/api/pay', { amount });
+"""
+        candidates = extract_api_call_candidates([fc(content)]).candidates
+        styles = {c.endpoint: c.payload_style for c in candidates}
+        self.assertEqual(styles['/api/upload'], 'formdata')
+        self.assertEqual(styles['/verify-code'], 'urlencoded')
+        self.assertEqual(styles['/api/pay'], 'json')
 
     def test_response_aliases_not_collected_as_parameters(self):
         content = """

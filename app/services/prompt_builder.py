@@ -82,18 +82,18 @@ def _limit_items(items: list[dict], limit: int = 12) -> list[dict]:
     return items[:limit] if isinstance(items, list) else []
 
 
-RAW_CODE_MANIFEST_KEYS = {'content', 'raw_content', 'snippet', 'code', 'source', 'body'}
+RAW_CODE_MANIFEST_KEYS = {'content', 'raw_content', 'raw_source', 'snippet', 'code', 'source', 'body'}
 
 
-def _strip_raw_code_keys(value):
+def _strip_raw_code_keys(value, allow_source: bool = False):
     if isinstance(value, dict):
         return {
-            key: _strip_raw_code_keys(inner)
+            key: _strip_raw_code_keys(inner, allow_source=allow_source)
             for key, inner in value.items()
-            if str(key).lower() not in RAW_CODE_MANIFEST_KEYS
+            if str(key).lower() not in RAW_CODE_MANIFEST_KEYS or (allow_source and str(key).lower() == 'source')
         }
     if isinstance(value, list):
-        return [_strip_raw_code_keys(item) for item in value]
+        return [_strip_raw_code_keys(item, allow_source=allow_source) for item in value]
     return value
 
 
@@ -112,6 +112,8 @@ def _compact_normalized_manifest(project_understanding: ProjectUnderstandingResu
             'event_handlers': _strip_raw_code_keys(_limit_items(data.get('event_handlers') or [])),
             'api_calls': _strip_raw_code_keys(_limit_items(data.get('api_calls') or [])),
             'storage_usage': _strip_raw_code_keys(_limit_items(data.get('storage_usage') or [])),
+            'runtime_value_sources': _strip_raw_code_keys(_limit_items(data.get('runtime_value_sources') or [])),
+            'dom_sources': _strip_raw_code_keys(_limit_items(data.get('dom_sources') or []), allow_source=True),
             'dangerous_sinks': _strip_raw_code_keys(_limit_items(data.get('dangerous_sinks') or [])),
             'validation_guard_hints': _strip_raw_code_keys(_limit_items(data.get('validation_guard_hints') or [])),
             'linked_script_references': _strip_raw_code_keys(_limit_items(data.get('linked_script_references') or [])),

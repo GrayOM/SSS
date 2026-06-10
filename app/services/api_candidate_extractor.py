@@ -11,29 +11,41 @@ _RESPONSE_NOISE_KEYS = {
 }
 
 _RESPONSE_VAR_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*(?:Response|Result|Data|Res))\b')
+_BASE_URL_VAR_RE = re.compile(
+    r'^(?:API_BASE_URL|API_BASE|API_URL|BASE_URL|REACT_APP_API_URL|VITE_API_URL|'
+    r'[A-Za-z_][A-Za-z0-9_]*(?:_URL|_BASE|_BASEURL|_BASE_URL)|apiBase)$',
+    re.IGNORECASE,
+)
 
 
 def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
     notes: list[str] = []
     value = raw.strip()
     value = re.sub(r'\$\{([^}]+)\}', r'{\1}', value)
-    has_base_variable = bool(re.match(r'^\{?(API_BASE_URL|API_BASE|BASE_URL|apiBase)\}?', value, flags=re.IGNORECASE))
+    leading_var = re.match(r'^\{?([A-Za-z_][A-Za-z0-9_]*)\}?', value)
+    has_base_variable = bool(leading_var and _BASE_URL_VAR_RE.match(leading_var.group(1)))
     if has_base_variable:
         normalized = normalize_endpoint(value)
         if normalized.startswith('/') and normalized != '/UNKNOWN_PATH':
             return normalized, notes
         notes.append('base URL variable requires manual review')
-    value = re.sub(r'^\{?[A-Za-z_][A-Za-z0-9_]*\}?\s*\+\s*', '', value)
-    value = re.sub(r'^\{apiBase\}', '', value, flags=re.IGNORECASE)
+    value = re.sub(
+        r'^\{?([A-Za-z_][A-Za-z0-9_]*)\}?\s*\+\s*',
+        lambda m: '' if _BASE_URL_VAR_RE.match(m.group(1)) else m.group(0),
+        value,
+    )
+    value = re.sub(r'^\{(apiBase|API_BASE_URL|API_BASE|API_URL|BASE_URL|REACT_APP_API_URL|VITE_API_URL)\}', '', value, flags=re.IGNORECASE)
     if '/api/' in value:
-        value = value[value.index('/api/'):]
+        if not value.startswith('{'):
+            value = value[value.index('/api/'):]
     elif '/v1/' in value:
-        value = value[value.index('/v1/'):]
+        if not value.startswith('{'):
+            value = value[value.index('/v1/'):]
     # Strip any unrecognized base-URL variable in template-literal form:
     # e.g. {API_URL}/login -> /login, {REACT_APP_API_URL}/users -> /users
-    _tl_m = re.match(r'^\{[A-Za-z_][A-Za-z0-9_]*\}(/\S+)', value)
-    if _tl_m:
-        return _tl_m.group(1), notes
+    _tl_m = re.match(r'^\{([A-Za-z_][A-Za-z0-9_]*)\}(/\S+)', value)
+    if _tl_m and _BASE_URL_VAR_RE.match(_tl_m.group(1)):
+        return _tl_m.group(2), notes
     if value.startswith(('/', '{')) and (' ' not in value):
         return value, notes
     notes.append('endpoint variable requires manual review')
@@ -184,6 +196,50 @@ def _extract_payload_keys_nearby(lines: list[str], call_idx: int, var_name: str)
     return sorted(set(k.group(1) for k in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,|$)', m.group(1))))
 
 
+def _detect_payload_style(snip: str, method: str, lines: list[str], call_idx: int) -> str:
+    """Return json, formdata, urlencoded, unknown, or none for GET."""
+    if method.upper() == 'GET':
+        return 'none'
+    near_start = max(0, call_idx - 20)
+    near = '\n'.join(lines[near_start:call_idx + 1])
+    blob = near + '\n' + snip
+
+    formdata_vars = set(re.findall(r'(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+FormData\b', blob))
+    url_vars = set(re.findall(r'(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+URLSearchParams\b', blob))
+
+    used_vars = set()
+    for m in re.finditer(r'\(\s*["\'`][^"\'`]+["\'`]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\b', snip, re.DOTALL):
+        used_vars.add(m.group(1))
+    for m in re.finditer(r'\b(?:data|body)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\b', snip):
+        used_vars.add(m.group(1))
+    for var in formdata_vars | url_vars:
+        if re.search(rf'[\{{,]\s*{re.escape(var)}\s*[\}},]', snip):
+            used_vars.add(var)
+
+    if used_vars & url_vars:
+        return 'urlencoded'
+    if used_vars & formdata_vars:
+        return 'formdata'
+
+    if 'new URLSearchParams' in snip or any(re.search(rf'\b{re.escape(var)}\.append\s*\(', snip) for var in url_vars):
+        return 'urlencoded'
+    if re.search(r'Content-Type[\'"]?\s*:\s*[\'"]application/x-www-form-urlencoded', blob, re.IGNORECASE):
+        return 'urlencoded'
+
+    if 'new FormData' in snip or any(re.search(rf'\b{re.escape(var)}\.append\s*\(', snip) for var in formdata_vars):
+        return 'formdata'
+
+    if 'JSON.stringify' in blob or re.search(r'Content-Type[\'"]?\s*:\s*[\'"]application/json', blob, re.IGNORECASE):
+        return 'json'
+    if re.search(r'\(\s*["\'`][^"\'`]+["\'`]\s*,\s*\{', snip, re.DOTALL):
+        return 'json'
+    if re.search(r',\s*\{', snip):
+        return 'json'
+    if re.search(r'\b(?:data|body)\s*:\s*\{', snip, re.DOTALL):
+        return 'json'
+    return 'unknown'
+
+
 def _extract_concat_endpoint(snip: str) -> tuple[str, list[str]] | None:
     m = re.search(r'\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*(["\'`])(.+?)\1', snip)
     if not m:
@@ -263,6 +319,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                             notes.append('endpoint variable requires manual review')
 
                     params, pnotes = _extract_parameters(snip, method)
+                    payload_style = _detect_payload_style(snip, method, lines, i)
                     response_vars = set()
                     for rm in re.finditer(r'const\s+\{\s*data\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\s*=\s*await\s+(?:axios|fetch|\$\.ajax|jQuery\.ajax)', snip):
                         response_vars.add(rm.group(1).lower())
@@ -271,8 +328,9 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     for key in ('data', 'body', 'params'):
                         pv = re.search(rf'{key}\s*:\s*([A-Za-z_][A-Za-z0-9_]*)', snip)
                         if pv and method != 'GET' and pv.group(1).lower() not in {'undefined', 'null', 'expr', 'json', 'object', 'array', 'formdata', 'promise', 'math', 'date'}:
-                            params.append(pv.group(1))
-                            notes.append('payload object requires manual review')
+                            if payload_style not in {'formdata', 'urlencoded'}:
+                                params.append(pv.group(1))
+                                notes.append('payload object requires manual review')
                             params.extend(_extract_payload_keys_nearby(lines, i, pv.group(1)))
                     if method != 'GET':
                         payload_pos = re.search(r'\(\s*([\'"`]).+?\1\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,|\))', tail, re.DOTALL)
@@ -301,7 +359,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     if endpoint != 'UNKNOWN':
                         notes = [n for n in notes if n != 'endpoint variable requires manual review']
                     confidence = 'high' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' and params else ('medium' if endpoint != 'UNKNOWN' and method != 'UNKNOWN' else 'low')
-                    candidates.append(ApiCallCandidate(source_path=file.path, method=method, endpoint=endpoint, parameters=params, start_line=start_line, end_line=end_line, snippet=snip, sink=sink, confidence=confidence, notes=sorted(set(notes))))
+                    candidates.append(ApiCallCandidate(source_path=file.path, method=method, endpoint=endpoint, parameters=params, payload_style=payload_style, start_line=start_line, end_line=end_line, snippet=snip, sink=sink, confidence=confidence, notes=sorted(set(notes))))
                     line_has_api_candidate = True
 
             fn = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)', stripped)
@@ -336,6 +394,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                 method=method,
                 endpoint=endpoint,
                 parameters=params[:20],
+                payload_style=('none' if method == 'GET' else 'urlencoded'),
                 start_line=start_line,
                 end_line=end_line,
                 snippet=file.content.splitlines()[start_line - 1].strip() if file.content.splitlines() else '',

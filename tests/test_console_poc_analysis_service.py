@@ -98,13 +98,10 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
-        self.assertIn('fetch hook installed', auth.console_poc.code or '')
-        self.assertIn("window.fetch = async function(input, init = {}) {", auth.console_poc.code or '')
-        self.assertIn('return originalFetch.call(this, input, init);', auth.console_poc.code or '')
-        self.assertNotIn('...args', auth.console_poc.code or '')
-        self.assertNotIn('.args', auth.console_poc.code or '')
-        self.assertNotIn('originalFetch(...args)', auth.console_poc.code or '')
-        self.assertNotIn('originalFetch(.args)', auth.console_poc.code or '')
+        code = (auth.console_poc.code if auth.console_poc else '') or ''
+        self.assertEqual('', code)
+        self.assertEqual('review_candidate', auth.status)
+        self.assertEqual('manual_plan', auth.poc_generation_status)
         self.assertIn('requireAuth/checkSession implementation file needs manual confirmation', auth.verification_notes)
         self.assertIn('sessionStorage/localStorage manipulation PoC is not confirmed by current code evidence', auth.verification_notes)
         self.assertEqual(auth.confidence, 'low')
@@ -114,16 +111,18 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/AuthPage.js', "if (userInfo.userType !== 'ADMIN') { navigate('/'); } requireAuth(user);")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
-        code = auth.console_poc.code or ''
+        code = (auth.console_poc.code if auth.console_poc else '') or ''
         self.assertNotIn('.args', code)
         self.assertNotIn('...args', code)
-        self.assertIn('originalFetch.call(this, input, init)', code)
+        self.assertEqual('', code)
+        self.assertEqual('review_candidate', auth.status)
 
     def test_requireauth_userinfo_admin_without_dependency_file_has_no_poc_code(self):
         files = [f('src/AdminPage.js', "const userInfo = requireAuth(); if (userInfo.userType === 'ADMIN') { navigate('/admin') } import { requireAuth } from '../utils/sessionUtils';")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
-        self.assertIn('fetch hook installed', auth.console_poc.code or '')
+        self.assertEqual('', (auth.console_poc.code if auth.console_poc else '') or '')
+        self.assertEqual('review_candidate', auth.status)
         self.assertIn('sessionStorage/localStorage manipulation PoC is not confirmed by current code evidence', auth.verification_notes)
         self.assertIn("userInfo.userType === 'ADMIN'", auth.evidence[0].snippet)
 
@@ -339,7 +338,9 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/AdminMypage.js', "if(Role==='ADMIN'){Navigate('/admin')} requireAuth(user); import { requireAuth } from '../utils/sessionUtils';")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
-        self.assertIn('fetch hook installed', auth.console_poc.code or '')
+        self.assertEqual('', (auth.console_poc.code if auth.console_poc else '') or '')
+        self.assertEqual('review_candidate', auth.status)
+        self.assertEqual('manual_plan', auth.poc_generation_status)
 
 
 
@@ -428,6 +429,25 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(findings[0].id)
         self.assertIsNone(findings[0].console_poc.code)
         self.assertEqual(analyzer.last_debug.accepted_item_count, 1)
+
+    def test_fake_gemini_promotion_sanitizes_helper_code_and_uses_manifest_facts(self):
+        class FakeGeminiClient:
+            def __init__(self):
+                self.prompt = ''
+
+            def analyze(self, prompt: str) -> str:
+                self.prompt = prompt
+                return """{"findings":[{"title":"pay amount manipulation","vulnerability_type":"Payment/Point Manipulation Candidate","severity":"high","confidence":"medium","affected_files":["src/pay.js"],"summary":"s","evidence":[{"source_path":"src/pay.js","start_line":1,"end_line":3,"snippet":"function pay(){ axios.post('/api/pay', { amount }) }","reason":"r","data_flow":["method: POST","endpoint: /api/pay","parameter: amount","function: pay","sink: axios.post"]}],"console_poc":{"poc_type":"browser_console","description":"d","preconditions":[],"steps":[],"code":"window.SSS_POC.list();","expected_result":"e","safety":"safe"},"attack_scenario":["x"],"impact":"i","root_cause":"c","remediation":"m","verification_notes":[]}]}"""
+
+        files = [f('src/pay.js', "function pay(){ axios.post('/api/pay', { amount }); }\nconst x = location.search; el.innerHTML = x;")]
+        client = FakeGeminiClient()
+        result = analyze_console_exploitability(files, analyzer=GeminiConsolePocAnalyzer(client))
+        self.assertIn('"dom_sources"', client.prompt)
+        self.assertTrue(result.verification_playbooks)
+        pb = [p for p in result.verification_playbooks if p.endpoint == '/api/pay'][0]
+        self.assertIn('fetch("/api/pay"', pb.console_code or '')
+        self.assertIn('confirm(', pb.console_code or '')
+        self.assertNotIn('window.SSS_POC', pb.console_code or '')
 
     def test_gemini_malformed_item_does_not_break_all(self):
         class FakeGeminiClient:
@@ -677,8 +697,10 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         pb = next((p for p in result.verification_playbooks if p.endpoint == '/api/auction/{item.id}/bid'), None)
         self.assertIsNotNone(pb)
         code = pb.console_code or ''
-        self.assertIn('const TEST_ID = "REPLACE_WITH_TEST_ID";', code)
-        self.assertIn('fetch(`/api/auction/${TEST_ID}/bid', code)
+        self.assertIn('const itemId =', code)
+        self.assertIn('location.pathname.match', code)
+        self.assertIn('document.querySelector("[data-item-id]")', code)
+        self.assertIn('fetch(`/api/auction/${itemId}/bid', code)
         self._assert_promoted_poc_self_contained(pb)
         self.assertIsNone(result.common_console_helper)
 
@@ -1364,10 +1386,37 @@ function requestIamportPay(){
         code = playbook.console_code or ''
         for key in ('merchant_uid', 'imp_uid', 'orderId', 'productId', 'amount', 'buyer_email'):
             self.assertIn(key, code)
-        self.assertIn('const TEST_ORDER_ID = "REPLACE_WITH_TEST_ORDER_ID";', code)
-        self.assertIn('const TEST_PRODUCT_ID = "REPLACE_WITH_TEST_PRODUCT_ID";', code)
-        self.assertIn('const TEST_PAYMENT_UID = "REPLACE_WITH_TEST_PAYMENT_UID";', code)
+        self.assertIn('const orderId =', code)
+        self.assertIn('const productId =', code)
+        self.assertIn('const merchantUid =', code)
+        self.assertIn('location.search', code)
+        self.assertIn('document.querySelector', code)
         self.assertLessEqual(len([line for line in code.splitlines() if line.strip()]), 12)
+
+    def test_payment_identifiers_do_not_use_generic_pathname_fallback(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc(
+            'POST',
+            '/api/iamport/verify',
+            fields=['imp_uid', 'merchant_uid', 'paymentId', 'transactionId', 'amount'],
+        )
+        self.assertIsNotNone(code)
+        self.assertIn('const impUid =', code)
+        self.assertIn('const merchantUid =', code)
+        self.assertIn('const paymentId =', code)
+        self.assertIn('const transactionId =', code)
+        self.assertIn('new URLSearchParams(location.search).get("imp_uid")', code)
+        self.assertIn('document.querySelector("[data-imp-uid]")', code)
+        self.assertIn('document.querySelector("[name=\'merchant_uid\']")', code)
+        self.assertNotIn('location.pathname.match(/(?:[^/]+)', code)
+
+    def test_mutation_poc_stops_when_runtime_fallback_is_unfilled(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/api/order/{orderId}/complete-payment', fields=['orderId', 'amount'])
+        self.assertIsNotNone(code)
+        self.assertIn('String(v).startsWith("REPLACE_WITH_")', code)
+        self.assertIn('Fill required runtime values before sending', code)
+        self.assertLess(code.index('Fill required runtime values before sending'), code.index('fetch('))
 
     def test_get_finding_specific_console_code_prints_replay_guidance(self):
         code = _build_short_console_verification_code(
@@ -1629,14 +1678,14 @@ function requestIamportPay(){
 
     # -- Real-world regression tests (loTO / NAFAL patterns) --------
 
-    def test_promoted_playbook_console_code_is_at_most_10_lines(self):
-        """Promoted console_code must be <= 10 pasteable lines."""
+    def test_promoted_playbook_console_code_is_source_aware_and_bounded(self):
+        """Promoted console_code may be slightly longer when it derives runtime values."""
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         for pb in result.verification_playbooks:
             lines = (pb.console_code or '').splitlines()
-            self.assertLessEqual(len(lines), 10,
-                f"Promoted console_code has {len(lines)} lines (max 10):\n{pb.console_code}")
+            self.assertLessEqual(len(lines), 12,
+                f"Promoted console_code has {len(lines)} lines (max 12):\n{pb.console_code}")
 
     def test_promoted_playbook_console_code_has_confirm_guard_or_is_dom_poc(self):
         # New design: promoted API playbooks use CONFIRM-guarded direct replay;
@@ -1853,7 +1902,9 @@ function requestIamportPay(){
         from app.services.poc_templates import build_request_replay_poc, is_interceptor_free
         code = build_request_replay_poc('GET', '/api/user/me')
         self.assertIsNotNone(code)
-        self.assertIn("fetch(\"/api/user/me\")", code)
+        self.assertIn('fetch("/api/user/me", { credentials: "include" })', code)
+        self.assertIn("r.headers.get('content-type')", code)
+        self.assertIn('.slice(0, 500)', code)
         self.assertLessEqual(len(code.splitlines()), 10)
         self.assertTrue(is_interceptor_free(code))
         self.assertNotIn('confirm(', code)
@@ -1868,13 +1919,86 @@ function requestIamportPay(){
         self.assertLessEqual(len(code.splitlines()), 10)
         self.assertTrue(is_interceptor_free(code))
         self.assertTrue(_is_allowed_guarded_poc_code(code), 'confirm-guarded replay must pass safety filter')
+
+    def test_poc_templates_replay_formdata_payload_style(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/api/upload', fields=['receipt', 'amount'], payload_style='formdata')
+        self.assertIsNotNone(code)
+        self.assertIn('const fd = new FormData();', code)
+        self.assertIn('fd.append("receipt"', code)
+        self.assertIn('body: fd', code)
+        self.assertNotIn("Content-Type': 'application/json'", code)
+
+    def test_poc_templates_replay_json_payload_style(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/api/pay', fields=['amount'], payload_style='json')
+        self.assertIsNotNone(code)
+        self.assertIn('JSON.stringify', code)
+        self.assertIn("Content-Type': 'application/json'", code)
+
+    def test_runtime_aware_route_param_prefers_url_dom_before_replace_fallback(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/api/order/{orderId}/complete-payment', fields=['orderId', 'amount'])
+        self.assertIsNotNone(code)
+        self.assertIn('const orderId =', code)
+        self.assertIn('new URLSearchParams(location.search).get("orderId")', code)
+        self.assertIn('location.pathname.match', code)
+        self.assertIn('document.querySelector("[data-order-id]")', code)
+        self.assertIn('document.querySelector("[name=\'orderId\']")', code)
+        self.assertIn('body: JSON.stringify({ "orderId": orderId, "amount": 1 })', code)
+        self.assertNotIn('const TEST_ORDER_ID', code)
+        self.assertIn('REPLACE_WITH_ORDER_ID', code)
+
+    def test_runtime_aware_user_id_prefers_storage_and_dom(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/api/user/{sessionData.userId}/wallet/charge', fields=['userId', 'amount'])
+        self.assertIsNotNone(code)
+        self.assertIn('const userId =', code)
+        self.assertIn('sessionStorage.getItem("user")', code)
+        self.assertIn('localStorage.getItem("user")', code)
+        self.assertIn('document.querySelector("[data-user-id]")', code)
+        self.assertIn('"userId": userId', code)
+        self.assertNotIn('TEST_VALUE', code)
+
+    def test_runtime_aware_formdata_preserves_payload_style(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/api/payments/evidence', fields=['paymentId', 'amount'], payload_style='formdata')
+        self.assertIsNotNone(code)
+        self.assertIn('const paymentId =', code)
+        self.assertIn('const fd = new FormData();', code)
+        self.assertIn('fd.append("paymentId", paymentId);', code)
+        self.assertIn('fd.append("amount", 1);', code)
+        self.assertNotIn("Content-Type': 'application/json'", code)
+
+    def test_runtime_aware_urlencoded_preserves_payload_style(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc('POST', '/verify-code', fields=['email', 'code', 'verifyCode'], payload_style='urlencoded')
+        self.assertIsNotNone(code)
+        self.assertIn('const email =', code)
+        self.assertIn('const code =', code)
+        self.assertIn('const body = new URLSearchParams();', code)
+        self.assertIn('body.set("email", email);', code)
+        self.assertIn('body.set("code", code);', code)
+        self.assertIn('body.set("verifyCode", code);', code)
+        self.assertIn('document.querySelector("[name=\'email\']")', code)
+        self.assertIn('document.querySelector("[type=\'email\']")', code)
+        self.assertNotIn('body.set("email", "TEST_VALUE");', code)
+        self.assertIn("Content-Type': 'application/x-www-form-urlencoded'", code)
         self.assertFalse(any(ord(c) > 127 for c in code), 'Replay PoC must be ASCII-only')
 
-    def test_poc_templates_path_param_naming_userId(self):
-        """Path params like {userId}/{currentUserId} must produce USER_ID const, not TEST_ID.
+    def test_storage_auth_playbook_has_meaningful_client_storage_target(self):
+        files = [f('src/AuthBranch.js', "const user = JSON.parse(sessionStorage.getItem('user') || '{}'); if (user.role === 'admin') { navigate('/admin'); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.risk_type == 'Client-side Authorization Bypass'][0]
+        self.assertEqual('/client-storage/sessionStorage/user', playbook.endpoint)
+        self.assertEqual('STORAGE', playbook.method)
+        self.assertIn('sessionStorage.setItem("user"', playbook.console_code or '')
 
-        'id' is a substring of 'userid', so without careful ordering the generic
-        'id' check fires first and everything becomes TEST_ID.
+    def test_poc_templates_path_param_naming_userId(self):
+        """Path params like {userId}/{currentUserId} must produce a userId resolver, not TEST_ID.
+
+        'id' is a substring of 'userid', so generic matching must not collapse
+        user-like route params into non-source-aware TEST_ID placeholders.
         """
         from app.services.poc_templates import build_request_replay_poc
         for endpoint in (
@@ -1885,11 +2009,12 @@ function requestIamportPay(){
         ):
             code = build_request_replay_poc('POST', endpoint)
             self.assertIsNotNone(code, f'PoC must be generated for {endpoint}')
-            self.assertIn('USER_ID', code, f'{endpoint} must use USER_ID const, not TEST_ID')
+            self.assertIn('const userId =', code, f'{endpoint} must use runtime userId resolver')
+            self.assertIn('sessionStorage.getItem("user")', code)
             self.assertNotIn('TEST_ID', code, f'{endpoint} must not use generic TEST_ID for a user-ID path param')
 
     def test_poc_templates_path_param_naming_orderId(self):
-        """Path params like {orderId} must produce ORDER_ID const, not TEST_ID."""
+        """Path params like {orderId} must produce an orderId resolver, not TEST_ID."""
         from app.services.poc_templates import build_request_replay_poc
         for endpoint in (
             '/api/order/{orderId}/pay',
@@ -1897,47 +2022,49 @@ function requestIamportPay(){
         ):
             code = build_request_replay_poc('POST', endpoint)
             self.assertIsNotNone(code)
-            self.assertIn('ORDER_ID', code, f'{endpoint} must use ORDER_ID const')
+            self.assertIn('const orderId =', code, f'{endpoint} must use runtime orderId resolver')
+            self.assertIn('location.pathname.match', code)
             self.assertNotIn('TEST_ID', code, f'{endpoint} must not use generic TEST_ID for order-ID path param')
 
     def test_poc_templates_path_param_naming_paymentId(self):
-        """Path params like {paymentId} must produce PAYMENT_ID const, not TEST_ID."""
+        """Path params like {paymentId} must produce a paymentId resolver, not TEST_ID."""
         from app.services.poc_templates import build_request_replay_poc
         code = build_request_replay_poc('POST', '/api/payment/{paymentId}/confirm')
         self.assertIsNotNone(code)
-        self.assertIn('PAYMENT_ID', code, '{paymentId} must use PAYMENT_ID const')
+        self.assertIn('const paymentId =', code, '{paymentId} must use runtime paymentId resolver')
+        self.assertIn('location.search', code)
         self.assertNotIn('TEST_ID', code, '{paymentId} must not use generic TEST_ID')
 
     def test_poc_templates_confirm_shows_resolved_url(self):
         """The confirm() dialog must show the resolved URL, not the raw source placeholder.
 
         Before the fix, consts were declared AFTER the confirm line, so the
-        confirm dialog showed '{item.id}' while the fetch used '${TEST_ID}'.
-        A tester filling in the const value before pasting would see the
-        correct URL in the confirm dialog only if consts come first.
+        confirm dialog showed '{item.id}' while the fetch used '${itemId}'.
+        A tester relying on the runtime resolver or fallback would see the
+        correct URL in the confirm dialog only if declarations come first.
         """
         from app.services.poc_templates import build_request_replay_poc
         import re
 
-        # Endpoint with path param: {item.id} → ${TEST_ID} after substitution
+        # Endpoint with path param: {item.id} -> ${itemId} after substitution
         code = build_request_replay_poc('POST', '/api/auction/{item.id}/bid', 'amount', 1)
         self.assertIsNotNone(code)
         lines = code.splitlines()
 
-        # Const declarations must appear before the confirm line
-        const_line = next((i for i, l in enumerate(lines) if 'const TEST_ID' in l), None)
+        # Runtime value resolution must appear before the confirm line.
+        const_line = next((i for i, l in enumerate(lines) if 'const itemId' in l), None)
         confirm_line = next((i for i, l in enumerate(lines) if 'confirm(' in l), None)
-        self.assertIsNotNone(const_line, 'const TEST_ID declaration must be present')
+        self.assertIsNotNone(const_line, 'runtime itemId declaration must be present')
         self.assertIsNotNone(confirm_line, 'confirm() guard must be present')
         self.assertLess(const_line, confirm_line,
-            'const declaration must come before confirm so the dialog shows the resolved URL')
+            'runtime value declaration must come before confirm so the dialog shows the resolved URL')
 
         # The confirm string must use the JS variable reference, not the raw placeholder
         confirm_str = lines[confirm_line]
         self.assertNotIn('{item.id}', confirm_str,
             'confirm dialog must not show raw source placeholder {item.id}')
-        self.assertIn('TEST_ID', confirm_str,
-            'confirm dialog must show the resolved JS const name TEST_ID')
+        self.assertIn('itemId', confirm_str,
+            'confirm dialog must show the resolved JS value name itemId')
 
         # Same check for userId-style path param
         code2 = build_request_replay_poc('POST', '/api/user/{currentUserId}/wallet/charge', 'amount', 1)
@@ -1947,8 +2074,8 @@ function requestIamportPay(){
         confirm_str2 = lines2[confirm_line2]
         self.assertNotIn('{currentUserId}', confirm_str2,
             'confirm dialog must not show raw source placeholder {currentUserId}')
-        self.assertIn('USER_ID', confirm_str2,
-            'confirm dialog must show the resolved JS const name USER_ID')
+        self.assertIn('userId', confirm_str2,
+            'confirm dialog must show the resolved JS value name userId')
 
     def test_poc_templates_destructive_endpoint_returns_none(self):
         from app.services.poc_templates import build_request_replay_poc
@@ -1977,6 +2104,18 @@ function requestIamportPay(){
         self.assertTrue(any(p.risk_type == 'DOM XSS' for p in result.verification_playbooks),
             'DOM XSS with short direct PoC must be promoted')
 
+    def test_dom_xss_event_data_playbook_preserves_source_specific_poc(self):
+        files = [f('src/message.js', "window.addEventListener('message', event => { el.innerHTML = event.data; });")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = [p for p in result.verification_playbooks if p.risk_type == 'DOM XSS'][0]
+        self.assertIn('window.postMessage', pb.console_code or '')
+
+    def test_dom_xss_location_search_playbook_preserves_source_specific_poc(self):
+        files = [f('src/search.js', "const q = new URLSearchParams(location.search).get('q'); document.body.innerHTML = q;")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = [p for p in result.verification_playbooks if p.risk_type == 'DOM XSS'][0]
+        self.assertIn('history.replaceState', pb.console_code or '')
+
     def test_storage_auth_bypass_with_poc_is_promoted(self):
         """Storage-based auth bypass with 1-line PoC must land in verification_playbooks."""
         files = [f('src/AdminPage.js',
@@ -1991,6 +2130,15 @@ function requestIamportPay(){
         pb = [p for p in result.verification_playbooks if p.risk_type == 'Client-side Authorization Bypass'][0]
         self.assertIn('sessionStorage', pb.console_code or '')
         self.assertLessEqual(len((pb.console_code or '').splitlines()), 2)
+
+    def test_storage_auth_playbook_preserves_detected_key_and_storage_type(self):
+        files = [f('src/AdminPage.js',
+                   "const userType = localStorage.getItem('userType');\n"
+                   "if (userType !== 'ADMIN') { navigate('/'); }")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = [p for p in result.verification_playbooks if p.risk_type == 'Client-side Authorization Bypass'][0]
+        self.assertIn('localStorage.setItem("userType"', pb.console_code or '')
+        self.assertNotIn('sessionStorage.setItem("user"', pb.console_code or '')
 
     def test_promoted_never_embeds_full_interceptor(self):
         """No promoted finding may embed a global hook installer in its PoC code."""

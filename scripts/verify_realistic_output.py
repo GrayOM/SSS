@@ -318,19 +318,24 @@ def main() -> int:
     route_params = analyze_console_exploitability(route_param_fixture(), analyzer=analyzer)
     validate_promoted_shape(route_params, "route_params")
     route_expectations = {
-        "/api/auction/{item.id}/bid": "REPLACE_WITH_TEST_ID",
-        "/api/users/{userId}/role": "REPLACE_WITH_USER_ID",
-        "/api/users/{currentUserId}/profile": "REPLACE_WITH_USER_ID",
-        "/api/user/{sessionData.userId}/wallet/charge": "REPLACE_WITH_USER_ID",
-        "/api/order/{auctionItem.orderId}/complete-payment": "REPLACE_WITH_ORDER_ID",
-        "/api/order/{orderId}/complete-payment": "REPLACE_WITH_ORDER_ID",
-        "/api/products/{productId}/purchase": "REPLACE_WITH_TEST_ID",
+        "/api/auction/{item.id}/bid": ("itemId", "REPLACE_WITH_ITEM_ID"),
+        "/api/users/{userId}/role": ("userId", "REPLACE_WITH_USER_ID"),
+        "/api/users/{currentUserId}/profile": ("userId", "REPLACE_WITH_USER_ID"),
+        "/api/user/{sessionData.userId}/wallet/charge": ("userId", "REPLACE_WITH_USER_ID"),
+        "/api/order/{auctionItem.orderId}/complete-payment": ("orderId", "REPLACE_WITH_ORDER_ID"),
+        "/api/order/{orderId}/complete-payment": ("orderId", "REPLACE_WITH_ORDER_ID"),
+        "/api/products/{productId}/purchase": ("productId", "REPLACE_WITH_PRODUCT_ID"),
     }
-    for endpoint, const_label in route_expectations.items():
+    for endpoint, (runtime_var, fallback_label) in route_expectations.items():
         pb = find_playbook(route_params, endpoint)
         code = pb.console_code if pb else ""
         check(f"route_params: {endpoint} promotes", pb is not None, f"endpoints={sorted(endpoint_set(route_params))}")
-        check(f"route_params: {endpoint} uses editable constant", const_label in (code or ""), code or "missing playbook")
+        check(
+            f"route_params: {endpoint} uses runtime resolver",
+            f"const {runtime_var} =" in (code or "") and ("location." in (code or "") or "document.querySelector" in (code or "")),
+            code or "missing playbook",
+        )
+        check(f"route_params: {endpoint} keeps REPLACE fallback only", fallback_label in (code or ""), code or "missing playbook")
         check(f"route_params: {endpoint} not fatal placeholder", not any(endpoint in (rc.poc_generation_reason or "") for rc in route_params.review_candidates))
 
     destructive = analyze_console_exploitability(destructive_fixture(), analyzer=analyzer)

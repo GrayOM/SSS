@@ -103,11 +103,15 @@ check('G2a: /api/auction/{item.id}/bid POST promotes',
 
 if bid_pb:
     code2 = bid_pb[0].console_code or ''
-    check('G2b: console_code contains a REPLACE constant',
-          'const TEST_ID = "REPLACE_WITH_TEST_ID";' in code2,
+    check('G2b: console_code derives itemId from runtime/page sources before fallback',
+          'const itemId =' in code2
+          and 'location.search' in code2
+          and 'location.pathname.match' in code2
+          and '[data-item-id]' in code2
+          and 'REPLACE_WITH_ITEM_ID' in code2,
           f'code={code2[:300]}')
-    check('G2c: console_code contains template-literal fetch path',
-          'fetch(`/api/auction/${TEST_ID}/bid' in code2,
+    check('G2c: console_code contains runtime-aware template-literal fetch path',
+          'fetch(`/api/auction/${itemId}/bid' in code2,
           f'code={code2[:300]}')
     check('G2d: console_code does NOT contain window.SSS_POC.find(',
           'window.SSS_POC.find(' not in code2,

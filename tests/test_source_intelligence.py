@@ -92,6 +92,8 @@ export class PaymentService {
 <script src="/static/pay.js"></script>
 <script>
 const token = localStorage.getItem('token');
+const session = JSON.parse(sessionStorage.getItem('user') || '{}');
+const orderId = new URLSearchParams(location.search).get('orderId');
 function submitOrder(event) {
   event.preventDefault();
   if (!amount) return;
@@ -110,6 +112,9 @@ eval(window.name);
         self.assertTrue(any(button['text'] == 'Pay now' for button in manifest.buttons))
         self.assertTrue(any(call['endpoint'] == '/api/orders/123/pay' and call['method'] == 'POST' for call in manifest.api_calls))
         self.assertTrue(any(item['storage'] == 'localStorage' and item['key'] == 'token' for item in manifest.storage_usage))
+        self.assertTrue(any(item['kind'] == 'storage' and item['key'] == 'token' for item in manifest.runtime_value_sources))
+        self.assertTrue(any(item['kind'] == 'json_storage' and item['key'] == 'user' for item in manifest.runtime_value_sources))
+        self.assertTrue(any(item['kind'] == 'route_or_query' and item['source'] == 'URLSearchParams(location.search)' for item in manifest.runtime_value_sources))
         self.assertTrue(any(item['source'] == 'location.hash' for item in manifest.dom_sources))
         self.assertTrue(any(item['source'] == 'window.name' for item in manifest.dom_sources))
         self.assertTrue(any(item['sink'] == 'innerHTML' for item in manifest.dangerous_sinks))

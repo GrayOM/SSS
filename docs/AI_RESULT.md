@@ -211,7 +211,9 @@ Promoted findings remain runtime verification candidates, not confirmed vulnerab
 2. Intelligence: routes, pages, UI events, API calls, payload keys, storage usage, DOM sources/sinks, validation guards, and business flows are extracted.
 3. Candidate: findings are normalized with source location, handler/action, endpoint/method or DOM flow, parameters, risk category, and uncertainty notes.
 4. Promotion: only concrete, direct-PoC-capable, non-destructive, browser-verifiable findings become runtime verification candidates.
-5. PoC: promoted API findings get short direct `fetch` Console snippets; route params become `REPLACE_WITH_*` constants.
+5. PoC: promoted API findings get direct `fetch` Console snippets; route
+   params prefer runtime/page-derived values and keep `REPLACE_WITH_*` as the
+   final fallback.
 6. Browser proof: playbooks explain proof steps, success/failure criteria, evidence to capture, breakpoint/source-line checks, and report-ready context.
 
 ## 6. Files changed
@@ -361,7 +363,8 @@ verify_realistic_output: 173 passed, 0 failed
 - Kept Stripe checkout action inference as the assessor-friendly generic `click payment button`.
 - Suppressed search/recommend GET raw signals from the UI-facing `review_candidates` list while preserving them in `findings` as raw signals for traceability.
 - Verified that `common_console_helper` is not shown globally when promoted PoCs are direct.
-- Verified stable route params become editable `REPLACE_WITH_*` constants and do not block promotion.
+- Verified stable route params become runtime-aware variables with editable
+  `REPLACE_WITH_*` fallbacks and do not block promotion.
 
 ## Example Improved Promoted Outputs
 
@@ -370,15 +373,15 @@ Auction bid:
 - endpoint: `/api/auction/{item.id}/bid`
 - method: `POST`
 - user action: `click bid button`
-- PoC shape: direct `fetch(\`/api/auction/${TEST_ID}/bid\`, ...)`
-- route param: `const TEST_ID = "REPLACE_WITH_TEST_ID";`
+- PoC shape: direct `fetch(\`/api/auction/${itemId}/bid\`, ...)`
+- route param: `const itemId = ... || "REPLACE_WITH_ITEM_ID";`
 
 Wallet charge:
 
 - endpoint: `/api/user/{sessionData.userId}/wallet/charge`
 - method: `POST`
 - user action: `click point charge button`
-- route param: `const USER_ID = "REPLACE_WITH_USER_ID";`
+- route param: `const userId = ... || "REPLACE_WITH_USER_ID";`
 - helper-free direct PoC with `confirm()` guard
 
 Iamport verify:
@@ -417,7 +420,8 @@ python3 -m pytest tests/ -v
 
 Key checks passed:
 - `{API_BASE_URL}/login` promoted with `fetch("/login"`.
-- `/api/auction/{item.id}/bid` promoted with `const TEST_ID = "REPLACE_WITH_TEST_ID";` and `fetch(`/api/auction/${TEST_ID}/bid`.
+- `/api/auction/{item.id}/bid` promoted with `const itemId = ... ||
+  "REPLACE_WITH_ITEM_ID";` and `fetch(`/api/auction/${itemId}/bid`.
 - Promoted PoCs contain no `window.SSS_POC`, `window.SSS_REVIEW_POC`, fetch/XHR interceptors, or helper capture signatures.
 - `common_console_helper` is `None` when promoted PoCs are self-contained.
 - `{API_BASE_URL}/admin/refund` and `DELETE` endpoints do not promote.
@@ -457,7 +461,8 @@ Command used in this environment: `python(){ python3 "$@"; }; python -m pytest t
 - `POST ${API_BASE_URL}/admin/add-numbers` -> promoted as `/admin/add-numbers`.
 - `POST API_BASE_URL + "/generate-lotto"` -> promoted as `/generate-lotto`.
 - `axios.create({ baseURL: API_BASE_URL }).post("/login")` -> promoted as `/login`.
-- `POST /api/auction/{item.id}/bid` -> promoted with tester-controlled `TEST_ID`.
+- `POST /api/auction/{item.id}/bid` -> promoted with runtime-derived `itemId`
+  and tester-editable fallback.
 
 ### Example self-contained console PoCs
 
@@ -476,15 +481,10 @@ Command used in this environment: `python(){ python3 "$@"; }; python -m pytest t
 
 ```javascript
 (async () => {
-  const CONFIRM_AUTHORIZED_TEST = false;
-  if (!CONFIRM_AUTHORIZED_TEST) { console.warn('[SSS PoC] Set CONFIRM_AUTHORIZED_TEST=true to run'); return; }
-  const TEST_ID = "REPLACE_WITH_TEST_ID";
-  const r = await fetch(`/api/auction/${TEST_ID}/bid`, {
-    method: "POST", credentials: "include",
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ "amount": 1 }),
-  });
-  console.log('[SSS PoC]', r.status, await r.text().catch(() => ''));
+  const itemId = new URLSearchParams(location.search).get("itemId") || location.pathname.match(/(?:(?:items?|auction))\/([^/?#]+)/)?.[1] || document.querySelector("[data-item-id]")?.dataset.itemId || document.querySelector("[name='itemId']")?.value || window.__INITIAL_STATE__?.itemId || "REPLACE_WITH_ITEM_ID";
+  if (!confirm(`[SSS PoC] Run approved POST /api/auction/${itemId}/bid?`)) return;
+  const r = await fetch(`/api/auction/${itemId}/bid`, { method: "POST", credentials: "include", headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ "amount": 1 }) });
+  console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));
 })();
 ```
 
@@ -889,7 +889,7 @@ python3 scripts/verify_generalization.py
 verify_generalization: 47 passed, 0 failed
 
 python3 -m pytest tests/ -v
-547 passed
+555 passed
 ```
 
 Remaining limitations:
@@ -911,3 +911,189 @@ Next recommended corpus expansion:
 - Add generated OpenAPI/Swagger client patterns.
 - Add more multipart upload and CSRF/header-dependent examples.
 - Add inter-file component-to-service call graph fixtures.
+
+## Code Review Correctness Fix Pass - 2026-06-10
+
+Root causes fixed:
+
+- Promoted playbooks now preserve finding-specific executable PoCs when
+  `console_poc.code` is present, interceptor-free, and passes the safety gate.
+  `_build_playbook_poc()` is only used as fallback, so DOM XSS PoCs keep
+  source-specific behavior such as `window.postMessage(...)` for `event.data`
+  and `history.replaceState(...)` for `location.search`.
+- Storage/auth playbooks now preserve the detected storage type and key in the
+  promoted playbook code, for example `localStorage.setItem("userType", ...)`
+  instead of falling back to generic `sessionStorage`/`user`.
+- `dom_sources` are included in the Gemini candidate prompt compact manifest.
+  Raw code-like keys remain stripped; semantic DOM source fields are preserved.
+- Direct GET PoCs now use `fetch(url, { credentials: "include" })` and print
+  status, content-type, and body preview consistently with mutation PoCs.
+- API candidates now carry `payload_style` through extraction and source
+  intelligence. JSON/object requests generate JSON PoCs, FormData requests
+  generate `new FormData()`/`fd.append(...)` without manually setting
+  `Content-Type`, and URLSearchParams requests generate form-encoded bodies.
+- Endpoint normalization now strips only base-URL-like variables such as
+  `API_URL`, `API_BASE_URL`, `REACT_APP_API_URL`, `VITE_API_URL`, `*_URL`,
+  `*_BASE`, and `*_BASE_URL`. Route variables such as `tenantId`, `orgId`, and
+  `userId` remain stable editable route params.
+- Gemini output sanitization is covered by a fake Gemini integration test:
+  unsafe/helper code from Gemini is cleared, compact manifest facts including
+  `dom_sources` are visible in the prompt path, and promotion falls back to a
+  helper-free direct PoC when source evidence is concrete.
+- Promotion gating was tightened after the Gemini fallback change so bare
+  service-level POST calls and generic `do*` wrappers without real UI events
+  remain review candidates instead of promoted playbooks.
+
+Regression tests added:
+
+- DOM XSS `event.data` and `location.search` source-specific promoted PoCs.
+- Storage auth detected key/storage preservation.
+- Gemini compact manifest `dom_sources` inclusion without raw source leakage.
+- GET direct PoC credentials/content-type/body-preview shape.
+- FormData, URLSearchParams, and JSON payload-style PoC generation.
+- Base URL stripping versus route-variable preservation.
+- Fake Gemini analyzer promotion/sanitization path.
+
+Final verification output:
+
+```text
+python3 scripts/verify_goal.py
+verify_goal: 23 passed, 0 failed
+
+python3 scripts/verify_realistic_output.py
+verify_realistic_output: 173 passed, 0 failed
+
+python3 scripts/verify_generalization.py
+verify_generalization: 47 passed, 0 failed
+
+python3 -m pytest tests/ -v
+555 passed
+```
+
+Remaining limitations:
+
+- Payload style detection is heuristic for highly abstracted wrapper clients.
+  Unknown payload shapes still require manual review when fields are
+  insufficient.
+- Gemini findings can be promoted after unsafe code is cleared only when source
+  evidence provides concrete endpoint, method, function context, and safe
+  payload fields.
+- Generic function-only calls without real UI events remain intentionally
+  conservative review candidates.
+
+## Runtime-Aware PoC Correction Pass - 2026-06-10
+
+Product correction implemented:
+
+- SSS now treats line count as a guardrail, not the primary PoC quality metric.
+  The PoC builder prioritizes source-aware/runtime-aware values over random
+  `TEST_VALUE` or bare `REPLACE_WITH_*` templates.
+- Route params and identifier payload fields now prefer values derived from the
+  current browser runtime:
+  - `URLSearchParams(location.search)`
+  - `location.pathname.match(...)`
+  - DOM `data-*` attributes
+  - named or hidden form inputs
+  - `sessionStorage`/`localStorage` session objects for user identifiers
+  - `window.__INITIAL_STATE__` style global state fallbacks
+- `REPLACE_WITH_*` remains in generated code only as the final fallback, not the
+  default value source.
+- FormData and URLSearchParams PoCs preserve payload style while using
+  runtime-derived field values when possible.
+- Review candidates are cleaned at the result boundary: non-promoted findings do
+  not retain executable direct replay code or `runtime_verification_candidate`
+  status.
+
+Root causes fixed:
+
+- `_find_unresolved_poc_placeholders()` now distinguishes raw unresolved route
+  placeholders from declared JavaScript template variables such as
+  `${userId}` in a safe generated PoC.
+- Promotion now validates self-contained direct PoC code as the resolved
+  artifact. Stable routes like `/api/order/{orderId}/complete-payment` no
+  longer demote solely because the raw endpoint still contains braces.
+- `poc_templates.py` emits compact direct `fetch(..., { ... })` options while
+  preserving runtime resolvers and payload style.
+- Source intelligence now records runtime value sources such as storage reads,
+  `JSON.parse(storage.getItem(...))`, location/search usage, route params, DOM
+  dataset reads, inputs, and global state reads.
+- Gemini compact prompt manifests include runtime value source facts alongside
+  DOM sources, while raw code remains stripped.
+
+New or updated regression coverage:
+
+- Runtime-aware route param PoCs use URL/query/DOM sources before fallback.
+- Storage user identifiers use session/local storage sources when present.
+- DOM form and hidden input values are represented in generated PoCs.
+- FormData and URLSearchParams PoCs keep their native payload style.
+- `TEST_*`/`REPLACE_WITH_*` fallback behavior is verified as fallback-only for
+  realistic route params.
+- Review candidates with weak auth-only evidence remain manual and do not carry
+  fetch-hook code.
+- `verify_goal.py` now checks runtime-aware route param PoC shape instead of the
+  older bare `TEST_ID` constant shape.
+
+Final verification output:
+
+```text
+python3 scripts/verify_goal.py
+verify_goal: 23 passed, 0 failed
+
+python3 scripts/verify_realistic_output.py
+verify_realistic_output: 180 passed, 0 failed
+
+python3 scripts/verify_generalization.py
+verify_generalization: 47 passed, 0 failed
+
+python3 -m pytest tests/ -v
+559 passed
+```
+
+Remaining limitations:
+
+- Runtime value derivation is heuristic. Unusual app state containers, custom
+  router abstractions, or deeply indirect selector logic may still require
+  manual review.
+- Source-aware PoCs may be slightly longer when that improves runtime
+  reliability. Existing promoted API checks still keep generated snippets
+  bounded, but future work should evaluate quality by value derivation and
+  evidence fidelity before raw line count.
+- Backend authorization and validation remain unproven by source alone; promoted
+  results are browser-verifiable runtime candidates, not confirmed server-side
+  vulnerabilities.
+
+## Final Pre-Commit Polish - 2026-06-10
+
+Additional quality fixes:
+
+- Payment identifiers (`imp_uid`, `merchant_uid`, `paymentId`,
+  `transactionId`) no longer use a generic pathname fallback that could make two
+  unrelated identifiers resolve to the same URL segment. They now use query
+  params, DOM `data-*` attributes, named inputs, app state, then
+  `REPLACE_WITH_*`.
+- Account recovery fields now have runtime resolvers for `email`, `phone`,
+  `code`, `verifyCode`, and `token`. `/verify-code` URLSearchParams PoCs now
+  derive `email` and `code` from browser/page state instead of emitting
+  `TEST_VALUE` for email when runtime sources are available.
+- Mutation PoCs now include a compact fallback guard. If any required runtime
+  variable still starts with `REPLACE_WITH_`, the PoC warns and returns before
+  sending the request.
+- Storage/auth promoted playbooks no longer display endpoint `UNKNOWN`; they
+  use a client-side target such as `/client-storage/sessionStorage/user` with
+  method `STORAGE`.
+
+Final verification output:
+
+```text
+python3 scripts/verify_goal.py
+verify_goal: 23 passed, 0 failed
+
+python3 scripts/verify_realistic_output.py
+verify_realistic_output: 180 passed, 0 failed
+
+python3 scripts/verify_generalization.py
+verify_generalization: 47 passed, 0 failed
+
+python3 -m pytest tests/ -v
+562 passed
+```

@@ -170,6 +170,35 @@ def _extract_storage_usage(file: FileContent) -> list[dict[str, Any]]:
     return out
 
 
+def _extract_runtime_value_sources(file: FileContent) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    content = file.content
+    for m in re.finditer(r'JSON\.parse\s*\(\s*(localStorage|sessionStorage)\.getItem\s*\(\s*["\']([^"\']+)["\']', content):
+        out.append({'line': _line_of(content, m.start()), 'kind': 'json_storage', 'storage': m.group(1), 'key': m.group(2)})
+    for m in re.finditer(r'\b(localStorage|sessionStorage)\.getItem\s*\(\s*["\']([^"\']+)["\']', content):
+        out.append({'line': _line_of(content, m.start()), 'kind': 'storage', 'storage': m.group(1), 'key': m.group(2)})
+    for source, pattern in {
+        'location.pathname': r'\blocation\.pathname\b',
+        'location.search': r'\blocation\.search\b',
+        'URLSearchParams(location.search)': r'new\s+URLSearchParams\s*\(\s*location\.search\s*\)',
+        'useParams': r'\buseParams\s*\(',
+    }.items():
+        for m in re.finditer(pattern, content):
+            out.append({'line': _line_of(content, m.start()), 'kind': 'route_or_query', 'source': source})
+    for m in re.finditer(r'\bdataset\.([A-Za-z_][A-Za-z0-9_]*)\b|\bdata-([a-zA-Z0-9_-]+)', content):
+        key = m.group(1) or m.group(2)
+        out.append({'line': _line_of(content, m.start()), 'kind': 'dataset', 'key': key})
+    for m in re.finditer(r'<input\b([^>]*)>', content, re.IGNORECASE):
+        attrs = m.group(1)
+        name = _attr(attrs, 'name')
+        item = {'line': _line_of(content, m.start()), 'kind': 'input', 'name': name, 'id': _attr(attrs, 'id'), 'type': _attr(attrs, 'type')}
+        if name or item.get('id'):
+            out.append(item)
+    for m in re.finditer(r'\bwindow\.(__INITIAL_STATE__|__PRELOADED_STATE__|__APP_STATE__|initialState)\b', content):
+        out.append({'line': _line_of(content, m.start()), 'kind': 'window_state', 'name': m.group(1)})
+    return sorted(out, key=lambda x: x['line'])
+
+
 def _extract_dom_sources(file: FileContent) -> list[dict[str, Any]]:
     patterns = {
         'location.hash': r'\blocation\.hash\b',
@@ -288,6 +317,7 @@ def _build_normalized_manifest(
                 for a in file_api
             ],
             storage_usage=_extract_storage_usage(file),
+            runtime_value_sources=_extract_runtime_value_sources(file),
             dom_sources=_extract_dom_sources(file),
             dangerous_sinks=_extract_dangerous_sinks(file),
             validation_guard_hints=_extract_validation_guard_hints(file),
@@ -396,7 +426,7 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
         interaction_confidence = 'high' if (ui_handler and ui_event_type and ui_event_text) else ('medium' if (ui_handler or ui_event_type or ui_event_text) else 'low')
         inv.append(ApiInventoryItem(
             source_path=c.source_path, function_name=fn, method=c.method, endpoint=c.endpoint, sink=c.sink,
-            parameters=c.parameters, start_line=c.start_line, end_line=c.end_line, ui_event_handler=ui_handler,
+            parameters=c.parameters, payload_style=c.payload_style, start_line=c.start_line, end_line=c.end_line, ui_event_handler=ui_handler,
             ui_event_text=ui_event_text, ui_event_type=ui_event_type, interaction_confidence=interaction_confidence,
             risk_category=_risk_category(c.method, c.endpoint, c.parameters)
         ))

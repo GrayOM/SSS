@@ -20,6 +20,7 @@ KEYWORDS = [
     'login', 'auth', 'session', 'token', 'jwt', 'cookie', 'localStorage', 'sessionStorage', 'userType', 'role',
     'admin', 'isAdmin', 'requireAuth', 'ProtectedRoute', 'PrivateRoute', 'navigate', 'withCredentials',
     'Authorization', 'innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval', 'Function',
+    'event.data',
     'location', 'document.URL', 'postMessage', 'input.value', 'price', 'amount', 'status', 'productId',
     'userId', 'payment', 'order', 'auction',
 ]
@@ -31,7 +32,7 @@ DANGEROUS_POC_PATTERNS = (
     'document.cookie=', 'child_process', 'eval(',
 )
 AUTH_SNIPPET_KEYS = ['requireAuth', 'checkSession', 'userInfo.userType', 'userType', 'role', 'isAdmin', 'ADMIN', 'navigate']
-DOM_SNIPPET_KEYS = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'location', 'document.URL', 'postMessage', 'input.value']
+DOM_SNIPPET_KEYS = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'location', 'document.URL', 'postMessage', 'event.data', 'input.value']
 VALIDATION_SNIPPET_KEYS = ['axios.post', 'axios.put', 'fetch', 'FormData', 'amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints']
 VALIDATION_PARAMETERS = ['amount', 'price', 'status', 'productId', 'userId', 'orderId', 'totalAmount', 'usePoints', 'paymentMethod', 'merchant_uid', 'imp_uid']
 PROMOTION_SCORE_THRESHOLD = 5
@@ -1582,7 +1583,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 and any(x in c_lower for x in ('navigate', '관리자 권한', 'requireauth'))
             ):
                 findings.append(self._mk_auth_bypass(f, files, missing_deps))
-            if 'innerhtml' in c_lower and any(x in c_lower for x in ('location', 'document.url', 'input.value', 'postmessage')):
+            if 'innerhtml' in c_lower and any(x in c_lower for x in ('location', 'document.url', 'input.value', 'postmessage', 'event.data')):
                 dom = self._mk_dom_xss(f)
                 if dom is not None:
                     findings.append(dom)
@@ -1986,7 +1987,14 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                     parameters[0] if parameters else '',
                 )
                 test_val: int | str = 1 if primary.lower() in {'amount', 'price', 'totalamount', 'usepoints'} else 'TEST_VALUE'
-                direct = build_request_replay_poc(method, norm_ep, primary, test_val, fields=parameters)
+                direct = build_request_replay_poc(
+                    method,
+                    norm_ep,
+                    primary,
+                    test_val,
+                    fields=parameters,
+                    payload_style=(candidate.payload_style or 'json'),
+                )
                 if direct:
                     poc_type = 'browser_console'
                     poc_code = direct
@@ -2167,6 +2175,7 @@ def _build_playbook_poc(
     method: str,
     endpoint: str,
     parameters: list[str],
+    payload_style: str = 'json',
 ) -> 'str | None':
     """
     Return the shortest self-contained PoC code suitable for the playbook
@@ -2192,7 +2201,7 @@ def _build_playbook_poc(
             parameters[0] if parameters else '',
         )
         test_val: int | str = 1 if primary.lower() in {'amount', 'price', 'totalamount', 'usepoints'} else 'TEST_VALUE'
-        direct = build_request_replay_poc(method, norm_ep, primary, test_val, fields=parameters)
+        direct = build_request_replay_poc(method, norm_ep, primary, test_val, fields=parameters, payload_style=payload_style)
         if direct:
             return direct
 
@@ -2234,12 +2243,28 @@ def _find_unresolved_poc_placeholders(*values: str | None) -> list[str]:
     for value in values:
         text = str(value or '')
         stripped = text.strip()
+        declared_vars = set(re.findall(r'\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=', text))
         if stripped == 'UNKNOWN' or re.fullmatch(r'(GET|POST|PUT|PATCH|DELETE|DOM)\s+UNKNOWN', stripped, flags=re.IGNORECASE):
             found.append('UNKNOWN')
         for placeholder in tracked_placeholders:
-            if placeholder in text and placeholder not in found:
+            inner = placeholder.strip('{}')
+            skip_placeholder = False
+            for match in re.finditer(re.escape(placeholder), text):
+                is_js_template_var = match.start() > 0 and text[match.start() - 1] == '$'
+                if is_js_template_var and inner in declared_vars and not re.search(r'(?:API|BASE|URL|test_)', inner, re.IGNORECASE):
+                    skip_placeholder = True
+                    continue
+                skip_placeholder = False
+                break
+            if placeholder in text and not skip_placeholder and placeholder not in found:
                 found.append(placeholder)
-        for placeholder in re.findall(r'\{(?:API_BASE_URL|API_BASE|BASE_URL|apiBase|userId|sessionData\.userId|auctionItem\.orderId|orderId|test_[^}]+)\}', text):
+        placeholder_re = re.compile(r'\{(?:API_BASE_URL|API_BASE|BASE_URL|apiBase|userId|sessionData\.userId|auctionItem\.orderId|orderId|test_[^}]+)\}')
+        for match in placeholder_re.finditer(text):
+            placeholder = match.group(0)
+            inner = placeholder.strip('{}')
+            is_js_template_var = match.start() > 0 and text[match.start() - 1] == '$'
+            if is_js_template_var and inner in declared_vars and not re.search(r'(?:API|BASE|URL|test_)', inner, re.IGNORECASE):
+                continue
             if placeholder not in found:
                 found.append(placeholder)
         for token in ('test_user_id', 'test_order_id'):
@@ -2294,6 +2319,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         src = flow[1]
         sink = flow[5]
         api_match = next((a for a in project_map.api_inventory if a.source_path == src and a.endpoint == endpoint and (not function_name or a.function_name == function_name)), None)
+        evidence_parameters = [x.replace('parameter: ', '') for x in (f.evidence[0].data_flow if f.evidence else []) if x.startswith('parameter: ')]
         page_obj = next((p for p in project_map.pages if p.source_path == src), None)
         ui_matches = [u.model_dump() for u in project_map.ui_events if u.source_path == src and (not function_name or u.handler_name == function_name)]
         surrounding_block = ''
@@ -2322,7 +2348,14 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         is_low_conf = f.confidence == 'low'
         is_disabled_only = bool(f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass')
         is_unknown = endpoint == 'UNKNOWN'
-        no_code = not (f.console_poc and f.console_poc.code)
+        can_build_direct_from_evidence = (
+            endpoint not in {'UNKNOWN', ''}
+            and method in {'GET', 'POST', 'PUT', 'PATCH'}
+            and bool(function_name)
+            and method != 'DELETE'
+            and not any(k in normalize_endpoint(endpoint).lower() for k in ('delete', 'remove', 'refund', 'transfer', 'withdraw', 'bulk'))
+        )
+        no_code = not (f.console_poc and f.console_poc.code) and not can_build_direct_from_evidence
         ux_disabled = any(x in ' '.join(f.evidence[0].data_flow).lower() for x in ('disabled_expression: loading', 'disabled_expression: submitting', 'disabled_expression: isloading')) if f.evidence else False
         top_import_like = bool(f.evidence and f.evidence[0].start_line <= 20 and 'import ' in (f.evidence[0].snippet or '').lower())
         fn_low = (function_name or '').lower()
@@ -2330,12 +2363,19 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             'sendverificationcode', 'verifycode', 'resetpassword',
             'handlestripecheckout', 'requestiamportprepare', 'requestiamportpay', 'handleiamportquick', 'handlepointcharge',
         }
+        has_real_ui_event = bool(
+            api_match and (
+                api_match.ui_event_text
+                or (api_match.ui_event_type and api_match.ui_event_type not in {'function_hint', 'element_text'})
+            )
+        )
         is_auto_fn = (
             fn_low in {
                 'loaddashboarddata', 'fetchdashboard', 'loaduser', 'loaduserinfo', 'fetchuser', 'fetchme', 'fetchsession',
                 'getsession', 'initdata', 'initialize', 'loadorders', 'fetchorders'
             }
             or (fn_low.startswith(('load', 'fetch', 'get', 'init', 'initialize', 'request')) and fn_low not in explicit_action_fn)
+            or (fn_low.startswith('do') and not has_real_ui_event)
             or 'useeffect' in (f.evidence[0].snippet.lower() if f.evidence else '')
         )
         is_generic_action = _is_generic_action_hint(action_hint)
@@ -2370,6 +2410,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             (api_match.ui_event_type or api_match.ui_event_handler or api_match.ui_event_text) and
             api_match.risk_category in {'identity_verification', 'account_recovery', 'payment', 'authorization', 'wallet_point'}
         )
+        has_event_connected_action = bool(api_match and method in {'POST', 'PUT', 'PATCH'} and has_real_ui_event)
         score = 0
         score_reasons: list[str] = []
         if function_name:
@@ -2378,8 +2419,9 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         else:
             score -= 3
         if api_match and (api_match.ui_event_handler or api_match.ui_event_type):
-            score += 3
-            score_reasons.append('ui_event_connected')
+            if has_real_ui_event:
+                score += 3
+                score_reasons.append('ui_event_connected')
         if api_match and api_match.ui_event_text and action_hint != 'target action':
             score += 2
             score_reasons.append('ui_text_matches_action')
@@ -2432,7 +2474,9 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             (not is_confirmed_short_poc or (score < 0 and f.category not in {'XSS', 'Admin/Role/Permission Bypass'})) and (
                 is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
                 bool(unresolved_placeholders) or
-                is_generic_action or is_generic_page or (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
+                (is_generic_action and not has_event_connected_action) or
+                (is_generic_page and not has_event_connected_action) or
+                (function_name is None and not is_jq_html_promotable and not is_dom_flow) or is_session_get or is_compressed or
                 (score < PROMOTION_SCORE_THRESHOLD and not is_dom_flow) or
                 (is_low_conf and f.category not in _HIGH_PRIORITY_CATEGORIES)
             )
@@ -2542,9 +2586,13 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     _mark_review_candidate(f)
                     review_candidates.append(f)
                     continue
-                # For short direct PoCs (DOM XSS, storage auth) the endpoint is not
-                # embedded in the code, so only check the code itself for placeholders.
-                if is_confirmed_short_poc:
+                # For self-contained direct PoCs the generated code is the
+                # authoritative resolved artifact: route placeholders have
+                # already become runtime/page-derived variables with
+                # REPLACE_WITH_* as fallback. Checking the raw endpoint here
+                # would incorrectly block stable routes such as
+                # /api/order/{orderId}/complete-payment.
+                if executable_poc.code and is_interceptor_free(executable_poc.code):
                     executable_placeholders = _find_unresolved_poc_placeholders(executable_poc.code)
                 else:
                     executable_placeholders = _find_unresolved_poc_placeholders(endpoint, executable_poc.code)
@@ -2557,6 +2605,9 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     )
                     _add_unique(f.verification_notes, f'Unresolved placeholder blocks promotion: {", ".join(executable_placeholders)}')
                     _mark_review_candidate(f)
+                    f.status = 'review_candidate'
+                    if f.console_poc:
+                        f.console_poc = f.console_poc.model_copy(update={'code': None})
                     review_candidates.append(f)
                     continue
                 contract = _apply_v1_contract(
@@ -2569,12 +2620,31 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     action_hint=action_hint,
                     api_match=api_match,
                 )
-                playbook_console_code = _build_playbook_poc(
-                    vuln_type=f.vulnerability_type,
-                    method=method,
-                    endpoint=endpoint,
-                    parameters=(api_match.parameters if api_match else []),
-                )
+                playbook_console_code = None
+                if (
+                    executable_poc.code
+                    and is_interceptor_free(executable_poc.code)
+                    and _is_allowed_guarded_poc_code(executable_poc.code)
+                ):
+                    playbook_console_code = executable_poc.code
+                if not playbook_console_code:
+                    playbook_console_code = _build_playbook_poc(
+                        vuln_type=f.vulnerability_type,
+                        method=method,
+                        endpoint=endpoint,
+                        parameters=(api_match.parameters if api_match else evidence_parameters),
+                        payload_style=(api_match.payload_style if api_match else 'json'),
+                    )
+                playbook_endpoint = (normalize_endpoint(endpoint) if endpoint and endpoint != 'UNKNOWN' else endpoint)
+                playbook_method = method
+                if f.vulnerability_type == 'Client-side Authorization Bypass' and playbook_console_code:
+                    storage_match = re.search(r'\b(sessionStorage|localStorage)\.setItem\("([^"]+)"', playbook_console_code)
+                    if storage_match:
+                        playbook_endpoint = f'/client-storage/{storage_match.group(1)}/{storage_match.group(2)}'
+                        playbook_method = 'STORAGE'
+                    else:
+                        playbook_endpoint = 'STORAGE auth branch'
+                        playbook_method = 'STORAGE'
                 pb = ConsoleVerificationPlaybookSummary(
                     id=f.id,
                     title=f.title,
@@ -2583,8 +2653,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     start_line=contract['start_line'],
                     end_line=contract['end_line'],
                     function_name=(function_name or None),
-                    endpoint=(normalize_endpoint(endpoint) if endpoint and endpoint != 'UNKNOWN' else endpoint),
-                    method=method,
+                    endpoint=playbook_endpoint,
+                    method=playbook_method,
                     page_hint=page_hint,
                     user_action_hint=action_hint,
                     risk_type=f.vulnerability_type,
@@ -2647,6 +2717,10 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
     # so downgrade to manual_plan to keep guidance consistent.
     if not verification_playbooks:
         for f in review_candidates:
+            if f.status == 'runtime_verification_candidate':
+                f.status = 'review_candidate'
+            if f.console_poc and f.console_poc.code:
+                f.console_poc = f.console_poc.model_copy(update={'code': None})
             if f.poc_generation_status == 'observational':
                 f.poc_generation_status = 'manual_plan'
                 prev_reason = f.poc_generation_reason or ''
@@ -2666,6 +2740,10 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                             'No promoted playbook: use Network tab and breakpoints instead of Console helper')
     else:
         for f in review_candidates:
+            if f.status == 'runtime_verification_candidate':
+                f.status = 'review_candidate'
+            if f.console_poc and f.console_poc.code:
+                f.console_poc = f.console_poc.model_copy(update={'code': None})
             if f.poc_generation_status == 'observational':
                 f.poc_generation_status = 'manual_plan'
                 prev_reason = f.poc_generation_reason or ''

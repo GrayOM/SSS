@@ -262,6 +262,7 @@ class ApiInventoryItem(BaseModel):
     endpoint: str
     sink: str
     parameters: list[str] = Field(default_factory=list)
+    payload_style: str = 'unknown'
     start_line: int
     end_line: int
     ui_event_handler: str | None = None
@@ -281,6 +282,7 @@ class SourceFileManifest(BaseModel):
     event_handlers: list[dict[str, Any]] = Field(default_factory=list)
     api_calls: list[dict[str, Any]] = Field(default_factory=list)
     storage_usage: list[dict[str, Any]] = Field(default_factory=list)
+    runtime_value_sources: list[dict[str, Any]] = Field(default_factory=list)
     dom_sources: list[dict[str, Any]] = Field(default_factory=list)
     dangerous_sinks: list[dict[str, Any]] = Field(default_factory=list)
     validation_guard_hints: list[dict[str, Any]] = Field(default_factory=list)
@@ -437,6 +439,7 @@ class ApiCallCandidate(BaseModel):
     method: str
     endpoint: str
     parameters: list[str] = Field(default_factory=list)
+    payload_style: str = 'unknown'
     start_line: int
     end_line: int
     snippet: str

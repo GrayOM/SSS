@@ -17,7 +17,9 @@ Core responsibilities:
 - `source_intelligence.py`: routes, pages, UI events, API inventory, storage usage, DOM sources, DOM sinks, validation guard hints, business flows.
 - `api_candidate_extractor.py`: concrete API call candidates, method/endpoint/payload keys, source lines, UI handler candidates.
 - `console_poc_analysis_service.py`: classification, promotion/demotion, interaction hints, report-ready playbook output.
-- `poc_templates.py`: short direct helper-free PoCs, route-param constants, base URL normalization, destructive endpoint blocking.
+- `poc_templates.py`: direct helper-free PoCs, runtime/page-derived route and
+  payload value resolvers, base URL normalization, payload-style preservation,
+  destructive endpoint blocking.
 
 ## Promotion Rules
 
@@ -35,20 +37,45 @@ Demote to review candidate when endpoint/method/page/action is unresolved, evide
 
 ## PoC Rules
 
-Promoted API PoCs are direct `fetch` snippets:
+Promoted API PoCs are source-aware direct `fetch` snippets:
 
 - self-contained
 - no `window.SSS_POC`
 - no common helper requirement
 - no interceptor install
 - `credentials: "include"`
-- JSON content type for mutation requests
+- prefer actual runtime/page values from `location.pathname`,
+  `URLSearchParams(location.search)`, DOM `data-*` attributes, named or hidden
+  inputs, storage/session objects, and app global state
+- use `REPLACE_WITH_*` only as a final fallback when source/runtime candidates
+  cannot provide the value
+- response status/content-type/body preview printed for GET and mutation
+  requests
+- JSON requests use `Content-Type: application/json` and `JSON.stringify(...)`
+- FormData requests use `new FormData()`/`fd.append(...)` and must not set a
+  manual JSON content type
+- URLSearchParams requests use form-encoded body semantics
 - `confirm()` guard for POST/PUT/PATCH
 - no DELETE or destructive refund/transfer/withdraw/bulk/remove replay PoC
-- route params become `REPLACE_WITH_*` constants
-- response status/content-type/body preview is printed
+- route params become runtime-aware variables such as `const orderId = ... ||
+  "REPLACE_WITH_ORDER_ID"`, not bare test constants by default
+
+A slightly longer source-aware PoC is preferable to a shorter random replay
+template. Do not optimize only for line count if that would discard source
+context, payload style, or runtime value derivation.
 
 Review candidates should not look confirmed. Prefer manual verification plans and breakpoint/Network-tab guidance. Optional runtime discovery helper output must remain clearly separated from promoted proof.
+
+When a finding already has a safe source-specific executable PoC, promotion
+must preserve that code. Do not overwrite DOM or storage PoCs with generic
+fallbacks. Examples:
+
+- `event.data` DOM XSS should keep a `window.postMessage(...)` PoC.
+- `location.search` DOM XSS should keep a `history.replaceState(...)` PoC.
+- storage auth should keep the detected storage type and key.
+
+Only call `_build_playbook_poc()` as fallback when no safe finding-specific
+code exists.
 
 ## Testing Commands
 
@@ -93,7 +120,16 @@ Do not break:
 
 - promoted direct PoCs must stay helper-free
 - `common_console_helper` must not appear globally beside direct playbooks
-- route params must become `REPLACE_WITH_*` constants
+- route params must prefer runtime/page-derived values and keep
+  `REPLACE_WITH_*` only as fallback
+- base URL variables are stripped only when they look like real base URL
+  variables (`API_URL`, `API_BASE_URL`, `REACT_APP_API_URL`, `VITE_API_URL`,
+  `*_URL`, `*_BASE`, `*_BASE_URL`)
+- route-like variables such as `tenantId`, `orgId`, `userId`, `orderId`, and
+  `itemId` must stay editable route params
+- `payload_style` must flow from API extraction to PoC generation
+- Gemini/helper code sanitization must keep unsafe `window.SSS_POC` or
+  destructive code out of promoted playbooks
 - destructive refund/delete/transfer/withdraw/bulk/remove endpoints must not
   promote direct replay PoCs
 - review candidates must remain manual or clearly observational, never
@@ -111,3 +147,8 @@ Do not break:
   observable chains may need manual review.
 - Storage/auth branch playbooks may not have an API endpoint; they are promoted
   only when the browser-verifiable target is storage/navigation/DOM behavior.
+- Payload style detection is heuristic for heavily abstracted wrappers; unknown
+  payloads with insufficient fields should stay manual rather than being forced
+  into JSON.
+- Function-only `do*` wrappers without real UI events are deliberately
+  conservative review candidates.
