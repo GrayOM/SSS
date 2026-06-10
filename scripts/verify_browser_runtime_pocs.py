@@ -226,7 +226,14 @@ def playwright_runtime_available() -> tuple[bool, str]:
         return False, f"playwright launch failed: {exc}"
 
 
-def _fixture_html() -> str:
+def _fixture_html(include_runtime_values: bool = True) -> str:
+    if not include_runtime_values:
+        return """<!doctype html>
+<html>
+<body>
+  <div id="messageSink"></div>
+</body>
+</html>"""
     return """<!doctype html>
 <html>
 <body>
@@ -249,6 +256,12 @@ def _fixture_html() -> str:
        data-imp-uid="IMP-DATA"
        data-merchant-uid="MERCHANT-DATA"
        data-code="555666"></div>
+  <div id="messageSink"></div>
+  <script>
+    window.addEventListener('message', function (event) {
+      document.getElementById('messageSink').innerHTML = event.data;
+    });
+  </script>
 </body>
 </html>"""
 
@@ -311,10 +324,11 @@ window.confirm = function(message) {
 def _prepare_runtime_page(browser, case: Case, resolved: bool):
     page = browser.new_page()
     _install_fetch_mock(page)
-    page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=_fixture_html()))
+    html = _fixture_html(include_runtime_values=resolved)
+    page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=html))
     url = case.resolved_url if resolved else "https://sss.test/blank"
     page.goto(url)
-    page.set_content(_fixture_html())
+    page.set_content(html)
     if resolved:
         page.evaluate(
             """
@@ -344,6 +358,16 @@ def _prepare_runtime_page(browser, case: Case, resolved: bool):
 }
 """
         )
+    else:
+        page.evaluate(
+            """
+() => {
+  sessionStorage.clear();
+  localStorage.clear();
+  delete window.__INITIAL_STATE__;
+}
+"""
+        )
     return page
 
 
@@ -355,7 +379,8 @@ def _run_console_code(page, code: str) -> dict[str, Any]:
   confirmMessages: window.__sssConfirmMessages || [],
   postedMessages: window.__sssPostedMessages || [],
   sessionUser: sessionStorage.getItem('user'),
-  localUserType: localStorage.getItem('userType')
+  localUserType: localStorage.getItem('userType'),
+  messageSinkHtml: document.querySelector('#messageSink')?.innerHTML || ''
 })"""
     )
 
@@ -370,6 +395,28 @@ def _validate_playwright_case(browser, case: Case) -> None:
     if case.method in {"POST", "PUT", "PATCH"} and "REPLACE_WITH_" in case.code:
         unresolved_page = _prepare_runtime_page(browser, case, resolved=False)
         try:
+            no_runtime_sources = unresolved_page.evaluate(
+                """() => ({
+  search: location.search,
+  path: location.pathname,
+  inputs: document.querySelectorAll('input[value]').length,
+  dataAttrs: document.querySelectorAll('[data-order-id], [data-item-id], [data-user-id], [data-payment-id], [data-imp-uid], [data-merchant-uid], [data-code]').length,
+  sessionUser: sessionStorage.getItem('user'),
+  localUser: localStorage.getItem('user'),
+  state: window.__INITIAL_STATE__
+})"""
+            )
+            check(
+                f"{case.label}: Playwright unresolved page has no runtime source values",
+                no_runtime_sources.get("search") == ""
+                and no_runtime_sources.get("path") == "/blank"
+                and no_runtime_sources.get("inputs") == 0
+                and no_runtime_sources.get("dataAttrs") == 0
+                and no_runtime_sources.get("sessionUser") is None
+                and no_runtime_sources.get("localUser") is None
+                and no_runtime_sources.get("state") is None,
+                json.dumps(no_runtime_sources),
+            )
             unresolved = _run_console_code(unresolved_page, case.code)
             check(f"{case.label}: Playwright unresolved fallback blocks fetch", len(unresolved["fetchCalls"]) == 0, json.dumps(unresolved))
             check(f"{case.label}: Playwright unresolved fallback blocks confirm", len(unresolved["confirmMessages"]) == 0, json.dumps(unresolved))
@@ -436,9 +483,19 @@ def run_playwright_checks(cases: list[Case], dom_code: str | None, storage_code:
                 page = _prepare_runtime_page(browser, Case("DOM XSS event.data", "DOM", "DOM", dom_code, ()), resolved=True)
                 try:
                     result = _run_console_code(page, dom_code)
+                    sink_reached = True
+                    try:
+                        page.wait_for_function(
+                            "() => document.querySelector('#messageSink')?.innerHTML.includes('onerror=console.log(1)')",
+                            timeout=3000,
+                        )
+                    except Exception:
+                        sink_reached = False
+                    sink_html = page.evaluate("() => document.querySelector('#messageSink')?.innerHTML || ''")
                     check("DOM XSS event.data: Playwright postMessage called", bool(result["postedMessages"]), json.dumps(result))
                     if result["postedMessages"]:
                         check("DOM XSS event.data: Playwright source-specific payload", "onerror=console.log(1)" in result["postedMessages"][0]["message"], json.dumps(result))
+                    check("DOM XSS event.data: Playwright payload reaches sink", sink_reached and "onerror=console.log(1)" in sink_html, sink_html)
                 finally:
                     page.close()
             if storage_code:
