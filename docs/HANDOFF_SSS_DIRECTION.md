@@ -99,10 +99,13 @@ The realistic verifier must stay green before changing promotion, review-candida
 It runs representative fixtures through the real SSS analysis pipeline and
 validates generated promoted `console_code` for runtime resolvers, fallback
 guards before mutation fetches, payload-style preservation, GET credentials,
-source-specific DOM/storage PoCs, and destructive endpoint suppression. In the
-current local environment there is no Node.js or Playwright binary, so the
-script reports that limitation and uses deterministic structural simulation
-instead of true browser execution.
+source-specific DOM/storage PoCs, and destructive endpoint suppression. When
+the Python Playwright package and a Chromium browser are available, the script
+creates controlled fixture pages, mocks `fetch`, evaluates generated Console
+PoCs in the page context, checks unresolved fallback blocking, validates
+resolved request URL/method/credentials/headers/body, and executes DOM
+XSS/storage PoCs. If Playwright is unavailable, the script reports that
+limitation and keeps deterministic structural simulation as fallback.
 
 ## Generalization Corpus
 

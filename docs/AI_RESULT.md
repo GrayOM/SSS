@@ -1187,3 +1187,37 @@ Remaining limitations:
   unresolved placeholders, but they may still require a tester to select or
   provide a real `File` object in the browser.
 - Frontend source still cannot prove backend authorization or validation.
+
+## Playwright Runtime Verifier Extension - 2026-06-10
+
+Added a real Playwright-backed execution path to
+`scripts/verify_browser_runtime_pocs.py` while preserving deterministic
+structural simulation as fallback.
+
+Behavior when Playwright and Chromium are available:
+
+- Creates controlled fixture pages with representative route/query, DOM,
+  storage, and app-state values.
+- Mocks `fetch` inside the page context and records URL, method, credentials,
+  headers, string bodies, FormData entries, and URLSearchParams bodies.
+- Evaluates generated promoted `console_code` directly in the page context.
+- Verifies mutation fallback guards block fetch and confirm when required
+  values still resolve to `REPLACE_WITH_*`.
+- Verifies fetch is called when runtime values exist.
+- Checks resolved request URL, HTTP method, credentials, headers, JSON body
+  keys, FormData entries, and URLSearchParams body keys.
+- Executes source-specific DOM XSS `event.data` PoCs and storage/auth branch
+  PoCs.
+
+Current environment result:
+
+```text
+python3 scripts/verify_browser_runtime_pocs.py
+playwright_available=False
+playwright_status=python playwright package is not installed
+verify_browser_runtime_pocs: 128 passed, 0 failed
+playwright_execution=skipped
+```
+
+The real Playwright path is present but was not executed locally because the
+Python Playwright package is not installed.
