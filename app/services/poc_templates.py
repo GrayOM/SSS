@@ -307,11 +307,23 @@ def _safe_body_key(name: str) -> bool:
 
 
 def _runtime_var_name(name: str) -> str | None:
-    low = (name or '').lower().replace('.', '')
+    raw = name or ''
+    low = raw.lower().replace('.', '')
+    compact = re.sub(r'[^a-z0-9]', '', low)
     if 'order' in low and 'id' in low:
         return 'orderId'
     if 'product' in low and 'id' in low:
         return 'productId'
+    if 'tenant' in low and 'id' in low:
+        return 'tenantId'
+    if 'workspace' in low and 'id' in low:
+        return 'workspaceId'
+    if 'project' in low and 'id' in low:
+        return 'projectId'
+    if 'team' in low and 'id' in low:
+        return 'teamId'
+    if re.search(r'(^|[^a-z])org(?:anization)?[_-]?id$', raw, re.I) or compact in {'orgid', 'organizationid'}:
+        return 'orgId'
     if any(token in low for token in ('memberid', 'accountid')):
         return 'userId'
     if 'user' in low and 'id' in low:
@@ -328,14 +340,16 @@ def _runtime_var_name(name: str) -> str | None:
         return 'impUid'
     if low in {'merchant_uid', 'merchantuid'}:
         return 'merchantUid'
-    if low in {'email', 'emailaddress', 'useremail'}:
+    if compact in {'email', 'emailaddress', 'useremail', 'buyeremail'}:
         return 'email'
-    if low in {'phone', 'phonenumber', 'tel', 'mobile', 'mobilephone'}:
+    if compact in {'phone', 'phonenumber', 'phoneno', 'tel', 'telno', 'mobile', 'mobileno', 'mobilephone'}:
         return 'phone'
     if 'token' in low:
         return 'token'
-    if low in {'code', 'authcode', 'verifycode', 'verificationcode'}:
+    if compact in {'code', 'authcode', 'authno', 'certno', 'verifycode', 'verificationcode'}:
         return 'code'
+    if compact in {'file', 'image', 'attachment', 'receipt', 'upload'}:
+        return compact
     return None
 
 
@@ -354,6 +368,16 @@ def _runtime_value_expr(name: str) -> str:
         'phone': 'REPLACE_WITH_PHONE',
         'token': 'REPLACE_WITH_TOKEN',
         'code': 'REPLACE_WITH_CODE',
+        'tenantId': 'REPLACE_WITH_TENANT_ID',
+        'orgId': 'REPLACE_WITH_ORG_ID',
+        'workspaceId': 'REPLACE_WITH_WORKSPACE_ID',
+        'projectId': 'REPLACE_WITH_PROJECT_ID',
+        'teamId': 'REPLACE_WITH_TEAM_ID',
+        'file': 'REPLACE_WITH_FILE',
+        'image': 'REPLACE_WITH_IMAGE',
+        'attachment': 'REPLACE_WITH_ATTACHMENT',
+        'receipt': 'REPLACE_WITH_RECEIPT',
+        'upload': 'REPLACE_WITH_UPLOAD',
     }.get(var_name, 'REPLACE_WITH_VALUE')
     query_key = {
         'impUid': 'imp_uid',
@@ -366,7 +390,20 @@ def _runtime_value_expr(name: str) -> str:
         'itemId': '(?:items?|auction)',
         'paymentId': 'payments?',
         'userId': 'users?',
+        'tenantId': 'tenants?',
+        'orgId': 'orgs?|organizations?',
+        'workspaceId': 'workspaces?',
+        'projectId': 'projects?',
+        'teamId': 'teams?',
     }.get(var_name, '[^/]+')
+    if var_name in {'file', 'image', 'attachment', 'receipt', 'upload'}:
+        field = re.sub(r'([A-Z])', r'-\1', var_name).lower()
+        return (
+            f'document.querySelector("[name=\'{field}\']")?.files?.[0] || '
+            f'document.querySelector("[name=\'{field}\']")?.value || '
+            'document.querySelector("input[type=\'file\']")?.files?.[0] || '
+            f'{json.dumps(placeholder)}'
+        )
     if var_name in {'paymentId', 'transactionId', 'impUid', 'merchantUid'}:
         return (
             f'new URLSearchParams(location.search).get({json.dumps(query_key)}) || '
@@ -418,6 +455,15 @@ def _runtime_value_expr(name: str) -> str:
             'document.querySelector("[name=\'verifyCode\']")?.value || '
             'document.querySelector("[data-code]")?.dataset.code || '
             'window.__INITIAL_STATE__?.code || '
+            f'{json.dumps(placeholder)}'
+        )
+    if var_name in {'tenantId', 'orgId', 'workspaceId', 'projectId', 'teamId'}:
+        return (
+            f'new URLSearchParams(location.search).get({json.dumps(query_key)}) || '
+            f'location.pathname.match(/(?:{route_prefix})\\/([^/?#]+)/)?.[1] || '
+            f'document.querySelector("[data-{data_attr}]")?.dataset.{var_name} || '
+            f'document.querySelector("[name=\'{query_key}\']")?.value || '
+            f'window.__INITIAL_STATE__?.{var_name} || '
             f'{json.dumps(placeholder)}'
         )
     route_match = f'location.pathname.match(/(?:{route_prefix})\\/([^/?#]+)/)?.[1]'

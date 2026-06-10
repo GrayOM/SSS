@@ -1986,6 +1986,57 @@ function requestIamportPay(){
         self.assertIn("Content-Type': 'application/x-www-form-urlencoded'", code)
         self.assertFalse(any(ord(c) > 127 for c in code), 'Replay PoC must be ASCII-only')
 
+    def test_runtime_aware_account_recovery_aliases_avoid_test_value(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc(
+            'POST',
+            '/verify-code',
+            fields=['buyer_email', 'phoneNo', 'mobileNo', 'telNo', 'authNo', 'certNo', 'verification_code'],
+            payload_style='urlencoded',
+        )
+        self.assertIsNotNone(code)
+        self.assertIn('const email =', code)
+        self.assertIn('const phone =', code)
+        self.assertIn('const code =', code)
+        self.assertIn('body.set("buyer_email", email);', code)
+        self.assertIn('body.set("phoneNo", phone);', code)
+        self.assertIn('body.set("authNo", code);', code)
+        self.assertNotIn('TEST_VALUE', code)
+
+    def test_runtime_aware_tenant_org_workspace_project_team_ids(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc(
+            'POST',
+            '/{tenantId}/org/{orgId}/workspace/{workspaceId}/project/{projectId}/team/{teamId}/orders',
+            fields=['tenantId', 'orgId', 'workspaceId', 'projectId', 'teamId', 'amount'],
+        )
+        self.assertIsNotNone(code)
+        for var_name in ('tenantId', 'orgId', 'workspaceId', 'projectId', 'teamId'):
+            self.assertIn(f'const {var_name} =', code)
+            self.assertIn(f'"{var_name}": {var_name}', code)
+        self.assertIn('REPLACE_WITH_TENANT_ID', code)
+        self.assertIn('REPLACE_WITH_ORG_ID', code)
+        self.assertNotIn('TEST_ID', code)
+        self.assertNotIn('TEST_VALUE', code)
+
+    def test_runtime_aware_formdata_file_fields_are_guarded(self):
+        from app.services.poc_templates import build_request_replay_poc
+        code = build_request_replay_poc(
+            'POST',
+            '/api/payments/evidence',
+            fields=['paymentId', 'receipt', 'attachment', 'amount'],
+            payload_style='formdata',
+        )
+        self.assertIsNotNone(code)
+        self.assertIn('const receipt = document.querySelector("[name=\'receipt\']")?.files?.[0]', code)
+        self.assertIn('const attachment = document.querySelector("[name=\'attachment\']")?.files?.[0]', code)
+        self.assertIn('fd.append("receipt", receipt);', code)
+        self.assertIn('fd.append("attachment", attachment);', code)
+        self.assertIn('REPLACE_WITH_RECEIPT', code)
+        self.assertIn('REPLACE_WITH_ATTACHMENT', code)
+        self.assertIn('Fill required runtime values before sending', code)
+        self.assertNotIn('TEST_VALUE', code)
+
     def test_storage_auth_playbook_has_meaningful_client_storage_target(self):
         files = [f('src/AuthBranch.js', "const user = JSON.parse(sessionStorage.getItem('user') || '{}'); if (user.role === 'admin') { navigate('/admin'); }")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())

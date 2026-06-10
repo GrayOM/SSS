@@ -85,6 +85,7 @@ Use `python3` in this environment:
 python3 scripts/verify_goal.py
 python3 scripts/verify_realistic_output.py
 python3 scripts/verify_generalization.py
+python3 scripts/verify_browser_runtime_pocs.py
 python3 -m pytest tests/ -v
 ```
 
@@ -93,6 +94,15 @@ If `python` is unavailable, do not treat that as a blocker; use `python3`.
 `scripts/verify_realistic_output.py` is the output-shape acceptance check. It builds realistic in-memory frontend fixtures for auction bidding, wallet charge, order payment, Stripe checkout, Iamport prepare/verify, account recovery, login, session/search noise, route params, and destructive endpoints. It validates the final `ReadableAnalysisResult`, not just isolated helper functions.
 
 The realistic verifier must stay green before changing promotion, review-candidate, helper, route-param, or action-inference behavior.
+
+`scripts/verify_browser_runtime_pocs.py` is the runtime-aware PoC shape check.
+It runs representative fixtures through the real SSS analysis pipeline and
+validates generated promoted `console_code` for runtime resolvers, fallback
+guards before mutation fetches, payload-style preservation, GET credentials,
+source-specific DOM/storage PoCs, and destructive endpoint suppression. In the
+current local environment there is no Node.js or Playwright binary, so the
+script reports that limitation and uses deterministic structural simulation
+instead of true browser execution.
 
 ## Generalization Corpus
 
@@ -150,5 +160,13 @@ Do not break:
 - Payload style detection is heuristic for heavily abstracted wrappers; unknown
   payloads with insufficient fields should stay manual rather than being forced
   into JSON.
+- URLSearchParams payload extraction supports both `.append(...)` and
+  `.set(...)`; do not regress this, because otherwise promoted form-encoded
+  verification/code PoCs can silently lose email/code fields.
+- Runtime resolver aliases cover common account/payment/workspace fields such
+  as `buyer_email`, `phoneNo`, `mobileNo`, `telNo`, `authNo`, `certNo`,
+  `tenantId`, `orgId`, `workspaceId`, `projectId`, and `teamId`. File-like
+  FormData fields (`file`, `image`, `attachment`, `receipt`, `upload`) should
+  resolve from file inputs and stop before fetch if still unresolved.
 - Function-only `do*` wrappers without real UI events are deliberately
   conservative review candidates.

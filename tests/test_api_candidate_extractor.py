@@ -129,6 +129,20 @@ axios.post("/api/pay", fd);
         cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'axios.post'][0]
         self.assertIn('amount', cand.parameters)
 
+    def test_urlsearchparams_set_parameters_attached_to_post(self):
+        content = """
+function verifyCode() {
+  const body = new URLSearchParams();
+  body.set("email", email);
+  body.set("code", code);
+  fetch("/verify-code", { method: "POST", body });
+}
+"""
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'fetch'][0]
+        self.assertEqual(cand.payload_style, 'urlencoded')
+        self.assertIn('email', cand.parameters)
+        self.assertIn('code', cand.parameters)
+
     def test_request_post_not_overwritten_by_object_style(self):
         content = "request.post('/api/order/pay', { amount, orderId })"
         cand = extract_api_call_candidates([fc(content)]).candidates[0]

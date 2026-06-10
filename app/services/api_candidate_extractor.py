@@ -141,6 +141,10 @@ def _extract_parameters(snippet: str, method: str) -> tuple[list[str], list[str]
     for m in re.finditer(r'URLSearchParams\(\s*\{([^}]*)\}', snippet):
         for km in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*:', m.group(1)):
             params.add(km.group(1))
+    url_param_vars = set(re.findall(r'(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+URLSearchParams\b', snippet))
+    for up in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.(?:append|set)\(\s*["\']([^"\']+)', snippet):
+        if up.group(1) in url_param_vars:
+            params.add(up.group(2))
     allowed = set(params)
     m_upper = method.upper()
     if m_upper == 'GET':
@@ -221,7 +225,7 @@ def _detect_payload_style(snip: str, method: str, lines: list[str], call_idx: in
     if used_vars & formdata_vars:
         return 'formdata'
 
-    if 'new URLSearchParams' in snip or any(re.search(rf'\b{re.escape(var)}\.append\s*\(', snip) for var in url_vars):
+    if 'new URLSearchParams' in snip or any(re.search(rf'\b{re.escape(var)}\.(?:append|set)\s*\(', snip) for var in url_vars):
         return 'urlencoded'
     if re.search(r'Content-Type[\'"]?\s*:\s*[\'"]application/x-www-form-urlencoded', blob, re.IGNORECASE):
         return 'urlencoded'
@@ -345,11 +349,15 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         near = '\n'.join(lines[near_start:i + 1])
                         for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
                             params.append(mfd.group(1))
+                        url_param_vars = set(re.findall(r'(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+URLSearchParams\b', near))
+                        for up in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.(?:append|set)\(\s*["\']([^"\']+)', near):
+                            if up.group(1) in url_param_vars:
+                                params.append(up.group(2))
                     if method == 'GET':
                         near_start = max(0, i - 10)
                         near = '\n'.join(lines[near_start:i + 1])
                         url_param_vars = set(re.findall(r'(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+URLSearchParams\b', near))
-                        for up in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
+                        for up in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.(?:append|set)\(\s*["\']([^"\']+)', near):
                             if up.group(1) in url_param_vars:
                                 params.append(up.group(2))
                     params = sorted({p for p in params if p.lower() not in {'expr', 'sessiondata'} and p.lower() not in response_vars})

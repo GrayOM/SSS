@@ -1097,3 +1097,93 @@ verify_generalization: 47 passed, 0 failed
 python3 -m pytest tests/ -v
 562 passed
 ```
+
+## Autonomous Runtime Verification Loop - 2026-06-10
+
+Goal of this loop:
+
+- Validate the latest source-aware/runtime-aware Browser Console PoC system
+  using actual promoted `console_code`, not handwritten snippets.
+- Keep `REPLACE_WITH_*` as fallback only and ensure mutation PoCs warn/return
+  before `fetch()` when required runtime values are unresolved.
+- Preserve payload style and avoid random `TEST_VALUE` replay templates where
+  runtime/page-derived values are available.
+
+Self-feedback findings:
+
+- Blocker: none.
+- High: none after verification.
+- Medium: `URLSearchParams` bodies built with `body.set(...)` were detected as
+  form-encoded but the `email`/`code` fields were not extracted into the
+  promoted PoC body. This could produce a syntactically valid but semantically
+  empty `/verify-code` PoC.
+- Low: no JavaScript engine or Playwright binary is installed in the local
+  environment, so browser/runtime verification is deterministic structural
+  simulation rather than actual browser execution.
+- Future work: add real browser execution for generated Console PoCs once
+  Playwright or another JS/browser runtime is available.
+
+Fixes implemented:
+
+- `api_candidate_extractor.py` now treats `URLSearchParams#set(...)` like
+  `append(...)` for payload key extraction and payload-style detection.
+- `poc_templates.py` runtime resolvers now cover additional real-world aliases:
+  `buyer_email`/`buyerEmail`, `phoneNo`, `mobileNo`, `telNo`, `authNo`,
+  `certNo`, `verification_code`, `tenantId`, `orgId`, `workspaceId`,
+  `projectId`, and `teamId`.
+- FormData file-like fields (`file`, `image`, `attachment`, `receipt`,
+  `upload`) now resolve from file inputs or fall back to `REPLACE_WITH_*`, which
+  is caught by the mutation fallback guard before request sending.
+- Added `scripts/verify_browser_runtime_pocs.py`, which runs the real SSS
+  pipeline over realistic/generalization fixtures and validates generated
+  promoted playbooks for runtime resolvers, fallback guards, payload style,
+  GET credentials, helper-free code, source-specific DOM/storage PoCs, and
+  destructive endpoint suppression.
+
+Representative generated PoC observations:
+
+- `/api/order/{auctionItem.orderId}/complete-payment` derives `orderId` from
+  query string, pathname, DOM attributes/inputs, and app state before
+  `REPLACE_WITH_ORDER_ID`; the fallback guard runs before confirm/fetch.
+- `/api/user/{sessionData.userId}/wallet/charge` derives `userId` from parsed
+  session/local storage, query string, DOM, and app state before fallback.
+- `/api/iamport/verify` derives `imp_uid` and `merchant_uid` from query params,
+  DOM `data-*`, named inputs, and app state; it no longer uses generic pathname
+  matching for payment identifiers.
+- URLSearchParams `/verify-code` now preserves form-encoded style and includes
+  runtime-derived `email` and `code` values.
+- DOM XSS `event.data` keeps the source-specific `window.postMessage(...)` PoC.
+- Storage/auth playbooks use meaningful client-side targets such as
+  `/client-storage/sessionStorage/user`, not `UNKNOWN`.
+
+Final verification output:
+
+```text
+python3 scripts/verify_goal.py
+verify_goal: 23 passed, 0 failed
+
+python3 scripts/verify_realistic_output.py
+verify_realistic_output: 180 passed, 0 failed
+
+python3 scripts/verify_generalization.py
+verify_generalization: 47 passed, 0 failed
+
+python3 scripts/verify_browser_runtime_pocs.py
+verify_browser_runtime_pocs: 127 passed, 0 failed
+execution_limit=No Playwright/Node engine available; structural runtime simulation used.
+
+python3 -m pytest tests/ -v
+566 passed
+```
+
+Remaining limitations:
+
+- Runtime inference remains heuristic and can select the wrong ID on ambiguous
+  pages or miss values hidden inside framework component state.
+- Real browser execution was not performed in this environment; manual browser
+  testing of promoted PoCs is still required before claiming production
+  readiness.
+- FormData file upload PoCs can identify required file fields and guard
+  unresolved placeholders, but they may still require a tester to select or
+  provide a real `File` object in the browser.
+- Frontend source still cannot prove backend authorization or validation.
