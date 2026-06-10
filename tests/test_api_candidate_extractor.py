@@ -168,6 +168,47 @@ axios.create({ baseURL: API_BASE_URL }).post("/login", { email, password });
         self.assertNotIn('expr', cand.parameters)
         self.assertIn('amount', cand.parameters)
 
+    def test_angular_httpclient_alias_and_route_param_endpoint(self):
+        content = """
+export class AddressService {
+  private readonly host = environment.host + '/api/address'
+  get(id: string) { return this.http.get(`${this.host}/${id}`) }
+  save(params: any) { return this.http.post(this.host + '/', params) }
+}
+"""
+        candidates = extract_api_call_candidates([fc(content)]).candidates
+        endpoints = [c.endpoint for c in candidates]
+        self.assertIn('/api/address/{id}', endpoints)
+        self.assertIn('/api/address', endpoints)
+        self.assertTrue(any(c.sink == 'this.http.get' and c.method == 'GET' for c in candidates))
+        self.assertTrue(any(c.sink == 'this.http.post' and c.method == 'POST' for c in candidates))
+
+    def test_html_form_action_generates_candidate_with_input_names(self):
+        content = """
+<form method="POST" action="/profile">
+  <input name="userId">
+  <input name="displayName">
+  <button type="submit">Save profile</button>
+</form>
+"""
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'html.form'][0]
+        self.assertEqual(cand.method, 'POST')
+        self.assertEqual(cand.endpoint, '/profile')
+        self.assertIn('userId', cand.parameters)
+        self.assertIn('displayName', cand.parameters)
+
+    def test_urlsearchparams_append_keys_attached_to_get(self):
+        content = """
+const params = new URLSearchParams();
+params.append('orderId', orderId);
+params.append('status', status);
+fetch('/api/orders?' + params.toString());
+"""
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.endpoint == '/api/orders?'][0]
+        self.assertEqual(cand.method, 'GET')
+        self.assertIn('orderId', cand.parameters)
+        self.assertIn('status', cand.parameters)
+
     def test_payload_variable_marked_for_manual_review(self):
         content = "request({ method: 'POST', url: endpoint, data: payload })"
         cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'request'][0]

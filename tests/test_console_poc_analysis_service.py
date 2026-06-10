@@ -910,6 +910,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(stripe.user_action_hint, 'click payment button')
         self.assertEqual(iamport.user_action_hint, 'click payment approval button')
 
+    def test_iamport_verify_is_payment_not_verify_code_action(self):
+        files = [f('src/PurchasePage.js', "function requestIamportPay(){axios.post('/api/iamport/verify',{imp_uid, merchant_uid, amount})}\n<button onClick={requestIamportPay}>Pay</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbook = [p for p in result.verification_playbooks if p.endpoint == '/api/iamport/verify'][0]
+        self.assertEqual(playbook.page_hint, 'payment/order page')
+        self.assertEqual(playbook.user_action_hint, 'click payment approval button')
+        self.assertNotIn('verify code', playbook.user_action_hint)
+
     def test_steps_do_not_repeat_screen_word(self):
         files = [f('src/PaymentPage.js', "function handlePayment(){axios.post('/api/order/1/complete-payment',{amount})}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
@@ -929,8 +937,9 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('src/nls.js', "function getRecommendSearch(){fetch('/header/recommend_search.do')}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
-        self.assertTrue(len(result.review_candidates) >= 1)
-        notes = ' '.join(result.review_candidates[0].verification_notes)
+        self.assertEqual(len(result.review_candidates), 0)
+        self.assertTrue(len(result.findings) >= 1)
+        notes = ' '.join(result.findings[0].verification_notes)
         self.assertIn('classified as auto-query/recommend API: excluded from playbook', notes)
         self.assertNotIn('classified as auto session/init request: excluded from playbook', notes)
 
@@ -999,7 +1008,9 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         files = [f('templates/nls.html', "<button id='reco'>추천검색</button><script>$('#reco').on('click', function(){ $.ajax({ url:'/header/recommend_search.do', type:'GET' }); });</script>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
-        notes = ' '.join(result.review_candidates[0].verification_notes)
+        self.assertEqual(len(result.review_candidates), 0)
+        self.assertTrue(len(result.findings) >= 1)
+        notes = ' '.join(result.findings[0].verification_notes)
         self.assertIn('auto-query/recommend API', notes)
 
     def test_mypage_get_review_candidate(self):
@@ -1310,6 +1321,18 @@ function submitOrder(event) {
             any(kw in evidence.lower() for kw in ('network tab', 'request', 'response', 'payload')),
             f'Evidence must mention Network tab or request/response. Got: {evidence!r}',
         )
+        self.assertIn('Generated PoC pasted into Browser DevTools Console', evidence)
+        self.assertIn('Console output: response status/content-type/body preview', evidence)
+        self.assertIn('Sources tab: relevant source line or breakpoint at the request call site', evidence)
+        self.assertNotIn('common_console_helper', evidence)
+
+    def test_promoted_breakpoint_plan_does_not_say_after_installing_poc(self):
+        files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        plan = result.verification_playbooks[0].breakpoint_plan
+        self.assertIsNotNone(plan)
+        self.assertNotIn('after installing PoC', plan.when_to_pause)
+        self.assertIn('triggering the vulnerable UI action', plan.when_to_pause)
 
     def test_promoted_finding_verification_playbook_uses_short_console_code(self):
         files = [f('src/Pay.jsx', "function submitOrder(){axios.post('/api/orders/123/pay',{amount})}\n<button onClick={submitOrder}>Pay now</button>")]
@@ -1779,7 +1802,12 @@ function requestIamportPay(){
                     'downgraded candidate must have the network-tab guidance note')
 
     def test_observational_not_downgraded_when_playbooks_exist(self):
-        """When playbooks ARE promoted, observational candidates must remain observational."""
+        """When direct playbooks are promoted, review candidates stay manual-only.
+
+        The common helper must not appear globally beside helper-free direct
+        playbooks, because that makes the helper look like a required first
+        step for promoted PoCs.
+        """
         files = [
             f('src/FindPassword.js',
               "function verifyCode(){ axios.post('/api/verify-code', { code }); }"),
@@ -1787,13 +1815,11 @@ function requestIamportPay(){
               "axios.post('/api/wallet/charge', { amount })"),
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
-        # If there is at least one promoted playbook, observational candidates keep their status.
-        if result.verification_playbooks:
-            obs = [rc for rc in result.review_candidates
-                   if rc.poc_generation_status == 'observational']
-            # Any remaining observational candidate must not be marked downgraded.
-            for rc in obs:
-                self.assertNotIn('downgraded', rc.poc_generation_reason or '')
+        self.assertTrue(result.verification_playbooks)
+        self.assertIsNone(result.common_console_helper)
+        for rc in result.review_candidates:
+            self.assertNotEqual(rc.poc_generation_status, 'observational')
+            self.assertIsNone(rc.observational_poc)
 
 
     # -- poc_templates unit tests --------------------------------------------------

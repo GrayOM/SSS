@@ -9,3 +9,4 @@ gpt_review_stat*.txt
 gpt_review_untracked*.txt
 ai_collect_review_result.txt
 fixtures/saz_file/
+.external_corpus/

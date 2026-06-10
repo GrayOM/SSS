@@ -170,6 +170,24 @@ def _extract_storage_usage(file: FileContent) -> list[dict[str, Any]]:
     return out
 
 
+def _extract_dom_sources(file: FileContent) -> list[dict[str, Any]]:
+    patterns = {
+        'location.hash': r'\blocation\.hash\b',
+        'location.search': r'\blocation\.search\b',
+        'document.URL': r'\bdocument\.URL\b',
+        'document.location': r'\bdocument\.location\b',
+        'event.data': r'\bevent\.data\b',
+        'input.value': r'\b(?:input|target|event\.target)\.value\b',
+        'URLSearchParams': r'\bURLSearchParams\s*\(',
+        'window.name': r'\bwindow\.name\b',
+    }
+    out: list[dict[str, Any]] = []
+    for source, pattern in patterns.items():
+        for m in re.finditer(pattern, file.content):
+            out.append({'line': _line_of(file.content, m.start()), 'source': source})
+    return sorted(out, key=lambda x: x['line'])
+
+
 def _extract_dangerous_sinks(file: FileContent) -> list[dict[str, Any]]:
     patterns = {
         'innerHTML': r'\.innerHTML\b',
@@ -270,6 +288,7 @@ def _build_normalized_manifest(
                 for a in file_api
             ],
             storage_usage=_extract_storage_usage(file),
+            dom_sources=_extract_dom_sources(file),
             dangerous_sinks=_extract_dangerous_sinks(file),
             validation_guard_hints=_extract_validation_guard_hints(file),
             linked_script_references=linked_scripts,
@@ -337,6 +356,7 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
     for f in files:
         lines = f.content.splitlines()
         route_re = re.compile(r'<Route\s+path=["\']([^"\']+)["\']\s+(?:element=\{<([A-Za-z0-9_]+)|component=\{?([A-Za-z0-9_]+))')
+        angular_route_re = re.compile(r'\bpath\s*:\s*["\']([^"\']+)["\']')
         comp_name = None
         mcomp = re.search(r'export\s+default\s+function\s+([A-Za-z_][A-Za-z0-9_]*)|function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(|const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\(', f.content)
         if mcomp:
@@ -350,6 +370,15 @@ def build_project_understanding(files: list[FileContent]) -> ProjectUnderstandin
                 comp = m.group(2) or m.group(3)
                 routes.append(ProjectRoute(path=path, component=comp, source_path=f.path, line=i))
                 pg.route_paths.append(path)
+            am = angular_route_re.search(line)
+            if am and ('Routes' in f.content or 'RouterModule' in f.content):
+                path = am.group(1)
+                if path and path != '**':
+                    route_path = path if path.startswith('/') else '/' + path
+                    component_m = re.search(r'component\s*:\s*([A-Za-z_][A-Za-z0-9_]*)', line)
+                    comp = component_m.group(1) if component_m else None
+                    routes.append(ProjectRoute(path=route_path, component=comp, source_path=f.path, line=i))
+                    pg.route_paths.append(route_path)
         pg.page_hint = _page_hint(pg.route_paths, pg.title_texts, pg.component_name, f.path, risk_by_file.get(f.path, []))
         pages.append(pg)
 

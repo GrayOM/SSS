@@ -968,6 +968,7 @@ def _find_enclosing_function_block(content: str, line_number: int) -> tuple[str 
         re.compile(r'\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\('),
         re.compile(r'\bconst\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*async\s*\([^)]*\)\s*=>\s*\{'),
         re.compile(r'\bconst\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\([^)]*\)\s*=>\s*\{'),
+        re.compile(r'^\s*(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{'),
     ]
     for s in range(idx, start - 1, -1):
         m = next((p.search(lines[s]) for p in pats if p.search(lines[s])), None)
@@ -1045,7 +1046,7 @@ def infer_interaction_context(source_path: str, function_name: str | None, snipp
     page_hint = 'target feature page'
     action_hint = 'target action'
     confidence = 'low'
-    if any(k in low_endpoint for k in ('payment', 'order', 'checkout', 'pay', 'billing')):
+    if any(k in low_endpoint for k in ('iamport', 'stripe', 'payment', 'order', 'checkout', 'pay', 'billing')):
         page_hint, reasons = 'payment/order page', reasons + ['endpoint category: payment/order']
     elif any(k in low_endpoint for k in ('auction', 'bid')):
         page_hint, reasons = 'auction/bid page', reasons + ['endpoint category: auction/bid']
@@ -1053,32 +1054,30 @@ def infer_interaction_context(source_path: str, function_name: str | None, snipp
         page_hint, reasons = 'account recovery page', reasons + ['endpoint category: recovery/verify']
     elif any(k in low_endpoint for k in ('wallet', 'point', 'charge')):
         page_hint, reasons = 'wallet/point page', reasons + ['endpoint category: wallet/point']
-    elif any(k in low_endpoint for k in ('iamport',)):
-        page_hint, reasons = 'payment/order page', reasons + ['endpoint category: iamport payment']
     elif any(k in low_endpoint for k in ('login', 'auth/token')):
         page_hint, reasons = 'login/auth page', reasons + ['endpoint category: login/auth']
-    if any(k in low_text for k in ('pay now', 'checkout', '결제하기', '결제 완료')):
+    if any(k in low_endpoint for k in ('iamport/prepare', 'iamport/verify')):
+        action_hint = 'click payment approval button'; reasons.append('endpoint indicates iamport verification')
+    elif any(k in low_text for k in ('pay now', 'checkout', '결제하기', '결제 완료')):
         action_hint = 'click payment button'; reasons.append('ui text indicates payment')
     elif any(k in low_text for k in ('입찰', 'bid')):
         action_hint = 'click bid button'; reasons.append('ui text indicates bid')
+    elif 'iamport' in low_endpoint or 'iamport' in low_fn:
+        action_hint = 'click payment approval button'; reasons.append('iamport payment function or endpoint')
     elif any(k in low_text for k in ('인증번호 발송', 'send code')):
         action_hint = 'click send code button'; reasons.append('ui text indicates send code')
     elif any(k in low_text for k in ('인증 확인', 'verify')):
         action_hint = 'click verify code button'; reasons.append('ui text indicates verify')
     elif any(k in low_text for k in ('reset password', '비밀번호 재설정')):
         action_hint = 'click reset password button'; reasons.append('ui text indicates reset')
+    elif any(k in low_endpoint for k in ('wallet/charge', '/charge')):
+        action_hint = 'click point charge button'; reasons.append('endpoint indicates charge')
     elif any(k in low_endpoint for k in ('verify-code', 'authno', 'verify')):
         action_hint = 'click verify code button'; reasons.append('endpoint indicates verify-code')
     elif any(k in low_endpoint for k in ('reset-password',)):
         action_hint = 'click reset password button'; reasons.append('endpoint indicates reset-password')
     elif any(k in low_endpoint for k in ('send-verification', 'chkmobisendajax', 'chgmobisendajax', 'sendsms', 'sms')):
         action_hint = 'click send code button'; reasons.append('endpoint indicates send-verification')
-    elif 'create-checkout-session' in low_endpoint:
-        action_hint = 'click Stripe payment button'; reasons.append('endpoint indicates stripe checkout session')
-    elif any(k in low_endpoint for k in ('iamport/prepare', 'iamport/verify')):
-        action_hint = 'click payment approval button'; reasons.append('endpoint indicates iamport verification')
-    elif any(k in low_endpoint for k in ('wallet/charge', '/charge')):
-        action_hint = 'click point charge button'; reasons.append('endpoint indicates charge')
     elif any(k in low_fn for k in ('payment', 'checkout', 'pay', 'submitorder', 'process')):
         action_hint = 'click payment button'; reasons.append('function fallback indicates payment')
     elif any(k in low_fn for k in ('bid', 'placebid')):
@@ -1296,7 +1295,7 @@ def _build_contract_fields(
             file=source_path,
             line=(api_match.start_line if api_match else start_line),
             function=function_name or None,
-            when_to_pause='pause just before the request/DOM sink after installing PoC and triggering the vulnerable UI action',
+            when_to_pause='pause just before the request/DOM sink while triggering the vulnerable UI action',
             what_variable_or_request_to_check=check,
         ),
         'poc_injection_plan': PocInjectionPlan(
@@ -1436,38 +1435,59 @@ def _evidence_to_capture(method: str, vuln_type: str = '') -> list[str]:
     cat = _category_for(vuln_type)
     if cat == 'payment_or_value_mutation':
         return [
+            'Generated PoC pasted into Browser DevTools Console',
+            'Console output: response status/content-type/body preview',
             'Network tab: original request (normal flow) showing expected amount/price',
             'Network tab or Console: manipulated request body showing altered amount/price',
             'Server response: showing reflected value, transaction record, or rejection message',
+            'Sources tab: relevant source line or breakpoint at the request call site',
         ]
     if cat == 'idor_bola':
         return [
+            'Generated PoC pasted into Browser DevTools Console',
+            'Console output: response status/content-type/body preview',
             'Network tab: request with another user/object identifier substituted',
+            'Network tab: request URL/method/payload and response status/body',
             'Server response: showing data that should not be accessible to the current session',
             'OR server rejection with 403 and ownership-validation message',
+            'Sources tab: relevant source line or breakpoint at the request call site',
         ]
     if cat == 'account_recovery':
         return [
+            'Generated PoC pasted into Browser DevTools Console',
+            'Console output: response status/content-type/body preview',
             'Network tab: recovery/verification request with manipulated code or token',
+            'Network tab: request URL/method/payload and response status/body',
             'Server response: showing acceptance or rejection of invalid/reused token',
             'Screenshot: rate-limit response or token-binding validation error',
+            'Sources tab: relevant source line or breakpoint at the request call site',
         ]
     if cat in ('role_or_state_mutation', 'authorization'):
         return [
+            'Generated PoC pasted into Browser DevTools Console',
+            'Console output: response status/content-type/body preview',
             'Network tab: request with manipulated role/status/state parameter',
+            'Network tab: request URL/method/payload and response status/body',
             'Server response: showing accepted or rejected mutation with authorization details',
             'Screenshot: UI state after bypass attempt (access granted or denied)',
+            'Sources tab: relevant source line or breakpoint at the request call site',
         ]
     if cat == 'client_side_validation':
         return [
+            'Generated PoC pasted into Browser DevTools Console',
+            'Console output: response status/content-type/body preview',
             'Network tab: request with parameter value that violates client-side validation',
+            'Network tab: request URL/method/payload and response status/body',
             'Server response: showing validation accepted or rejected server-side',
-            'Console: PoC execution log showing the manipulated request was sent',
+            'Sources tab: relevant source line or breakpoint at the request call site',
         ]
     return [
+        'Generated PoC pasted into Browser DevTools Console',
+        'Console output: response status/content-type/body preview',
         'Network tab: normal request URL/method/payload for comparison baseline',
-        'Console or Network tab: manipulated request payload and server response status',
+        'Network tab: manipulated request URL/method/payload and response status/body',
         'Server response body: showing accepted manipulation or explicit rejection message',
+        'Sources tab: relevant source line or breakpoint at the request call site',
     ]
 
 
@@ -1566,9 +1586,9 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 dom = self._mk_dom_xss(f)
                 if dom is not None:
                     findings.append(dom)
-            if any(x in c_lower for x in ('axios.', 'fetch(', 'apiclient.', 'request.', 'httpclient.', 'client.', '$.ajax', 'jquery.ajax', 'formdata')):
+            if any(x in c_lower for x in ('axios.', 'fetch(', 'apiclient.', 'request.', 'httpclient.', 'this.http.', 'http.', 'api.', 'client.', '$.ajax', 'jquery.ajax', 'formdata', '<form')):
                 for cand in extract_api_call_candidates([f]).candidates:
-                    if cand.sink.startswith(('axios', 'fetch', '$.ajax', 'apiClient', 'request', 'httpClient', 'client')):
+                    if cand.sink.startswith(('axios', 'fetch', '$.ajax', 'api', 'apiClient', 'request', 'http', 'this.http', 'httpClient', 'client', 'html.form')):
                         finding = self._mk_validation_bypass(f, candidate=cand)
                         if finding is not None:
                             findings.append(finding)
@@ -2194,15 +2214,16 @@ def _compute_common_helper(
     playbooks: list,
     review_candidates: list,
 ) -> 'str | None':
-    """Return the common_console_helper only when at least one playbook or
-    observational review candidate actually needs it (i.e. references SSS_POC).
-    Otherwise return None so the UI does not show a 226-line block."""
+    """Return common_console_helper only when a promoted playbook needs it.
+
+    Review candidates may need runtime discovery, but exposing the helper via
+    the global result field makes it look like a required first step for direct
+    promoted playbooks. Those candidates are downgraded to manual plans during
+    finalization instead.
+    """
     for pb in playbooks:
         code = pb.console_code or ''
         if 'window.SSS_POC.find(' in code or any(sig in code for sig in INTERCEPTOR_SIGS):
-            return _build_common_console_helper()
-    for rc in review_candidates:
-        if rc.poc_generation_status == 'observational':
             return _build_common_console_helper()
     return None
 
@@ -2307,7 +2328,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         fn_low = (function_name or '').lower()
         explicit_action_fn = {
             'sendverificationcode', 'verifycode', 'resetpassword',
-            'handlestripecheckout', 'requestiamportpay', 'handleiamportquick', 'handlepointcharge',
+            'handlestripecheckout', 'requestiamportprepare', 'requestiamportpay', 'handleiamportquick', 'handlepointcharge',
         }
         is_auto_fn = (
             fn_low in {
@@ -2502,7 +2523,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
             is_raw_signal = is_generic_type or is_session_get or is_compressed or ux_disabled or is_disabled_only
             f.status = 'raw_signal' if is_raw_signal else 'review_candidate'
             _mark_review_candidate(f)
-            review_candidates.append(f)
+            if not (is_raw_signal and api_match and api_match.risk_category == 'search_recommend'):
+                review_candidates.append(f)
         else:
             f.status = 'runtime_verification_candidate'
             f.poc_generation_status = 'executable'
@@ -2642,6 +2664,25 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     f.manual_poc_plan = _build_manual_poc_plan(src, fn, ep, meth)
                 _add_unique(f.verification_notes,
                             'No promoted playbook: use Network tab and breakpoints instead of Console helper')
+    else:
+        for f in review_candidates:
+            if f.poc_generation_status == 'observational':
+                f.poc_generation_status = 'manual_plan'
+                prev_reason = f.poc_generation_reason or ''
+                f.poc_generation_reason = (
+                    prev_reason.rstrip('; ') +
+                    '; downgraded: direct playbooks are promoted, common helper not shown globally'
+                ).lstrip('; ')
+                f.observational_poc = None
+                if not f.manual_poc_plan:
+                    src = f.evidence[0].source_path if f.evidence else 'UNKNOWN'
+                    flows = f.evidence[0].data_flow if f.evidence else []
+                    ep = next((x[len('endpoint: '):] for x in flows if x.startswith('endpoint: ')), 'UNKNOWN')
+                    meth = next((x[len('method: '):] for x in flows if x.startswith('method: ')), 'UNKNOWN')
+                    fn = next((x[len('function: '):] for x in flows if x.startswith('function: ')), None)
+                    f.manual_poc_plan = _build_manual_poc_plan(src, fn, ep, meth)
+                _add_unique(f.verification_notes,
+                            'Review candidate only: use Network tab and breakpoints; direct promoted playbooks do not require a Console helper')
     # Build ProjectProfile for consumers
     raw_signal_count = sum(1 for f in findings if f.status == 'raw_signal')
     rtvc_count = len(verification_playbooks)

@@ -281,6 +281,7 @@ class SourceFileManifest(BaseModel):
     event_handlers: list[dict[str, Any]] = Field(default_factory=list)
     api_calls: list[dict[str, Any]] = Field(default_factory=list)
     storage_usage: list[dict[str, Any]] = Field(default_factory=list)
+    dom_sources: list[dict[str, Any]] = Field(default_factory=list)
     dangerous_sinks: list[dict[str, Any]] = Field(default_factory=list)
     validation_guard_hints: list[dict[str, Any]] = Field(default_factory=list)
     linked_script_references: list[dict[str, Any]] = Field(default_factory=list)

@@ -40,6 +40,50 @@ def _normalize_endpoint(raw: str) -> tuple[str, list[str]]:
     return 'UNKNOWN', notes
 
 
+def _endpoint_aliases(lines: list[str]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    assign_re = re.compile(
+        r'(?:private\s+readonly\s+|readonly\s+|public\s+|private\s+|protected\s+|const\s+|let\s+|var\s+)?'
+        r'(?:this\.)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)'
+    )
+    for line in lines:
+        m = assign_re.search(line.strip().rstrip(';'))
+        if not m:
+            continue
+        name, expr = m.group(1), m.group(2)
+        quoted = [q.group(2) for q in re.finditer(r'(["\'`])(.+?)\1', expr)]
+        if not quoted:
+            continue
+        raw = ''.join(part for part in quoted if part.startswith(('/', '{')) or '/api/' in part or '/rest/' in part or '/v1/' in part)
+        if not raw:
+            continue
+        endpoint, _ = _normalize_endpoint(raw)
+        if endpoint != 'UNKNOWN':
+            aliases[name] = endpoint.rstrip('/')
+    return aliases
+
+
+def _resolve_endpoint_raw(raw: str, aliases: dict[str, str]) -> tuple[str, list[str]]:
+    value = raw
+    for name, endpoint in aliases.items():
+        value = value.replace(f'${{this.{name}}}', endpoint)
+        value = value.replace(f'${{{name}}}', endpoint)
+        value = value.replace(f'{{this.{name}}}', endpoint)
+        value = value.replace(f'{{{name}}}', endpoint)
+    return _normalize_endpoint(value)
+
+
+def _resolve_endpoint_identifier(expr: str, aliases: dict[str, str]) -> tuple[str, list[str]] | None:
+    ident = expr.strip()
+    m = re.match(r'(?:this\.)?([A-Za-z_][A-Za-z0-9_]*)\b', ident)
+    if not m:
+        return None
+    endpoint = aliases.get(m.group(1))
+    if not endpoint:
+        return None
+    return endpoint, []
+
+
 def _snippet(lines: list[str], line_idx: int, context: int = 6) -> tuple[int, int, str]:
     start = max(0, line_idx - context)
     end = min(len(lines) - 1, line_idx + context)
@@ -152,7 +196,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
     patterns = [
         (r'(axios\.create\s*\([^)]*\))\.(get|post|put|delete|patch)\(', 'axios.create.{method}'),
         (r'(axios)\.(get|post|put|delete|patch)\(', 'axios.{method}'),
-        (r'(apiClient|request|httpClient|client)\.(get|post|put|delete|patch)\(', '{sink}.{method}'),
+        (r'(this\.http|http|httpClient|api|apiClient|request|client)\.(get|post|put|delete|patch)\(', '{sink}.{method}'),
         (r'(fetch)\(', 'fetch'),
         (r'(\$\.ajax|jQuery\.ajax)\(', '$.ajax'),
         (r'(apiClient)\.request\(', 'apiClient.request'),
@@ -161,6 +205,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
 
     for file in files:
         lines = file.content.splitlines() or ['']
+        aliases = _endpoint_aliases(lines)
         for i, line in enumerate(lines):
             stripped = line.strip()
             line_has_api_candidate = False
@@ -179,20 +224,26 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                     tail = snip[m.start():]
                     epm = re.search(r'\(\s*(["\'`])(.+?)\1', tail, re.DOTALL)
                     if epm:
-                        endpoint, epnotes = _normalize_endpoint(epm.group(2))
+                        endpoint, epnotes = _resolve_endpoint_raw(epm.group(2), aliases)
                         notes.extend(epnotes)
                     elif _extract_concat_endpoint(tail):
                         endpoint, epnotes = _extract_concat_endpoint(tail)  # type: ignore
                         notes.extend(epnotes)
-                    elif 'url:' in snip:
-                        um = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip)
-                        if um:
-                            endpoint, epnotes = _normalize_endpoint(um.group(2))
+                    else:
+                        arg = re.search(r'\(\s*([^,\)\n]+)', tail, re.DOTALL)
+                        resolved = _resolve_endpoint_identifier(arg.group(1), aliases) if arg else None
+                        if resolved:
+                            endpoint, epnotes = resolved
                             notes.extend(epnotes)
+                        elif 'url:' in snip:
+                            um = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip)
+                            if um:
+                                endpoint, epnotes = _resolve_endpoint_raw(um.group(2), aliases)
+                                notes.extend(epnotes)
+                            else:
+                                notes.append('endpoint variable requires manual review')
                         else:
                             notes.append('endpoint variable requires manual review')
-                    else:
-                        notes.append('endpoint variable requires manual review')
 
                     if sink_name == 'fetch':
                         mm = re.search(r'method\s*:\s*["\']([A-Za-z]+)["\']', snip)
@@ -202,7 +253,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         method = mm.group(1).upper() if mm else 'UNKNOWN'
                         um2 = re.search(r'url\s*:\s*(["\'`])(.+?)\1', snip, re.DOTALL)
                         if um2:
-                            endpoint, epnotes2 = _normalize_endpoint(um2.group(2))
+                            endpoint, epnotes2 = _resolve_endpoint_raw(um2.group(2), aliases)
                             notes.extend(epnotes2)
                         if re.search(r'url\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\b', snip) and endpoint == 'UNKNOWN':
                             notes.append('generic ajax wrapper requires callsite tracing')
@@ -236,6 +287,13 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                         near = '\n'.join(lines[near_start:i + 1])
                         for mfd in re.finditer(r'(?:FormData|[A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
                             params.append(mfd.group(1))
+                    if method == 'GET':
+                        near_start = max(0, i - 10)
+                        near = '\n'.join(lines[near_start:i + 1])
+                        url_param_vars = set(re.findall(r'(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+URLSearchParams\b', near))
+                        for up in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.append\(\s*["\']([^"\']+)', near):
+                            if up.group(1) in url_param_vars:
+                                params.append(up.group(2))
                     params = sorted({p for p in params if p.lower() not in {'expr', 'sessiondata'} and p.lower() not in response_vars})
                     notes.extend(pnotes)
                     if method == 'UNKNOWN':
@@ -259,6 +317,32 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                 start_line, end_line, snip = _snippet(lines, i, context=0)
                 args = [a.strip() for a in fn.group(2).split(',') if a.strip()]
                 candidates.append(ApiCallCandidate(source_path=file.path, method='UNKNOWN', endpoint='UNKNOWN', parameters=args[:20], start_line=start_line, end_line=end_line, snippet=snip, sink='function_call', confidence='low', notes=['wrapper/service function call requires implementation review', 'endpoint variable requires manual review']))
+
+        for m in re.finditer(r'<form\b([^>]*)>(.*?)</form>', file.content, re.IGNORECASE | re.DOTALL):
+            attrs, body = m.group(1), m.group(2)
+            action_m = re.search(r'\baction\s*=\s*["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+            if not action_m:
+                continue
+            method_m = re.search(r'\bmethod\s*=\s*["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+            method = method_m.group(1).upper() if method_m else 'GET'
+            endpoint, epnotes = _normalize_endpoint(action_m.group(1))
+            start_line = file.content.count('\n', 0, m.start()) + 1
+            end_line = file.content.count('\n', 0, m.end()) + 1
+            params = sorted(set(re.findall(r'\bname\s*=\s*["\']([^"\']+)["\']', body, flags=re.IGNORECASE)))
+            notes = ['html form action submission', 'server-side authorization cannot be confirmed from frontend source only']
+            notes.extend(epnotes)
+            candidates.append(ApiCallCandidate(
+                source_path=file.path,
+                method=method,
+                endpoint=endpoint,
+                parameters=params[:20],
+                start_line=start_line,
+                end_line=end_line,
+                snippet=file.content.splitlines()[start_line - 1].strip() if file.content.splitlines() else '',
+                sink='html.form',
+                confidence='high' if endpoint != 'UNKNOWN' else 'low',
+                notes=sorted(set(notes)),
+            ))
 
     return CandidateExtractionResult(total_candidates=len(candidates), candidates=candidates)
 

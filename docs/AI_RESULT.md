@@ -167,6 +167,252 @@ Command used in this environment: `python(){ python3 "$@"; }; python scripts/ver
 
 ```text
 verify_goal: 23 passed, 0 failed
+
+---
+
+# Autonomous Engineering Pass - Browser Console PoC Direction
+
+## 1. Final product direction summary
+
+SSS is aligned as a practical source-code-driven Browser Console PoC generation assistant. The intended output is not a broad SAST-style finding dump. The useful path is:
+
+source code -> source intelligence -> candidate finding -> evidence normalization -> promotion gate -> short direct PoC -> browser verification evidence -> report-ready output.
+
+Promoted findings remain runtime verification candidates, not confirmed vulnerabilities. They should be concrete enough for an assessor to open the target page, paste a short Console PoC, observe status/content-type/body preview or DOM proof, compare with a normal Network-tab baseline, and capture report evidence.
+
+## 2. Architecture decisions
+
+- Source intelligence now records DOM sources separately from dangerous DOM sinks in the normalized manifest.
+- Iamport payment verification endpoints are treated as payment approval flows before generic verify-code heuristics run.
+- Promoted breakpoint guidance no longer says or implies that a helper must be installed first.
+- Direct API evidence capture now explicitly asks for generated PoC, Console output, Network request/response, and source breakpoint/source-line evidence.
+- Existing direct PoC architecture remains intact: promoted API PoCs are short helper-free `fetch` snippets with `confirm()` for POST/PUT/PATCH.
+
+## 3. What SSS is now designed to be
+
+- A frontend/source intelligence tool for security assessors.
+- A candidate normalizer that preserves concrete source path, line range, handler, endpoint, method, payload keys, DOM sources/sinks, and guard hints.
+- A promotion gate that favors fewer, evidence-backed browser-verifiable findings.
+- A direct Browser DevTools Console PoC builder, not a helper-first capture/replay workflow.
+- A report-prep aid that tells the assessor what to paste, what to observe, what to compare, and what evidence to capture.
+
+## 4. What SSS is not designed to be
+
+- A generic SAST finding lister.
+- A backend proof engine.
+- A tool that promotes weak or generic review candidates.
+- A tool that requires `window.SSS_POC.find()` for promoted findings.
+- A tool that generates promoted replay PoCs for DELETE/refund/transfer/withdraw/bulk/remove operations.
+- A tool that treats stable route params as fatal unknowns.
+
+## 5. Pipeline summary
+
+1. Source: uploaded frontend/source files are filtered to avoid vendor/build/minified noise.
+2. Intelligence: routes, pages, UI events, API calls, payload keys, storage usage, DOM sources/sinks, validation guards, and business flows are extracted.
+3. Candidate: findings are normalized with source location, handler/action, endpoint/method or DOM flow, parameters, risk category, and uncertainty notes.
+4. Promotion: only concrete, direct-PoC-capable, non-destructive, browser-verifiable findings become runtime verification candidates.
+5. PoC: promoted API findings get short direct `fetch` Console snippets; route params become `REPLACE_WITH_*` constants.
+6. Browser proof: playbooks explain proof steps, success/failure criteria, evidence to capture, breakpoint/source-line checks, and report-ready context.
+
+## 6. Files changed
+
+- `app/models/schemas.py`
+- `app/services/source_intelligence.py`
+- `app/services/console_poc_analysis_service.py`
+- `tests/test_source_intelligence.py`
+- `tests/test_console_poc_analysis_service.py`
+- `docs/HANDOFF_SSS_DIRECTION.md`
+- `docs/AI_RESULT.md`
+
+## 7. Key functions changed
+
+- `SourceFileManifest`: added `dom_sources`.
+- `source_intelligence.py::_extract_dom_sources`: added DOM source extraction for `location.hash`, `location.search`, `document.URL`, `document.location`, `event.data`, `input.value`, `URLSearchParams`, and `window.name`.
+- `source_intelligence.py::_build_normalized_manifest`: includes `dom_sources`.
+- `console_poc_analysis_service.py::infer_interaction_context`: prioritizes Iamport/Stripe/payment endpoints before generic verification heuristics.
+- `console_poc_analysis_service.py::_build_contract_fields`: removes stale helper-install wording from breakpoint pause guidance.
+- `console_poc_analysis_service.py::_evidence_to_capture`: strengthens direct Browser Console evidence requirements.
+
+## 8. Final verify_goal.py output
+
+```text
+PASS  G1a: {API_BASE_URL}/login POST promotes
+PASS  G1b: console_code contains fetch("/login"
+PASS  G1c: console_code does NOT contain window.SSS_POC.find(
+PASS  G1d: console_code contains no helper namespace
+PASS  G1e: console_code <=12 lines
+PASS  G1f: common_console_helper is not required
+PASS  G2a: /api/auction/{item.id}/bid POST promotes
+PASS  G2b: console_code contains a REPLACE constant
+PASS  G2c: console_code contains template-literal fetch path
+PASS  G2d: console_code does NOT contain window.SSS_POC.find(
+PASS  G2e: console_code is interceptor-free
+PASS  G2f: console_code <=12 lines
+PASS  G3a: common_console_helper is None when all PoCs self-contained
+PASS  G3b: all promoted PoCs are self-contained (no SSS_POC.find)
+PASS  G3c: playbook /api/orders/pay <=12 lines
+PASS  G3d: playbook /api/orders/pay interceptor-free
+PASS  G3e: ${API_BASE_URL}/admin/add-numbers promotes
+PASS  G3f: API_BASE_URL + "/generate-lotto" promotes
+PASS  G3g: axios.create({ baseURL }).post("/login") promotes
+PASS  G3h: unknown path placeholder remains manual
+PASS  G4a: {API_BASE_URL}/admin/refund POST is NOT promoted
+PASS  G4b: DELETE /api/user/1 is NOT promoted
+PASS  G4c: no promoted PoC code contains destructive action
+
+verify_goal: 23 passed, 0 failed
+```
+
+## 9. Final pytest output
+
+```text
+543 passed in 10.35s
+```
+
+## 10. Example promoted finding
+
+Example shape:
+
+- title: payment/point request parameter manipulation possible
+- source_path: `src/PurchasePage.js`
+- function_name: `requestIamportPay`
+- endpoint: `/api/iamport/verify`
+- method: `POST`
+- page_hint: payment/order page
+- user_action_hint: click payment approval button
+- why_exploitable: request payload/parameters can be observed and manipulated in the browser before dispatch; backend validation must be verified.
+- evidence_to_capture: generated PoC, Console output, Network URL/method/payload, Network response status/body, source breakpoint line, baseline comparison.
+
+## 11. Example direct Browser Console PoC
+
+```javascript
+(async () => {
+  const TEST_PAYMENT_UID = "REPLACE_WITH_TEST_PAYMENT_UID";
+  const TEST_ORDER_ID = "REPLACE_WITH_TEST_ORDER_ID";
+  if (!confirm(`[SSS PoC] Run approved POST /api/iamport/verify?`)) return;
+  const r = await fetch("/api/iamport/verify", {
+    method: "POST", credentials: "include",
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ "imp_uid": TEST_PAYMENT_UID, "merchant_uid": TEST_ORDER_ID, "amount": 1 }),
+  });
+  console.log('[SSS PoC]', r.status, r.headers.get('content-type'), (await r.text()).slice(0, 500));
+})();
+```
+
+## 12. Example review candidate
+
+Example shape:
+
+- status: review_candidate or raw_signal
+- reason: endpoint/page/action is unknown, generic, compressed, auto-session/init/search noise, or lacks direct PoC context.
+- output: no direct runnable PoC unless promoted.
+- manual plan: confirm file/function/request from source evidence, set breakpoint before request/DOM sink, trigger normal UI action, compare Network baseline and manipulated request behavior, document why promotion was blocked.
+
+## 13. Remaining limitations
+
+- Frontend source can identify browser-verifiable targets, but cannot prove backend validation or authorization by itself.
+- Dynamic endpoint builders without stable route shape still require manual review.
+- Some optional observational review candidate paths can still use the common helper, but promoted playbooks remain direct and helper-free.
+- Source parsing remains heuristic; unusual framework bindings or deeply abstracted clients may need richer AST-based extraction later.
+
+## 14. Unmet goals
+
+No blocker was hit. The requested verification loop completed with `verify_goal` passing and full pytest passing. No git commit, push, merge, or PR was performed.
+
+---
+
+# Realistic Output Validation Pass
+
+## Summary
+
+This pass added `scripts/verify_realistic_output.py` and used it to validate full `ReadableAnalysisResult` output shape against realistic frontend fixtures rather than isolated functions. The script covers:
+
+- Auction bid: `POST /api/auction/{item.id}/bid`
+- Wallet charge: `POST /api/user/{sessionData.userId}/wallet/charge`
+- Order complete payment: `POST /api/order/{auctionItem.orderId}/complete-payment`
+- Stripe checkout: `POST /api/stripe/create-checkout-session`
+- Iamport prepare/verify: `POST /api/iamport/prepare`, `POST /api/iamport/verify`
+- Account recovery: `POST /send-verification`, `POST /verify-code`
+- Login: `POST {API_BASE_URL}/login`
+- Noise: session/init/search/recommendation GETs
+- Destructive endpoints: `DELETE /api/user/1`, `POST /admin/refund`, transfer-like operations
+- Stable route params: `{item.id}`, `{userId}`, `{currentUserId}`, `{sessionData.userId}`, `{auctionItem.orderId}`, `{orderId}`, `{productId}`
+
+## Realistic Output Results
+
+```text
+realistic_output_summary:
+  promoted_count=16
+  review_candidate_count=7
+  raw_signal_count=3
+  common_helper_global=False
+  core_endpoints=['/api/auction/{item.id}/bid', '/api/iamport/prepare', '/api/iamport/verify', '/api/order/{auctionItem.orderId}/complete-payment', '/api/stripe/create-checkout-session', '/api/user/{sessionData.userId}/wallet/charge']
+  recovery_endpoints=['/login', '/send-verification', '/verify-code']
+  route_param_endpoints=['/api/auction/{item.id}/bid', '/api/order/{auctionItem.orderId}/complete-payment', '/api/order/{orderId}/complete-payment', '/api/products/{productId}/purchase', '/api/user/{sessionData.userId}/wallet/charge', '/api/users/{currentUserId}/profile', '/api/users/{userId}/role']
+  destructive_endpoints=[]
+
+verify_realistic_output: 173 passed, 0 failed
+```
+
+## Improvements From Realistic Validation
+
+- Fixed `requestIamportPrepare` being demoted as an auto/background `request*` function. Iamport prepare now promotes as a direct payment-approval playbook when source evidence is concrete.
+- Kept Iamport prepare/verify action inference as `click payment approval button`.
+- Kept Stripe checkout action inference as the assessor-friendly generic `click payment button`.
+- Suppressed search/recommend GET raw signals from the UI-facing `review_candidates` list while preserving them in `findings` as raw signals for traceability.
+- Verified that `common_console_helper` is not shown globally when promoted PoCs are direct.
+- Verified stable route params become editable `REPLACE_WITH_*` constants and do not block promotion.
+
+## Example Improved Promoted Outputs
+
+Auction bid:
+
+- endpoint: `/api/auction/{item.id}/bid`
+- method: `POST`
+- user action: `click bid button`
+- PoC shape: direct `fetch(\`/api/auction/${TEST_ID}/bid\`, ...)`
+- route param: `const TEST_ID = "REPLACE_WITH_TEST_ID";`
+
+Wallet charge:
+
+- endpoint: `/api/user/{sessionData.userId}/wallet/charge`
+- method: `POST`
+- user action: `click point charge button`
+- route param: `const USER_ID = "REPLACE_WITH_USER_ID";`
+- helper-free direct PoC with `confirm()` guard
+
+Iamport verify:
+
+- endpoint: `/api/iamport/verify`
+- method: `POST`
+- user action: `click payment approval button`
+- no verify-code/account-recovery mislabeling
+- helper-free direct PoC with status/content-type/body preview output
+
+## Example Review Candidate Behavior
+
+Destructive endpoints such as `DELETE /api/user/1`, `/admin/refund`, and transfer-like requests are not promoted. They remain manual review candidates with no replay `fetch` code.
+
+Search/recommend/session/init GETs do not become promoted playbooks. Recommendation/search noise is retained as raw signal findings where useful, but no longer floods the review-candidate list.
+
+## Final Verification
+
+```text
+python3 scripts/verify_goal.py
+verify_goal: 23 passed, 0 failed
+
+python3 scripts/verify_realistic_output.py
+verify_realistic_output: 173 passed, 0 failed
+
+python3 -m pytest tests/ -v
+543 passed in 6.02s
+```
+
+## Remaining Limitations
+
+- The product still relies on heuristic source parsing. Deeply abstracted API clients or unusual framework event binding may require AST-level extraction.
+- Frontend evidence still cannot confirm backend authorization or validation; promoted findings are runtime verification candidates.
+- Optional helper-based runtime discovery still exists for some review paths, but the realistic verifier now prevents helper-first behavior from leaking into promoted direct playbooks.
 ```
 
 Key checks passed:
@@ -503,3 +749,165 @@ None. All 23 verify_goal.py goals pass and all 396 pytest tests pass after addin
 the regression tests and extending normalize_endpoint for unknown base-URL prefixes.
 
 === END SSS ARCHITECTURE ITERATION -- 2026-06-05 ===
+
+## Final Acceptance Validation - Real Sample ZIP Pass
+
+I ran the available real uploaded/sample ZIP fixtures through the actual SSS
+pipeline:
+
+`extract_zip -> scan_extracted_directory -> load_file_contents -> analyze_console_exploitability`
+
+This is not stub-only validation. The synthetic realistic verifier also calls
+the real `analyze_console_exploitability` service and validates final
+`ReadableAnalysisResult` objects.
+
+Real sample results were anonymized as Project 1 through Project 6:
+
+| Project | Scanned files | Analyzed files | Promoted | Review candidates | Raw signals | Global helper |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Project 1 | 12 | 3 | 0 | 1 | 1 | false |
+| Project 2 | 18 | 15 | 6 | 48 | 38 | false |
+| Project 3 | 2 | 0 | 0 | 0 | 0 | false |
+| Project 4 | 36 | 24 | 0 | 7 | 3 | false |
+| Project 5 | 20 | 18 | 7 | 23 | 17 | false |
+| Project 6 | 13 | 6 | 0 | 0 | 1 | false |
+
+Real sample shape checks:
+
+- No promoted `console_code` contained `window.SSS_POC`,
+  `window.SSS_REVIEW_POC`, or `common_console_helper`.
+- No promoted proof text mentioned `common_console_helper`,
+  `window.SSS_POC.list`, or `armMutation`.
+- Destructive endpoints stayed unpromoted in all real samples.
+- The real sample containing route parameters promoted
+  `{auctionItem.orderId}` and `{sessionData.userId}` with
+  `REPLACE_WITH_*` constants.
+- A real-sample issue was found and fixed: direct promoted playbooks could still
+  show a global helper when review candidates were observational. Review
+  candidates are now downgraded to manual plans in that case, so promoted direct
+  playbooks stay helper-free.
+
+Final command results:
+
+```text
+python3 scripts/verify_goal.py
+verify_goal: 23 passed, 0 failed
+
+python3 scripts/verify_realistic_output.py
+verify_realistic_output: 173 passed, 0 failed
+
+python3 -m pytest tests/ -v
+543 passed
+```
+
+Remaining limitations:
+
+- Some real projects still produce many review candidates when source evidence is
+  concrete but insufficient for direct promotion. They are manual candidates, not
+  confirmed vulnerabilities.
+- Projects with only compressed or filtered artifacts can produce zero promoted
+  playbooks because there is not enough source evidence.
+- Browser verification is still required before report use because frontend
+  source alone cannot prove backend validation behavior.
+
+Status: ready for manual browser testing of promoted Browser Console PoCs.
+
+## Generalization Corpus Engineering Pass
+
+This pass improved SSS generalization through public-source pattern inspection,
+derived fixtures, extractor updates, and a new full-output verifier. This did
+not train an AI model and did not vendor third-party source into SSS.
+
+Public source/network status:
+
+- Network access was available after scoped approval for public Git operations.
+- Shallow public clones were placed under ignored `.external_corpus/`.
+- Sources inspected:
+  - OWASP Juice Shop public source: Angular frontend, HttpClient services,
+    route definitions, storage usage, DOM sinks, FormData upload patterns.
+  - OWASP NodeGoat public source: server-rendered HTML forms, route/action
+    patterns, jQuery event patterns, intentionally vulnerable training views.
+- `docs/generalization_corpus.md` and `docs/generalization_corpus.json` contain
+  derived metadata only.
+
+Patterns extracted:
+
+- Angular `HttpClient` calls such as `this.http.post(...)`.
+- Class/property endpoint aliases such as `host = environment.host + '/api/x'`.
+- Angular route definitions such as `path: 'payment/:entity'`.
+- Server-rendered `<form method="POST" action="/path">` submissions.
+- Named wrapper clients such as `api.patch(...)`.
+- URLSearchParams append keys for GET requests.
+- FormData append keys for mutation requests.
+- DOM source/sink patterns, storage/auth branches, session/search/init noise,
+  and destructive action endpoints.
+
+Extractor/source-intelligence improvements:
+
+- `api_candidate_extractor.py`
+  - Added Angular/alias-aware endpoint resolution.
+  - Added `this.http`, `http`, and `api` wrapper sink support.
+  - Added HTML form action extraction with input-name payload keys.
+  - Fixed GET parameter collection so FormData append keys do not leak into GET
+    candidates; URLSearchParams append keys are kept.
+- `source_intelligence.py`
+  - Added Angular route-array extraction for `path: '...'` patterns.
+- `console_poc_analysis_service.py`
+  - Added class-method context detection.
+  - Allowed new sink families (`this.http`, `http`, `api`, `html.form`) through
+    the mock/offline candidate-to-finding path.
+
+New tooling:
+
+- `scripts/build_generalization_corpus.py`
+  - Scans ignored external clones and emits derived metadata only.
+- `scripts/verify_generalization.py`
+  - Runs derived fixtures through the real `analyze_console_exploitability`
+    pipeline and validates final output shape.
+
+Derived fixture coverage:
+
+- Angular HttpClient payment mutation with alias-derived endpoint and route param.
+- HTML form action submission.
+- React wrapper client role update.
+- FormData mutation.
+- URLSearchParams search plus session/init noise.
+- postMessage/location DOM XSS patterns.
+- sessionStorage role-gated admin navigation.
+- destructive refund/delete actions.
+
+Final verification output:
+
+```text
+python3 scripts/verify_goal.py
+verify_goal: 23 passed, 0 failed
+
+python3 scripts/verify_realistic_output.py
+verify_realistic_output: 173 passed, 0 failed
+
+python3 scripts/verify_generalization.py
+verify_generalization: 47 passed, 0 failed
+
+python3 -m pytest tests/ -v
+547 passed
+```
+
+Remaining limitations:
+
+- Full inter-file call graph from UI component methods to injected service
+  methods remains heuristic.
+- Complex Angular observable chains and generated API clients need richer
+  parsing.
+- Server-rendered forms are extracted, but promotion remains conservative when
+  handler/page context is insufficient.
+- Storage/auth branch playbooks can be browser-verifiable without a concrete API
+  endpoint; the current playbook endpoint may show `UNKNOWN` for those cases.
+- Dynamic endpoint builders with non-literal fragments still require manual
+  Network-tab validation.
+
+Next recommended corpus expansion:
+
+- Add small public React/Next/Vue e-commerce examples with permissive licenses.
+- Add generated OpenAPI/Swagger client patterns.
+- Add more multipart upload and CSRF/header-dependent examples.
+- Add inter-file component-to-service call graph fixtures.

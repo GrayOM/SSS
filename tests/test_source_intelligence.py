@@ -61,6 +61,29 @@ class SourceIntelligenceTests(unittest.TestCase):
         self.assertIn(inv.risk_category, {'identity_verification', 'account_recovery'})
         self.assertIn(inv.interaction_confidence, {'medium', 'high'})
 
+    def test_angular_routes_and_httpclient_service_patterns(self):
+        files = [
+            f('src/app.routing.ts', """
+import { RouterModule, type Routes } from '@angular/router'
+const routes: Routes = [
+  { path: 'payment/:entity', component: PaymentComponent },
+  { path: 'order-completion/:id', component: OrderCompletionComponent }
+]
+export const Routing = RouterModule.forRoot(routes)
+"""),
+            f('src/payment.service.ts', """
+export class PaymentService {
+  private readonly host = environment.host + '/api/payment'
+  save(params: any) { return this.http.post(this.host + '/', params) }
+}
+"""),
+        ]
+        result = build_project_understanding(files)
+        self.assertTrue(any(route.path == '/payment/:entity' for route in result.routes))
+        self.assertTrue(any(route.path == '/order-completion/:id' for route in result.routes))
+        self.assertTrue(any(item.endpoint == '/api/payment' and item.method == 'POST' for item in result.api_inventory))
+        self.assertTrue(any(flow.flow_type == 'payment' for flow in result.business_flows))
+
     def test_normalized_manifest_captures_html_js_security_facts(self):
         files = [f(
             'templates/pay.html',
@@ -87,6 +110,8 @@ eval(window.name);
         self.assertTrue(any(button['text'] == 'Pay now' for button in manifest.buttons))
         self.assertTrue(any(call['endpoint'] == '/api/orders/123/pay' and call['method'] == 'POST' for call in manifest.api_calls))
         self.assertTrue(any(item['storage'] == 'localStorage' and item['key'] == 'token' for item in manifest.storage_usage))
+        self.assertTrue(any(item['source'] == 'location.hash' for item in manifest.dom_sources))
+        self.assertTrue(any(item['source'] == 'window.name' for item in manifest.dom_sources))
         self.assertTrue(any(item['sink'] == 'innerHTML' for item in manifest.dangerous_sinks))
         self.assertTrue(any(item['sink'] == 'eval' for item in manifest.dangerous_sinks))
         self.assertTrue(any(item['src'] == '/static/pay.js' for item in manifest.linked_script_references))
