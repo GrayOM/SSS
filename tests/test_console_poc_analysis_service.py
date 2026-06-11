@@ -217,6 +217,70 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertFalse(any(x.vulnerability_type in {'Client-side Validation Bypass', 'Payment/Point Manipulation Candidate'} for x in result.findings))
 
+    def test_legacy_do_form_oep_promotes_guarded_urlencoded_console_poc(self):
+        files = [f('contract/emgncLoginForm.do', """
+<form method="POST" action="/oep">
+  <input type="hidden" name="resourceName" value="">
+  <input type="hidden" name="PROSSESS_GUBUN" value="">
+  <input type="hidden" name="P_PRCURE_OVSEA_AREA_CD" value="">
+  <button type="submit">Submit</button>
+</form>
+""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = next((p for p in result.verification_playbooks if p.endpoint == '/oep' and p.method == 'POST'), None)
+        self.assertIsNotNone(pb, f'playbooks={[(p.endpoint, p.method) for p in result.verification_playbooks]}')
+        code = pb.console_code or ''
+        self.assertIn('Legacy Form Replay', pb.risk_type)
+        self.assertIn('const body = new URLSearchParams();', code)
+        self.assertIn('credentials: "include"', code)
+        self.assertIn('"Content-Type": "application/x-www-form-urlencoded"', code)
+        self.assertIn('confirm(', code)
+        self.assertIn('resourceName', code)
+        self.assertIn('PROSSESS_GUBUN', code)
+        self.assertIn('P_PRCURE_OVSEA_AREA_CD', code)
+        self.assertLess(code.index('startsWith("REPLACE_WITH_")'), code.index('confirm('))
+        self.assertLess(code.index('confirm('), code.index('fetch('))
+        self.assertNotIn('window.SSS_POC', code)
+        self.assertNotIn('common_console_helper', code)
+
+    def test_legacy_do_form_iep_with_two_params_promotes(self):
+        files = [f('contract/emgncLoginForm.do', """
+<form method="POST" action="/iep">
+  <input type="hidden" name="P_TODAY" value="">
+  <input type="hidden" name="P_YEAR_MONTH" value="">
+</form>
+""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = next((p for p in result.verification_playbooks if p.endpoint == '/iep' and p.method == 'POST'), None)
+        self.assertIsNotNone(pb)
+        self.assertIn('P_TODAY', pb.console_code or '')
+        self.assertIn('P_YEAR_MONTH', pb.console_code or '')
+
+    def test_unknown_ajax_endpoint_stays_unpromoted(self):
+        files = [f('contract/manage.js', "$.ajax({ url: endpoint, type: 'POST', data: { resourceName: resourceName, PROSSESS_GUBUN: gubun } })")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(result.verification_playbooks)
+        self.assertFalse(any(p.console_code for p in result.verification_playbooks))
+
+    def test_legacy_form_requires_two_concrete_params(self):
+        files = [f('contract/emgncLoginForm.do', """
+<form method="POST" action="/oep">
+  <input type="hidden" name="resourceName" value="">
+</form>
+""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/oep' for p in result.verification_playbooks))
+
+    def test_legacy_form_destructive_action_not_promoted(self):
+        files = [f('contract/emgncLoginForm.do', """
+<form method="POST" action="/refund">
+  <input type="hidden" name="resourceName" value="">
+  <input type="hidden" name="PROSSESS_GUBUN" value="">
+</form>
+""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/refund' for p in result.verification_playbooks))
+
     def test_extract_endpoint_supports_template_literal(self):
         ep = _extract_endpoint("axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, payload)")
         self.assertEqual(ep, '/api/user/{sessionData.userId}/wallet/charge')

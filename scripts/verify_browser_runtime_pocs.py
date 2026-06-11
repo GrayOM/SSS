@@ -182,7 +182,7 @@ def validate_case(case: Case) -> None:
         check(f"{case.label}: GET credentials include", '{ credentials: "include" }' in code, code)
     if case.method in {"POST", "PUT", "PATCH", "GET"}:
         check(f"{case.label}: direct fetch present", "fetch(" in code, code)
-        check(f"{case.label}: response preview logging", "r.headers.get('content-type')" in code and ".slice(0, 500)" in code, code)
+        check(f"{case.label}: response preview logging", ("r.headers.get('content-type')" in code or 'r.headers.get("content-type")' in code) and ".slice(0, 500)" in code, code)
     sources = runtime_resolver_sources(code)
     for source in case.expected_sources:
         check(f"{case.label}: uses runtime source {source}", source in sources, f"sources={sources}\n{code}")
@@ -247,6 +247,9 @@ def _fixture_html(include_runtime_values: bool = True) -> str:
     <input name="email" type="email" value="assessor-dom@example.test">
     <input name="code" value="111222">
     <input name="verifyCode" value="333444">
+    <input name="resourceName" value="RESOURCE-DOM">
+    <input name="PROSSESS_GUBUN" value="PROCESS-DOM">
+    <input name="P_PRCURE_OVSEA_AREA_CD" value="AREA-DOM">
   </form>
   <div id="target"
        data-order-id="ORDER-DATA"
@@ -546,6 +549,18 @@ document.querySelector('#verify').addEventListener('click', verifyCode);
 """,
         )
     ], analyzer=analyzer)
+    legacy_form = analyze_console_exploitability([
+        fc(
+            "contract/emgncLoginForm.do",
+            """
+<form method="POST" action="/oep">
+  <input type="hidden" name="resourceName" value="">
+  <input type="hidden" name="PROSSESS_GUBUN" value="">
+  <input type="hidden" name="P_PRCURE_OVSEA_AREA_CD" value="">
+</form>
+""",
+        )
+    ], analyzer=analyzer)
     dom_event = analyze_console_exploitability([
         fc("src/MessagePreview.js", "window.addEventListener('message', event => { document.body.innerHTML = event.data; });")
     ], analyzer=analyzer)
@@ -576,6 +591,13 @@ document.querySelector('#verify').addEventListener('click', verifyCode);
     check("URLSearchParams verify-code: promoted playbook present", url_pb is not None, f"endpoints={[p.endpoint for p in urlencoded.verification_playbooks]}")
     if url_pb:
         cases.append(Case("URLSearchParams verify-code", url_pb.endpoint or "/verify-code", url_pb.method or "POST", url_pb.console_code or "", ("location.search", "DOM selector", "storage", "app state"), "urlencoded", "/verify-code", ("email", "code")))
+
+    legacy_pb = exact_playbook(legacy_form, "/oep", "POST")
+    check("legacy form /oep: promoted playbook present", legacy_pb is not None, f"endpoints={[p.endpoint for p in legacy_form.verification_playbooks]}")
+    if legacy_pb:
+        legacy_code = legacy_pb.console_code or ""
+        check("legacy form /oep: Browser-verifiable candidate note", "Legacy Form Replay" in (legacy_pb.risk_type or "") or "not a confirmed vulnerability" in legacy_code, legacy_pb.risk_type or legacy_code)
+        cases.append(Case("legacy form /oep", legacy_pb.endpoint or "/oep", legacy_pb.method or "POST", legacy_code, ("DOM selector",), "urlencoded", "/oep", ("resourceName", "PROSSESS_GUBUN", "P_PRCURE_OVSEA_AREA_CD")))
 
     dom_pb = next((p for p in dom_event.verification_playbooks if p.method == "DOM"), None)
     dom_code: str | None = None

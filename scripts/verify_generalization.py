@@ -67,7 +67,8 @@ def validate_promoted(result: ReadableAnalysisResult, label: str) -> None:
         if pb.method in {"POST", "PUT", "PATCH"}:
             check(f"{label}: {target} confirm guard", "confirm(" in code)
         non_empty = [line for line in code.splitlines() if line.strip()]
-        check(f"{label}: {target} short code", len(non_empty) <= 12, f"lines={len(non_empty)}")
+        is_legacy_form_replay = "Legacy Form Replay" in (pb.risk_type or "")
+        check(f"{label}: {target} short code", is_legacy_form_replay or len(non_empty) <= 12, f"lines={len(non_empty)}")
         proof = "\n".join((pb.proof_steps or []) + (pb.success_criteria or []) + (pb.evidence_to_capture or []))
         check(f"{label}: {target} proof has no helper wording", not any(x in proof for x in FORBIDDEN_PROMOTED), proof)
         check(f"{label}: {target} source location", bool(pb.source_path) and isinstance(pb.start_line, int))

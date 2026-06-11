@@ -237,6 +237,111 @@ def build_request_replay_poc(
     return '\n'.join(lines)
 
 
+def build_legacy_form_replay_poc(
+    method: str,
+    endpoint: str,
+    fields: 'list[str] | None' = None,
+) -> 'str | None':
+    """Guarded Browser Console replay for concrete legacy HTML/JSP forms.
+
+    This intentionally does not share the compact API replay template. Legacy
+    form findings often lack a click handler, so the generated code must show
+    exactly which page values it will reuse and block before confirm/fetch when
+    required values still need tester input.
+    """
+    if not _is_safe_endpoint(endpoint):
+        return None
+    m = method.upper()
+    if m not in {'GET', 'POST'}:
+        return None
+    norm = normalize_endpoint(endpoint)
+    safe_fields = []
+    for name in fields or []:
+        if _safe_body_key(name) and name not in safe_fields:
+            safe_fields.append(name)
+    if len(safe_fields) < 2:
+        return None
+
+    declarations: list[str] = []
+    required_parts: list[str] = []
+    set_lines: list[str] = []
+    used_vars: set[str] = set()
+    for name in safe_fields[:8]:
+        var_name = _legacy_form_var_name(name)
+        base = var_name
+        suffix = 2
+        while var_name in used_vars:
+            var_name = f'{base}{suffix}'
+            suffix += 1
+        used_vars.add(var_name)
+        selector_name = json.dumps(f'[name="{name}"]')
+        selector_id = json.dumps(f'#{name}')
+        placeholder = json.dumps(f'REPLACE_WITH_{_placeholder_label(name)}')
+        declarations.append(
+            f'  const {var_name} = document.querySelector({selector_name})?.value || '
+            f'document.querySelector({selector_id})?.value || {placeholder};'
+        )
+        required_parts.append(f'{var_name}: {var_name}')
+        set_lines.append(f'  body.set({json.dumps(name)}, {var_name});')
+
+    lines = ['(async () => {', f'  const endpoint = {json.dumps(norm)};', '  const body = new URLSearchParams();']
+    lines.extend(declarations)
+    lines.append(f'  const required = {{ {", ".join(required_parts)} }};')
+    lines.extend([
+        '  if (Object.values(required).some(v => String(v).startsWith("REPLACE_WITH_"))) {',
+        '    console.warn("Fill required runtime values before sending:", required);',
+        '    return;',
+        '  }',
+    ])
+    lines.extend(set_lines)
+    if m == 'GET':
+        lines.extend([
+            '  const url = `${endpoint}?${body.toString()}`;',
+            '  const r = await fetch(url, { credentials: "include" });',
+            '  const text = await r.text();',
+            '  console.log("status:", r.status);',
+            '  console.log("content-type:", r.headers.get("content-type"));',
+            '  console.log(text.slice(0, 500));',
+            '})();',
+        ])
+        return '\n'.join(lines)
+
+    lines.extend([
+        f'  if (!confirm("Send POST form replay to {norm}?")) return;',
+        '  const r = await fetch(endpoint, {',
+        '    method: "POST",',
+        '    credentials: "include",',
+        '    headers: { "Content-Type": "application/x-www-form-urlencoded" },',
+        '    body: body.toString()',
+        '  });',
+        '  const text = await r.text();',
+        '  console.log("status:", r.status);',
+        '  console.log("content-type:", r.headers.get("content-type"));',
+        '  console.log(text.slice(0, 500));',
+        '})();',
+    ])
+    return '\n'.join(lines)
+
+
+def _legacy_form_var_name(name: str) -> str:
+    parts = [p for p in re.split(r'[^A-Za-z0-9]+', name) if p]
+    if not parts:
+        return 'value'
+    first = parts[0].lower()
+    rest = ''.join(p[:1].upper() + p[1:].lower() for p in parts[1:])
+    out = first + rest
+    if not re.match(r'^[A-Za-z_$]', out):
+        out = f'value{out}'
+    return out
+
+
+def _placeholder_label(name: str) -> str:
+    s1 = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', name)
+    s2 = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s1)
+    label = re.sub(r'[^A-Za-z0-9]+', '_', s2).strip('_').upper()
+    return label or 'PARAM'
+
+
 def _declare_runtime_value(name: str, decls: list[str], used: set[str]) -> str:
     var_name = _runtime_var_name(name) or 'testValue'
     if var_name not in used:

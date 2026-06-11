@@ -10,7 +10,7 @@ from app.services.api_candidate_extractor import extract_api_call_candidates, ex
 from app.services.json_utils import extract_json_payload
 from app.services.poc_templates import (
     MAX_POC_LINES, INTERCEPTOR_SIGS,
-    build_dom_xss_poc, build_storage_auth_poc, build_request_replay_poc, is_interceptor_free,
+    build_dom_xss_poc, build_storage_auth_poc, build_request_replay_poc, build_legacy_form_replay_poc, is_interceptor_free,
     normalize_endpoint,
 )
 from app.services.prompt_builder import build_candidate_analysis_prompt, build_console_poc_analysis_prompt
@@ -1668,6 +1668,27 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         hay = f"{endpoint.lower()} {' '.join(p.lower() for p in parameters)}"
         return any(k in hay for k in ('delete', 'remove', 'withdraw', 'transfer', 'refund', 'bulk', 'cancel-all', 'admin/delete'))
 
+    def _is_legacy_form_replay_candidate(self, candidate: ApiCallCandidate, parameters: list[str]) -> bool:
+        method = (candidate.method or 'UNKNOWN').upper()
+        endpoint = candidate.endpoint or 'UNKNOWN'
+        if method not in {'POST', 'GET'} or endpoint == 'UNKNOWN':
+            return False
+        norm_ep = normalize_endpoint(endpoint)
+        if not norm_ep or norm_ep == 'UNKNOWN' or not norm_ep.startswith('/'):
+            return False
+        if self._is_irreversible_or_high_risk(method, norm_ep, parameters):
+            return False
+        evidence_text = f"{candidate.sink} {candidate.snippet} {' '.join(candidate.notes or [])}".lower()
+        has_form_evidence = candidate.sink == 'html.form' or 'form action' in evidence_text or '<form' in evidence_text
+        if not has_form_evidence:
+            return False
+        concrete_params = [
+            p for p in parameters
+            if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,60}', p or '')
+            and p.lower() not in {'method', 'url', 'headers', 'credentials', 'withcredentials', 'body', 'data', 'payload', 'options', 'config'}
+        ]
+        return len(set(concrete_params)) >= 2
+
     def _ev(self, f: FileContent, reason: str) -> list[ReadableEvidence]:
         if 'auth' in reason.lower():
             start_line, end_line, snippet = _extract_auth_branch_snippet(f.content)
@@ -1942,6 +1963,8 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         if endpoint == 'UNKNOWN':
             notes.append('endpoint variable requires manual review')
 
+        is_legacy_form_candidate = self._is_legacy_form_replay_candidate(candidate, parameters)
+
         important_get = (
             any(k in endpoint.lower() for k in ('session', 'auth', 'me', 'profile', 'wallet', 'order'))
             or any(p.lower() in {'userid', 'memberid', 'accountid', 'orderid', 'paymentid'} for p in parameters)
@@ -1949,7 +1972,7 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         )
 
         # Unimportant GETs are always skipped, regardless of action inference.
-        if method == 'GET' and (endpoint == 'UNKNOWN' or not important_get):
+        if method == 'GET' and not is_legacy_form_candidate and (endpoint == 'UNKNOWN' or not important_get):
             return None
 
         action_is_generic = (action_hint == 'target action')
@@ -1969,7 +1992,17 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
         has_concrete_context = not action_is_generic or (function_name is not None)
 
         # Build the shortest possible self-contained PoC using poc_templates.
-        if has_concrete_context:
+        if is_legacy_form_candidate:
+            direct = build_legacy_form_replay_poc(method, norm_ep, fields=parameters)
+            if direct:
+                poc_type = 'browser_console'
+                poc_code = direct
+                conf = 'medium'
+                safety = 'Browser-verifiable candidate only. Confirmation guard blocks POST replay until the tester approves it in an authorized test environment.'
+                notes.append('legacy_form_action')
+                notes.append('form_replay_candidate: browser-verifiable candidate, not a confirmed vulnerability')
+                notes.append('Generated from concrete form action/method/parameters; no UI click handler was inferred.')
+        elif has_concrete_context:
             if method == 'DELETE' or self._is_irreversible_or_high_risk(method, norm_ep, parameters):
                 notes.append('High-risk endpoint: observe-only, no replay PoC generated.')
                 poc_code = None
@@ -2016,8 +2049,12 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
                 'For mutation PoCs: approve the browser confirmation guard only after explicit authorization',
                 'Observe the response status in the Console output',
             ]
-            description = 'Direct self-contained PoC - no helper installation required'
-            expected = 'Server responds with 200/201 or meaningful error; compare payload before/after.'
+            if is_legacy_form_candidate:
+                description = 'Legacy Form Replay / Client-side Validation Bypass Candidate'
+                expected = 'Browser-verifiable candidate only: compare response status/body with normal form submission; this is not a confirmed vulnerability.'
+            else:
+                description = 'Direct self-contained PoC - no helper installation required'
+                expected = 'Server responds with 200/201 or meaningful error; compare payload before/after.'
         else:
             steps = [
                 _review_page_step(page_hint),
@@ -2057,12 +2094,13 @@ class MockConsolePocAnalyzer(ConsolePocAnalyzer):
             poc_generation_status=poc_gen_status,
             poc_generation_reason=(
                 'endpoint unknown' if endpoint == 'UNKNOWN'
+                else 'form_replay_candidate' if is_legacy_form_candidate and is_direct_poc
                 else 'Not a runnable proof yet: user action could not be resolved' if action_is_generic
                 else 'direct CONFIRM-guarded replay PoC' if is_direct_poc
                 else 'endpoint/method available; interceptor discovery aid assigned'
             ),
             observational_poc=None,
-            manual_poc_plan=(_build_manual_poc_plan(f.path, function_name, endpoint, method) if (endpoint == 'UNKNOWN' or action_is_generic) else []),
+            manual_poc_plan=(_build_manual_poc_plan(f.path, function_name, endpoint, method) if (endpoint == 'UNKNOWN' or (action_is_generic and not is_legacy_form_candidate)) else []),
         )
 
 
@@ -2348,10 +2386,19 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         is_low_conf = f.confidence == 'low'
         is_disabled_only = bool(f.verification_playbook and f.verification_playbook.strategy == 'disabled_button_bypass')
         is_unknown = endpoint == 'UNKNOWN'
+        legacy_form_params = api_match.parameters if api_match else evidence_parameters
+        legacy_form_evidence = f"{sink} {f.evidence[0].snippet if f.evidence else ''}".lower()
+        is_legacy_form_replay = bool(
+            method in {'POST', 'GET'}
+            and endpoint not in {'UNKNOWN', ''}
+            and (sink == 'html.form' or 'form action' in legacy_form_evidence or '<form' in legacy_form_evidence)
+            and len({p for p in legacy_form_params if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,60}', p or '')}) >= 2
+            and not any(k in normalize_endpoint(endpoint).lower() for k in ('delete', 'remove', 'refund', 'transfer', 'withdraw', 'bulk'))
+        )
         can_build_direct_from_evidence = (
             endpoint not in {'UNKNOWN', ''}
             and method in {'GET', 'POST', 'PUT', 'PATCH'}
-            and bool(function_name)
+            and (bool(function_name) or is_legacy_form_replay)
             and method != 'DELETE'
             and not any(k in normalize_endpoint(endpoint).lower() for k in ('delete', 'remove', 'refund', 'transfer', 'withdraw', 'bulk'))
         )
@@ -2456,6 +2503,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         # bare functions with no button (doRequest, doLogin) in review.
         is_confirmed_short_poc = has_short_direct_poc and not is_compressed and (
             f.vulnerability_type in {'DOM XSS', 'Client-side Authorization Bypass'}
+            or is_legacy_form_replay
             or (
                 function_name is not None
                 and not is_auto_fn
@@ -2471,7 +2519,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
         f.category = _VULN_TYPE_TO_CATEGORY.get(f.vulnerability_type, 'Business Logic Manipulation')
 
         should_review = (
-            (not is_confirmed_short_poc or (score < 0 and f.category not in {'XSS', 'Admin/Role/Permission Bypass'})) and (
+            (not is_confirmed_short_poc or (score < 0 and f.category not in {'XSS', 'Admin/Role/Permission Bypass'} and not is_legacy_form_replay)) and (
                 is_disabled_only or is_unknown or no_code or ux_disabled or top_import_like or is_auto_fn or is_generic_type or
                 bool(unresolved_placeholders) or
                 (is_generic_action and not has_event_connected_action) or
@@ -2481,6 +2529,12 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                 (is_low_conf and f.category not in _HIGH_PRIORITY_CATEGORIES)
             )
         )
+        if is_legacy_form_replay and f.console_poc and f.console_poc.code and is_interceptor_free(f.console_poc.code) and _is_allowed_guarded_poc_code(f.console_poc.code):
+            should_review = False
+            f.confidence = 'medium' if f.confidence == 'low' else f.confidence
+            f.title = 'Legacy Form Replay / Client-side Validation Bypass Candidate'
+            _add_unique(f.verification_notes, 'legacy_form_action')
+            _add_unique(f.verification_notes, 'form_replay_candidate: browser-verifiable candidate, not a confirmed vulnerability')
         if should_review:
             # Clear PoC code when demoting to review:
             #   - full hook codes (SSS_REVIEW_POC_STATE / TARGET_ENDPOINT)
@@ -2637,6 +2691,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     )
                 playbook_endpoint = (normalize_endpoint(endpoint) if endpoint and endpoint != 'UNKNOWN' else endpoint)
                 playbook_method = method
+                playbook_risk_type = f.vulnerability_type
                 if f.vulnerability_type == 'Client-side Authorization Bypass' and playbook_console_code:
                     storage_match = re.search(r'\b(sessionStorage|localStorage)\.setItem\("([^"]+)"', playbook_console_code)
                     if storage_match:
@@ -2645,6 +2700,8 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     else:
                         playbook_endpoint = 'STORAGE auth branch'
                         playbook_method = 'STORAGE'
+                if is_legacy_form_replay:
+                    playbook_risk_type = 'Legacy Form Replay / Client-side Validation Bypass Candidate'
                 pb = ConsoleVerificationPlaybookSummary(
                     id=f.id,
                     title=f.title,
@@ -2657,7 +2714,7 @@ def analyze_console_exploitability(files: list[FileContent], analyzer: ConsolePo
                     method=playbook_method,
                     page_hint=page_hint,
                     user_action_hint=action_hint,
-                    risk_type=f.vulnerability_type,
+                    risk_type=playbook_risk_type,
                     confidence=f.confidence,
                     vulnerable_code_summary=contract['vulnerable_code_summary'],
                     root_cause=f.root_cause,
