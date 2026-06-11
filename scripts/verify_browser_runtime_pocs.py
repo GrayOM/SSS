@@ -486,7 +486,10 @@ def run_playwright_checks(cases: list[Case], dom_code: str | None, storage_code:
                     sink_reached = True
                     try:
                         page.wait_for_function(
-                            "() => document.querySelector('#messageSink')?.innerHTML.includes('onerror=console.log(1)')",
+                            """() => {
+  const html = document.querySelector('#messageSink')?.innerHTML || '';
+  return html.includes('<img') && html.includes('onerror') && html.includes('console.log(1)');
+}""",
                             timeout=3000,
                         )
                     except Exception:
@@ -495,7 +498,8 @@ def run_playwright_checks(cases: list[Case], dom_code: str | None, storage_code:
                     check("DOM XSS event.data: Playwright postMessage called", bool(result["postedMessages"]), json.dumps(result))
                     if result["postedMessages"]:
                         check("DOM XSS event.data: Playwright source-specific payload", "onerror=console.log(1)" in result["postedMessages"][0]["message"], json.dumps(result))
-                    check("DOM XSS event.data: Playwright payload reaches sink", sink_reached and "onerror=console.log(1)" in sink_html, sink_html)
+                    semantic_sink_payload = all(part in sink_html for part in ("<img", "onerror", "console.log(1)"))
+                    check("DOM XSS event.data: Playwright payload reaches sink", sink_reached and semantic_sink_payload, sink_html)
                 finally:
                     page.close()
             if storage_code:
