@@ -401,7 +401,7 @@ def extract_api_call_candidates(files: list[FileContent]) -> CandidateExtraction
                 source_path=file.path,
                 method=method,
                 endpoint=endpoint,
-                parameters=params[:20],
+                parameters=params,
                 payload_style=('none' if method == 'GET' else 'urlencoded'),
                 start_line=start_line,
                 end_line=end_line,

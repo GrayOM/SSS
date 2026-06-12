@@ -221,6 +221,14 @@ export class AddressService {
         self.assertIn('userId', cand.parameters)
         self.assertIn('displayName', cand.parameters)
 
+    def test_html_form_25_fields_all_captured(self):
+        fields = '\n'.join(f'  <input name="field{i:02d}">' for i in range(1, 26))
+        content = f'<form method="POST" action="/submit">\n{fields}\n</form>'
+        cand = [c for c in extract_api_call_candidates([fc(content)]).candidates if c.sink == 'html.form'][0]
+        self.assertEqual(len(cand.parameters), 25)
+        for i in range(1, 26):
+            self.assertIn(f'field{i:02d}', cand.parameters)
+
     def test_urlsearchparams_append_keys_attached_to_get(self):
         content = """
 const params = new URLSearchParams();
