@@ -16,6 +16,7 @@ from app.services.console_poc_analysis_service import (
     select_console_relevant_files,
     get_console_poc_analyzer,
 )
+from app.services.poc_templates import build_legacy_form_replay_poc, is_interceptor_free
 
 
 def f(path, content):
@@ -231,7 +232,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIsNotNone(pb, f'playbooks={[(p.endpoint, p.method) for p in result.verification_playbooks]}')
         code = pb.console_code or ''
         self.assertIn('Legacy Form Replay', pb.risk_type)
-        self.assertIn('const body = new URLSearchParams();', code)
+        self.assertIn('URLSearchParams(', code)
         self.assertIn('credentials: "include"', code)
         self.assertIn('"Content-Type": "application/x-www-form-urlencoded"', code)
         self.assertIn('confirm(', code)
@@ -280,6 +281,134 @@ class ConsolePocAnalysisTests(unittest.TestCase):
 """)]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertFalse(any(p.endpoint == '/refund' for p in result.verification_playbooks))
+
+    # --- New comprehensive legacy form tests ---
+
+    def test_full_oep_form_all_12_fields_extracted(self):
+        """All 12 source-known fields appear in generated PoC; no truncation to 8."""
+        html = """
+<form method="POST" action="/oep">
+  <input type="hidden" name="contextPath" value="">
+  <input type="hidden" name="resourceName" value="">
+  <input type="hidden" name="PROSSESS_GUBUN" value="">
+  <input type="hidden" name="P_PRCURE_OVSEA_AREA_CD" value="">
+  <input type="hidden" name="P_TODAY" value="">
+  <input type="hidden" name="P_YEAR_MONTH" value="">
+  <input type="hidden" name="P_ANNC_NGR" value="">
+  <input type="hidden" name="P_ANNC_NO" value="">
+  <input type="hidden" name="P_BBS_SECD" value="">
+  <input type="hidden" name="P_BBS_SN" value="">
+  <input type="hidden" name="P_BFAN_NO" value="">
+  <input type="hidden" name="P_ROUND_NO" value="">
+</form>
+"""
+        files = [f('contract/emgncLoginForm.do', html)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = next((p for p in result.verification_playbooks if p.endpoint == '/oep' and p.method == 'POST'), None)
+        self.assertIsNotNone(pb, f'No /oep POST playbook. Playbooks: {[(p.endpoint, p.method) for p in result.verification_playbooks]}')
+        code = pb.console_code or ''
+        all_fields = [
+            'contextPath', 'resourceName', 'PROSSESS_GUBUN', 'P_PRCURE_OVSEA_AREA_CD',
+            'P_TODAY', 'P_YEAR_MONTH', 'P_ANNC_NGR', 'P_ANNC_NO', 'P_BBS_SECD',
+            'P_BBS_SN', 'P_BFAN_NO', 'P_ROUND_NO',
+        ]
+        for field in all_fields:
+            self.assertIn(field, code, f'Field {field!r} missing from PoC')
+        # Structural assertions
+        self.assertIn('knownFields', code)
+        self.assertIn('FormData(form)', code)
+        self.assertIn('URLSearchParams(', code)
+        self.assertIn('credentials: "include"', code)
+        self.assertIn('"Content-Type": "application/x-www-form-urlencoded"', code)
+        # Guard ordering: unresolved check → confirm → fetch
+        self.assertLess(code.index('startsWith("REPLACE_WITH_")'), code.index('confirm('))
+        self.assertLess(code.index('confirm('), code.index('fetch('))
+        # No helper/interceptor
+        self.assertNotIn('window.SSS_POC', code)
+        self.assertNotIn('common_console_helper', code)
+        self.assertNotIn('XMLHttpRequest', code)
+        self.assertNotIn('interceptors', code)
+        # Title/risk_type
+        self.assertIn('Legacy Form Replay', pb.risk_type)
+
+    def test_legacy_form_uses_form_data_and_selector_fallback(self):
+        """PoC uses FormData(form) as primary source and querySelector as fallback."""
+        html = """
+<form method="POST" action="/iep">
+  <input type="hidden" name="P_TODAY" value="">
+  <input type="hidden" name="P_YEAR_MONTH" value="">
+</form>
+"""
+        files = [f('contract/emgncLoginForm.do', html)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = next((p for p in result.verification_playbooks if p.endpoint == '/iep' and p.method == 'POST'), None)
+        self.assertIsNotNone(pb)
+        code = pb.console_code or ''
+        self.assertIn('FormData(form)', code)
+        self.assertIn('document.querySelector', code)
+        self.assertIn('REPLACE_WITH_', code)
+
+    def test_legacy_form_delete_endpoint_not_promoted(self):
+        files = [f('contract/form.do', """
+<form method="POST" action="/delete">
+  <input type="hidden" name="itemId" value="">
+  <input type="hidden" name="reason" value="">
+</form>
+""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/delete' for p in result.verification_playbooks))
+
+    def test_legacy_form_remove_endpoint_not_promoted(self):
+        files = [f('contract/form.do', """
+<form method="POST" action="/remove">
+  <input type="hidden" name="itemId" value="">
+  <input type="hidden" name="reason" value="">
+</form>
+""")]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        self.assertFalse(any(p.endpoint == '/remove' for p in result.verification_playbooks))
+
+    def test_legacy_form_no_interceptor_or_helper(self):
+        """Generated legacy form PoC must not use interceptors or common_console_helper."""
+        # Use 'payment' in filename so select_console_relevant_files scores > 0
+        html = """
+<form method="POST" action="/payment/submit">
+  <input type="hidden" name="fieldA" value="">
+  <input type="hidden" name="fieldB" value="">
+</form>
+"""
+        files = [f('contract/paymentSubmit.do', html)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        pb = next((p for p in result.verification_playbooks if p.endpoint == '/payment/submit' and p.method == 'POST'), None)
+        self.assertIsNotNone(pb, f'Playbooks: {[(p.endpoint, p.method) for p in result.verification_playbooks]}')
+        code = pb.console_code or ''
+        forbidden = [
+            'window.SSS_POC', 'window.SSS_REVIEW_POC', 'common_console_helper',
+            'XMLHttpRequest.prototype', 'axios.interceptors', 'window.fetch =',
+        ]
+        for sig in forbidden:
+            self.assertNotIn(sig, code, f'Forbidden signature found: {sig!r}')
+
+    def test_legacy_form_regression_contract_form_do(self):
+        """Regression: contract .do form generates PoC with all source fields, no manual hunting."""
+        html = """
+<form method="POST" action="/contract/emgncLoginForm.do">
+  <input type="hidden" name="contextPath" value="">
+  <input type="hidden" name="resourceName" value="">
+  <input type="hidden" name="PROSSESS_GUBUN" value="">
+  <input type="hidden" name="P_PRCURE_OVSEA_AREA_CD" value="">
+  <input type="hidden" name="P_TODAY" value="">
+  <input type="hidden" name="P_YEAR_MONTH" value="">
+</form>
+"""
+        files = [f('contract/emgncLoginForm.do', html)]
+        result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
+        playbooks = [p for p in result.verification_playbooks if p.method == 'POST']
+        self.assertTrue(len(playbooks) >= 1, 'Expected at least one POST playbook')
+        code = playbooks[0].console_code or ''
+        for field in ['contextPath', 'resourceName', 'PROSSESS_GUBUN', 'P_PRCURE_OVSEA_AREA_CD',
+                      'P_TODAY', 'P_YEAR_MONTH']:
+            self.assertIn(field, code, f'Field {field!r} must be auto-extracted, not manually hunted')
 
     def test_extract_endpoint_supports_template_literal(self):
         ep = _extract_endpoint("axios.post(`${apiBase}/api/user/${sessionData.userId}/wallet/charge`, payload)")
@@ -2920,6 +3049,95 @@ function requestIamportPay(){
                 f'review_candidates for [{candidate.vulnerability_type}] — '
                 f'is_low_conf gate should be bypassed for high-priority categories',
             )
+
+
+class LegacyFormReplayPocTemplateTests(unittest.TestCase):
+    """Unit tests for build_legacy_form_replay_poc directly."""
+
+    def test_oep_full_12_fields_in_known_fields(self):
+        all_fields = [
+            'contextPath', 'resourceName', 'PROSSESS_GUBUN', 'P_PRCURE_OVSEA_AREA_CD',
+            'P_TODAY', 'P_YEAR_MONTH', 'P_ANNC_NGR', 'P_ANNC_NO', 'P_BBS_SECD',
+            'P_BBS_SN', 'P_BFAN_NO', 'P_ROUND_NO',
+        ]
+        code = build_legacy_form_replay_poc('POST', '/oep', fields=all_fields)
+        self.assertIsNotNone(code, 'Expected PoC for /oep with 12 fields')
+        for field in all_fields:
+            self.assertIn(field, code, f'Field {field!r} missing from PoC')
+        self.assertIn('knownFields', code)
+        self.assertIn('FormData(form)', code)
+        self.assertIn('URLSearchParams(', code)
+        self.assertIn('credentials: "include"', code)
+        self.assertIn('"Content-Type": "application/x-www-form-urlencoded"', code)
+        # Guard ordering
+        self.assertLess(code.index('startsWith("REPLACE_WITH_")'), code.index('confirm('))
+        self.assertLess(code.index('confirm('), code.index('fetch('))
+        # No interceptors
+        self.assertTrue(is_interceptor_free(code))
+        self.assertNotIn('window.SSS_POC', code)
+        self.assertNotIn('window.SSS_REVIEW_POC', code)
+
+    def test_no_truncation_to_8_fields(self):
+        """Ensures the old safe_fields[:8] limit is gone — all 12 fields appear."""
+        fields = [f'field{i}' for i in range(1, 13)]
+        code = build_legacy_form_replay_poc('POST', '/submit', fields=fields)
+        self.assertIsNotNone(code)
+        for field in fields:
+            self.assertIn(field, code, f'Field {field!r} missing — truncation detected')
+
+    def test_runtime_form_matching_included(self):
+        code = build_legacy_form_replay_poc('POST', '/oep', fields=['fieldA', 'fieldB'])
+        self.assertIsNotNone(code)
+        self.assertIn('document.forms', code)
+        self.assertIn('f.getAttribute("action")', code)
+        self.assertIn('new URL(action, location.href).pathname', code)
+
+    def test_two_field_form_produces_poc(self):
+        code = build_legacy_form_replay_poc('POST', '/iep', fields=['P_TODAY', 'P_YEAR_MONTH'])
+        self.assertIsNotNone(code)
+        self.assertIn('P_TODAY', code)
+        self.assertIn('P_YEAR_MONTH', code)
+
+    def test_one_field_returns_none(self):
+        code = build_legacy_form_replay_poc('POST', '/oep', fields=['onlyField'])
+        self.assertIsNone(code)
+
+    def test_destructive_endpoint_returns_none(self):
+        for endpoint in ['/refund', '/delete', '/remove', '/transfer', '/withdraw', '/bulk']:
+            code = build_legacy_form_replay_poc('POST', endpoint, fields=['fieldA', 'fieldB'])
+            self.assertIsNone(code, f'Expected None for destructive endpoint {endpoint!r}')
+
+    def test_unknown_endpoint_returns_none(self):
+        self.assertIsNone(build_legacy_form_replay_poc('POST', 'UNKNOWN', fields=['fieldA', 'fieldB']))
+
+    def test_put_method_returns_none(self):
+        self.assertIsNone(build_legacy_form_replay_poc('PUT', '/submit', fields=['fieldA', 'fieldB']))
+
+    def test_delete_method_returns_none(self):
+        self.assertIsNone(build_legacy_form_replay_poc('DELETE', '/submit', fields=['fieldA', 'fieldB']))
+
+    def test_get_form_poc_no_confirm(self):
+        """GET form replay does not require confirm guard (read-only)."""
+        code = build_legacy_form_replay_poc('GET', '/search', fields=['query', 'page'])
+        self.assertIsNotNone(code)
+        self.assertIn('fetch(', code)
+        self.assertIn('credentials: "include"', code)
+
+    def test_post_poc_is_interceptor_free_and_guarded(self):
+        code = build_legacy_form_replay_poc('POST', '/submit', fields=['fieldA', 'fieldB'])
+        self.assertIsNotNone(code)
+        self.assertTrue(is_interceptor_free(code))
+        self.assertIn('confirm(', code)
+        self.assertIn('if (!confirm(', code)
+
+    def test_field_names_preserved_exactly(self):
+        """Source field names must appear exactly as-is in the PoC (no transformation)."""
+        fields = ['contextPath', 'PROSSESS_GUBUN', 'P_PRCURE_OVSEA_AREA_CD']
+        code = build_legacy_form_replay_poc('POST', '/oep', fields=fields)
+        self.assertIsNotNone(code)
+        self.assertIn('"contextPath"', code)
+        self.assertIn('"PROSSESS_GUBUN"', code)
+        self.assertIn('"P_PRCURE_OVSEA_AREA_CD"', code)
 
 
 if __name__ == '__main__':

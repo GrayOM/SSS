@@ -192,7 +192,7 @@ def validate_case(case: Case) -> None:
         check(f"{case.label}: FormData payload style", "const fd = new FormData();" in code and "body: fd" in code, code)
         check(f"{case.label}: FormData does not force JSON content-type", "application/json" not in code, code)
     elif case.payload_style == "urlencoded":
-        check(f"{case.label}: URLSearchParams payload style", "const body = new URLSearchParams();" in code and "body.toString()" in code, code)
+        check(f"{case.label}: URLSearchParams payload style", "new URLSearchParams(" in code and "body.toString()" in code, code)
         check(f"{case.label}: URL encoded content-type", "application/x-www-form-urlencoded" in code, code)
     if "REPLACE_WITH_" in code and case.method in {"POST", "PUT", "PATCH"}:
         guard_idx = line_index(code, "Fill required runtime values before sending")

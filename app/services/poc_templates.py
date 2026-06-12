@@ -244,10 +244,14 @@ def build_legacy_form_replay_poc(
 ) -> 'str | None':
     """Guarded Browser Console replay for concrete legacy HTML/JSP forms.
 
-    This intentionally does not share the compact API replay template. Legacy
-    form findings often lack a click handler, so the generated code must show
-    exactly which page values it will reuse and block before confirm/fetch when
-    required values still need tester input.
+    Uses the complete source-known field list as knownFields. Finds the real
+    browser form at runtime via [...document.forms].find(), seeds body from
+    FormData(form), then fills missing fields from individual DOM selectors,
+    falling back to REPLACE_WITH_* placeholders. Blocks before confirm/fetch
+    when any required field is still a placeholder.
+
+    Intentionally longer than MAX_POC_LINES for forms with many fields --
+    completeness is more important than line count for legacy form replay.
     """
     if not _is_safe_endpoint(endpoint):
         return None
@@ -255,45 +259,59 @@ def build_legacy_form_replay_poc(
     if m not in {'GET', 'POST'}:
         return None
     norm = normalize_endpoint(endpoint)
-    safe_fields = []
+
+    safe_fields: list[str] = []
     for name in fields or []:
         if _safe_body_key(name) and name not in safe_fields:
             safe_fields.append(name)
     if len(safe_fields) < 2:
         return None
 
-    declarations: list[str] = []
-    required_parts: list[str] = []
-    set_lines: list[str] = []
-    used_vars: set[str] = set()
-    for name in safe_fields[:8]:
-        var_name = _legacy_form_var_name(name)
-        base = var_name
-        suffix = 2
-        while var_name in used_vars:
-            var_name = f'{base}{suffix}'
-            suffix += 1
-        used_vars.add(var_name)
-        selector_name = json.dumps(f'[name="{name}"]')
-        selector_id = json.dumps(f'#{name}')
-        placeholder = json.dumps(f'REPLACE_WITH_{_placeholder_label(name)}')
-        declarations.append(
-            f'  const {var_name} = document.querySelector({selector_name})?.value || '
-            f'document.querySelector({selector_id})?.value || {placeholder};'
-        )
-        required_parts.append(f'{var_name}: {var_name}')
-        set_lines.append(f'  body.set({json.dumps(name)}, {var_name});')
+    method_js = json.dumps(m)
+    endpoint_js = json.dumps(norm)
 
-    lines = ['(async () => {', f'  const endpoint = {json.dumps(norm)};', '  const body = new URLSearchParams();']
-    lines.extend(declarations)
-    lines.append(f'  const required = {{ {", ".join(required_parts)} }};')
-    lines.extend([
-        '  if (Object.values(required).some(v => String(v).startsWith("REPLACE_WITH_"))) {',
-        '    console.warn("Fill required runtime values before sending:", required);',
+    # knownFields: one field per line for readability
+    field_items = ',\n'.join(f'    {json.dumps(name)}' for name in safe_fields)
+    known_fields_literal = f'[\n{field_items}\n  ]'
+
+    lines: list[str] = [
+        '(async () => {',
+        f'  const endpoint = {endpoint_js};',
+        f'  const knownFields = {known_fields_literal};',
+        '',
+        '  const esc = window.CSS && CSS.escape ? CSS.escape : (s) => s;',
+        '  const form = [...document.forms].find(f => {',
+        '    const action = f.getAttribute("action") || "";',
+        '    const path = new URL(action, location.href).pathname;',
+        f'    return path === endpoint && String(f.method || "GET").toUpperCase() === {method_js};',
+        '  });',
+        '',
+        '  const body = new URLSearchParams(form ? new FormData(form) : undefined);',
+        '',
+        '  for (const name of knownFields) {',
+        '    let value = body.get(name);',
+        '    if (!value) {',
+        '      value =',
+        '        document.querySelector(`[name="${esc(name)}"]`)?.value ||',
+        '        document.querySelector(`#${esc(name)}`)?.value ||',
+        '        `REPLACE_WITH_${name.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase() || "PARAM"}`;',
+        '      body.set(name, value);',
+        '    }',
+        '  }',
+        '',
+        '  const unresolved = {};',
+        '  for (const name of knownFields) {',
+        '    const value = String(body.get(name) || "");',
+        '    if (value.startsWith("REPLACE_WITH_")) unresolved[name] = value;',
+        '  }',
+        '',
+        '  if (Object.keys(unresolved).length) {',
+        '    console.warn("Fill required runtime values before sending:", unresolved);',
         '    return;',
         '  }',
-    ])
-    lines.extend(set_lines)
+        '',
+    ]
+
     if m == 'GET':
         lines.extend([
             '  const url = `${endpoint}?${body.toString()}`;',
@@ -304,22 +322,24 @@ def build_legacy_form_replay_poc(
             '  console.log(text.slice(0, 500));',
             '})();',
         ])
-        return '\n'.join(lines)
+    else:
+        confirm_msg = json.dumps(f'Send {m} form replay to {norm}?')
+        lines.extend([
+            f'  if (!confirm({confirm_msg})) return;',
+            '',
+            '  const r = await fetch(endpoint, {',
+            f'    method: {method_js},',
+            '    credentials: "include",',
+            '    headers: { "Content-Type": "application/x-www-form-urlencoded" },',
+            '    body: body.toString()',
+            '  });',
+            '  const text = await r.text();',
+            '  console.log("status:", r.status);',
+            '  console.log("content-type:", r.headers.get("content-type"));',
+            '  console.log(text.slice(0, 500));',
+            '})();',
+        ])
 
-    lines.extend([
-        f'  if (!confirm("Send POST form replay to {norm}?")) return;',
-        '  const r = await fetch(endpoint, {',
-        '    method: "POST",',
-        '    credentials: "include",',
-        '    headers: { "Content-Type": "application/x-www-form-urlencoded" },',
-        '    body: body.toString()',
-        '  });',
-        '  const text = await r.text();',
-        '  console.log("status:", r.status);',
-        '  console.log("content-type:", r.headers.get("content-type"));',
-        '  console.log(text.slice(0, 500));',
-        '})();',
-    ])
     return '\n'.join(lines)
 
 
