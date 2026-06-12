@@ -1,4 +1,4 @@
-# SSS — AI Source Vulnerability Analyzer
+# AI Source Vulnerability Analyzer
 
 AI 기반 웹 애플리케이션 소스코드 보안 취약점 분석 도구.  
 ZIP 파일을 업로드하면 JS/HTML 소스를 자동 분석하고, 브라우저 콘솔에서 즉시 실행 가능한 PoC 코드와 함께 취약점 보고서를 생성합니다.
@@ -29,8 +29,8 @@ ZIP 파일을 업로드하면 JS/HTML 소스를 자동 분석하고, 브라우�
 ### 1. 저장소 클론
 
 ```bash
-git clone https://github.com/<your-username>/SSS.git
-cd SSS
+git clone https://github.com/<your-username>/AI-Source-Vulnerability-Analyzer.git
+cd AI-Source-Vulnerability-Analyzer
 ```
 
 ### 2. 가상환경 및 의존성 설치
