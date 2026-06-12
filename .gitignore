@@ -1,12 +1,48 @@
+# Environment & Secrets
 .env
+.env.local
+
+# Python
 .venv
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Database / runtime data
+*.sqlite3
+tmp/
+uploads/
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# CI / review artifacts
 gpt_review*.patch
 gpt_review*_stat.txt
 gpt_review*_untracked.txt
 gpt_review_stat*.txt
 gpt_review_untracked*.txt
 ai_collect_review_result.txt
+
+# Test fixtures (may contain proprietary source code)
+fixtures/input/
 fixtures/saz_file/
+
+# AI corpora
 .external_corpus/
