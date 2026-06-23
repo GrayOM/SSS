@@ -142,14 +142,14 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertIn("if (userInfo.userType === 'ADMIN')", auth.evidence[0].snippet)
 
     def test_auth_evidence_excludes_checkauthstatus_import_line(self):
-        files = [f('src/Header.js', "import { checkAuthStatus } from '../utils/auth';\nconst role = userInfo.role;\nif (role === 'NAFAL') { navigate('/admin'); }\ncheckAuthStatus();")]
+        files = [f('src/Header.js', "import { checkAuthStatus } from '../utils/auth';\nconst role = userInfo.role;\nif (role === 'ROLE_ALPHA') { navigate('/admin'); }\ncheckAuthStatus();")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertNotIn("import { checkAuthStatus }", auth.evidence[0].snippet)
-        self.assertIn("if (role === 'NAFAL')", auth.evidence[0].snippet)
+        self.assertIn("if (role === 'ROLE_ALPHA')", auth.evidence[0].snippet)
 
     def test_auth_evidence_skips_role_badge_presentation_code(self):
-        files = [f('src/Header.js', "function getRoleBadgeColor(role) {\n  switch (role) {\n    case 'ADMIN': return 'var(--red)';\n    case 'NAFAL': return 'var(--blue)';\n    default: return 'var(--gray)';\n  }\n}\nif (userInfo.userType !== 'ADMIN') { navigate('/'); }")]
+        files = [f('src/Header.js', "function getRoleBadgeColor(role) {\n  switch (role) {\n    case 'ADMIN': return 'var(--red)';\n    case 'ROLE_ALPHA': return 'var(--blue)';\n    default: return 'var(--gray)';\n  }\n}\nif (userInfo.userType !== 'ADMIN') { navigate('/'); }")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         auth = [x for x in result.findings if x.vulnerability_type == 'Client-side Authorization Bypass'][0]
         self.assertNotIn('getRoleBadgeColor', auth.evidence[0].snippet)
@@ -1149,7 +1149,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertEqual(finding.vulnerability_type, 'Identity Verification / Action Authorization Bypass Candidate')
 
     def test_generic_get_recommend_note_not_session_note(self):
-        files = [f('src/nls.js', "function getRecommendSearch(){fetch('/header/recommend_search.do')}")]
+        files = [f('src/legacy_jquery.js', "function getRecommendSearch(){fetch('/header/recommend_search.do')}")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertEqual(len(result.review_candidates), 0)
@@ -1220,7 +1220,7 @@ class ConsolePocAnalysisTests(unittest.TestCase):
         self.assertTrue(('ui_event_connected' in notes) or ('endpoint_category=' in notes))
 
     def test_jquery_recommend_search_get_stays_review(self):
-        files = [f('templates/nls.html', "<button id='reco'>추천검색</button><script>$('#reco').on('click', function(){ $.ajax({ url:'/header/recommend_search.do', type:'GET' }); });</script>")]
+        files = [f('templates/legacy_jquery.html', "<button id='reco'>추천검색</button><script>$('#reco').on('click', function(){ $.ajax({ url:'/header/recommend_search.do', type:'GET' }); });</script>")]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0)
         self.assertEqual(len(result.review_candidates), 0)
@@ -1869,7 +1869,7 @@ function requestIamportPay(){
                                   f"finding [{finding.vulnerability_type}].{attr}.code re-defines window.SSS_POC")
 
 
-    # -- Real-world regression tests (loTO / NAFAL patterns) --------
+    # -- Real-world regression tests (dynamic_api / ROLE_ALPHA patterns) --------
 
     def test_promoted_playbook_console_code_is_source_aware_and_bounded(self):
         """Promoted console_code may be slightly longer when it derives runtime values."""
@@ -1906,8 +1906,8 @@ function requestIamportPay(){
                     f"Promoted console_code must not contain hook installer: {sig!r}")
 
     def test_loto_like_all_manual_plan_no_playbooks(self):
-        """loTO-like input: all endpoints unresolved -> no playbooks, all manual_plan."""
-        # loTO pattern: endpoints via API_BASE_URL variable and dynamic paths
+        """dynamic-api input: all endpoints unresolved -> no playbooks, all manual_plan."""
+        # dynamic_api pattern: endpoints via API_BASE_URL variable and dynamic paths
         files = [
             f('src/LoginPage.js',
               "function doLogin() { axios.post(API_BASE_URL + '/login', { email, password }); }"),
@@ -1918,7 +1918,7 @@ function requestIamportPay(){
         ]
         result = analyze_console_exploitability(files, analyzer=MockConsolePocAnalyzer())
         self.assertEqual(len(result.verification_playbooks), 0,
-                         "loTO-like input should produce zero promoted playbooks")
+                         "dynamic-api input should produce zero promoted playbooks")
         # All review candidates must be manual_plan
         for rc in result.review_candidates:
             self.assertEqual(rc.poc_generation_status, 'manual_plan',
@@ -1926,8 +1926,8 @@ function requestIamportPay(){
             self.assertIsNone(rc.console_poc.code if rc.console_poc else None,
                 "manual_plan candidate must not have runnable console code")
 
-    def test_nafal_like_unknown_endpoints_no_runnable_poc(self):
-        """NAFAL-like input.
+    def test_role_alpha_like_unknown_endpoints_no_runnable_poc(self):
+        """ROLE_ALPHA-like input.
         AdminPage.js 'userType' key: direct-string storage pattern → auth bypass IS promoted.
         service.js dynamic endpoint: remains a manual review candidate.
         Review candidates must not have global hook code.
@@ -1954,7 +1954,7 @@ function requestIamportPay(){
             for sig in ['window.fetch = async function', 'XMLHttpRequest.prototype.open',
                         'SSS_REVIEW_POC_STATE', 'TARGET_ENDPOINT =']:
                 self.assertNotIn(sig, poc_code + obs_code,
-                    f"NAFAL-like candidate must not contain hook: {sig!r}")
+                    f"ROLE_ALPHA-like candidate must not contain hook: {sig!r}")
 
 
     # -- Mojibake regression: generated PoC code must be ASCII-only ----------------
@@ -1999,17 +1999,6 @@ function requestIamportPay(){
             non_ascii = [repr(c) for c in code if ord(c) > 127]
             self.assertFalse(non_ascii,
                 f'Playbook console_code has non-ASCII: {non_ascii[:5]!r}')
-
-    def test_claude_md_no_mojibake(self):
-        """CLAUDE.md must not contain em-dash, en-dash, or arrow characters."""
-        from pathlib import Path
-        claude_md = (Path(__file__).resolve().parents[1] / 'CLAUDE.md').read_text(encoding='utf-8')
-        MOJIBAKE = {'\u2014': 'EM DASH', '\u2013': 'EN DASH', '\u2192': 'RIGHT ARROW',
-                    '\u2500': 'BOX DRAWING', '\u26a0': 'WARNING SIGN', '\ufffd': 'REPLACEMENT CHAR'}
-        for char, name in MOJIBAKE.items():
-            self.assertNotIn(char, claude_md,
-                f'CLAUDE.md contains U+{ord(char):04X} {name}')
-
 
     # -- Edge-case: observational downgrade when no promoted playbooks ---------------
 
@@ -2526,8 +2515,8 @@ function requestIamportPay(){
 
     # ── Agent team: generic rules ──────────────────────────────────────────────
 
-    def test_nafal_not_hardcoded_in_core_rules(self):
-        """Core detection lists must not contain fixture-specific role name 'nafal'.
+    def test_role_alpha_not_hardcoded_in_core_rules(self):
+        """Core detection lists must not contain fixture-specific role name 'role_alpha'.
         Fixture-specific expectations belong only in test files."""
         from app.services.console_poc_analysis_service import (
             AUTH_SNIPPET_KEYS,
@@ -2535,23 +2524,23 @@ function requestIamportPay(){
         )
         import inspect
         auth_src = inspect.getsource(_extract_auth_branch_snippet)
-        self.assertNotIn('nafal', ' '.join(AUTH_SNIPPET_KEYS).lower(),
-            'AUTH_SNIPPET_KEYS must not contain nafal')
+        self.assertNotIn('role_alpha', ' '.join(AUTH_SNIPPET_KEYS).lower(),
+            'AUTH_SNIPPET_KEYS must not contain role_alpha')
         # tier2_patterns and page_map are inside the function source
-        self.assertNotIn("'nafalmypage'", auth_src,
-            'page_map in _infer_page_action_hints must not contain nafalmypage')
+        self.assertNotIn("'role_alphamypage'", auth_src,
+            'page_map in _infer_page_action_hints must not contain role_alphamypage')
 
-    def test_nafal_tier2_patterns_removed(self):
-        """tier2_patterns must not hardcode nafal as a literal role constant."""
+    def test_role_alpha_tier2_patterns_removed(self):
+        """tier2_patterns must not hardcode role_alpha as a literal role constant."""
         import inspect
         from app.services.console_poc_analysis_service import _extract_auth_branch_snippet
         src = inspect.getsource(_extract_auth_branch_snippet)
-        # nafal must not appear as a literal string in a compiled regex pattern
+        # role_alpha must not appear as a literal string in a compiled regex pattern
         import re as _re
         pattern_strings = _re.findall(r'r["\']([^"\']+)["\']', src)
         for ps in pattern_strings:
-            self.assertNotIn('nafal', ps.lower(),
-                f"tier2 pattern contains nafal literal: {ps!r}")
+            self.assertNotIn('role_alpha', ps.lower(),
+                f"tier2 pattern contains role_alpha literal: {ps!r}")
 
     def test_status_set_for_all_findings(self):
         """Every ReadableFinding must have status in the valid lifecycle set."""

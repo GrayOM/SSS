@@ -86,7 +86,7 @@ def test_static_app_js_promoted_playbooks_use_short_console_code():
     assert js.index('Promoted Verification Playbooks') < js.index('Manual Review Candidates')
 
 
-# -- loTO / NAFAL real-world regression: zero-playbook UI behavior ----------
+# -- Dynamic-source regression: zero-playbook UI behavior ----------
 
 def test_static_app_js_no_helper_shown_when_no_playbooks():
     js = _app_js()

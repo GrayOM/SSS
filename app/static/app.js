@@ -4,6 +4,7 @@ const statusBox = document.getElementById('status');
 const summaryBox = document.getElementById('summary');
 const findingsBox = document.getElementById('findings');
 const downloadBtn = document.getElementById('download-json');
+const selectedFileName = document.getElementById('selected-file-name');
 let lastResult = null;
 
 function esc(v) {
@@ -17,15 +18,22 @@ function esc(v) {
 
 downloadBtn.disabled = true;
 
+fileInput.addEventListener('change', () => {
+  selectedFileName.textContent = fileInput.files[0]?.name || '선택된 파일 없음';
+});
+
 function renderSummary(body) {
-  const lines = [
-    `스캔 파일 수: ${body.upload.total_files_scanned}`,
-    `분석 대상 파일 수: ${body.content_load.loaded_count}`,
-    `Chunk 수: ${body.chunks.total_chunks}`,
-    `일반 finding 수: ${body.analysis.finding_count}`,
-    `Readable finding 수: ${body.readable_analysis?.finding_count ?? 0}`,
+  const metrics = [
+    ['스캔 파일', body.upload.total_files_scanned],
+    ['분석 대상', body.content_load.loaded_count],
+    ['Chunk', body.chunks.total_chunks],
+    ['일반 Finding', body.analysis.finding_count],
+    ['Readable Finding', body.readable_analysis?.finding_count ?? 0],
   ];
-  summaryBox.innerHTML = `<div class="card"><h3>요약</h3><ul>${lines.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`;
+  summaryBox.innerHTML = metrics.map(([label, value]) => `<div class="metric-card">
+    <span class="metric-label">${esc(label)}</span>
+    <span class="metric-value">${esc(value)}</span>
+  </div>`).join('');
 }
 
 function listHtml(items, emptyText = 'N/A') {
@@ -69,11 +77,15 @@ function renderVerificationCode(code) {
 function renderVerificationPlaybooks(playbooks) {
   const cards = (playbooks || []).map((pb) => `<div class="card">
     <h3>${esc(pb.title || pb.vulnerability_title || 'Verification Playbook')}</h3>
-    <p><b>Source location:</b> ${esc(formatLocation(pb))}</p>
-    <p><b>function_name:</b> ${esc(pb.function_name || 'N/A')}</p>
-    <p><b>Risk:</b> ${esc(pb.risk_type || '')} / <b>Confidence:</b> ${esc(pb.confidence || '')}</p>
-    <p><b>root_cause:</b> ${esc(pb.root_cause || '')}</p>
-    <p><b>why_exploitable:</b> ${esc(pb.why_exploitable || '')}</p>
+    <span class="badge">Promoted</span>
+    <span class="badge">Risk: ${esc(pb.risk_type || 'N/A')}</span>
+    <span class="badge">Confidence: ${esc(pb.confidence || 'N/A')}</span>
+    <div class="meta-grid">
+      <p><b>Source location:</b> ${esc(formatLocation(pb))}</p>
+      <p><b>function_name:</b> ${esc(pb.function_name || 'N/A')}</p>
+      <p><b>root_cause:</b> ${esc(pb.root_cause || '')}</p>
+      <p><b>why_exploitable:</b> ${esc(pb.why_exploitable || '')}</p>
+    </div>
     <div><b>data_flow:</b> ${renderDataFlow(pb.data_flow)}</div>
     <div><b>breakpoint_plan:</b> ${renderPlan(pb.breakpoint_plan)}</div>
     <div><b>poc_injection_plan:</b> ${renderPlan(pb.poc_injection_plan)}</div>
@@ -91,14 +103,14 @@ function renderVerificationPlaybooks(playbooks) {
 function renderCommonConsoleHelper(readable, hasPlaybooks) {
   const helper = readable?.common_console_helper || '';
   if (!hasPlaybooks) {
-    return `<div class="card" style="border-left:4px solid #b91c1c;">
+    return `<div class="card alert-card">
       <h3>No browser-console-runnable PoC was generated</h3>
       <p>Only manual review candidates were found. Use the verification steps below - do not paste the Common Console Helper into your browser for these findings.</p>
       <p><b>Why:</b> No finding had a concrete endpoint, page, and user action confirmed from source code. Each candidate requires manual verification before any PoC can be constructed.</p>
     </div>`;
   }
   if (!helper) return '';
-  return `<div class="card">
+  return `<div class="card helper-card">
     <h3>Common Console Helper - paste once before running any playbook</h3>
     <p><b>Step 1:</b> paste common_console_helper once into the browser Console. After pasting, the console will show <code>undefined</code> - this is normal. Look for the <code>[SSS PoC] common helper installed</code> group log to confirm success.</p>
     <p><b>Step 2:</b> navigate to the documented page and perform the documented page/action.</p>
@@ -141,17 +153,22 @@ function renderManualReviewCandidates(candidates) {
     const safePocCode = isSafeReviewCode(poc.code) ? poc.code : null;
     return `<div class="card">
       <h3>${esc(f.title)}</h3>
-      <p><b>Manual Review Candidate</b> - <b>Not automatically confirmed vulnerability</b></p>
-      ${isManualPlan ? `<p style="color:#b91c1c;font-weight:700;">No runnable Console PoC - manual verification only</p>` : ''}
-      <p><b>Type:</b> ${esc(f.vulnerability_type)} / <b>Risk:</b> ${esc(f.severity)} / <b>Confidence:</b> ${esc(f.confidence)}</p>
-      ${notRunnableNotes.length ? `<p style="color:#b91c1c;">${notRunnableNotes.map(esc).join(' / ')}</p>` : ''}
+      <span class="badge warning">Manual Review Candidate</span>
+      <span class="badge warning">Not automatically confirmed vulnerability</span>
+      <span class="badge">Risk: ${esc(f.severity || 'N/A')}</span>
+      <span class="badge">Confidence: ${esc(f.confidence || 'N/A')}</span>
+      ${isManualPlan ? `<p class="danger-text">No runnable Console PoC - manual verification only</p>` : ''}
+      <p><b>Type:</b> ${esc(f.vulnerability_type)}</p>
+      ${notRunnableNotes.length ? `<p class="danger-text">${notRunnableNotes.map(esc).join(' / ')}</p>` : ''}
       ${f.poc_generation_reason ? `<p><b>Why no runnable PoC:</b> ${esc(f.poc_generation_reason)}</p>` : ''}
-      <p><b>Source location:</b> ${esc(formatLocation(f))}</p>
-      <p><b>function_name:</b> ${esc(f.function_name || 'N/A')}</p>
-      <p><b>Summary:</b> ${esc(f.summary)}</p>
-      <p><b>Affected files:</b> ${(f.affected_files || []).map(esc).join(', ')}</p>
-      <p><b>Evidence reason:</b> ${esc(ev.reason || '')}</p>
-      <p><b>root_cause:</b> ${esc(f.root_cause || '')}</p>
+      <div class="meta-grid">
+        <p><b>Source location:</b> ${esc(formatLocation(f))}</p>
+        <p><b>function_name:</b> ${esc(f.function_name || 'N/A')}</p>
+        <p><b>Summary:</b> ${esc(f.summary)}</p>
+        <p><b>Affected files:</b> ${(f.affected_files || []).map(esc).join(', ')}</p>
+        <p><b>Evidence reason:</b> ${esc(ev.reason || '')}</p>
+        <p><b>root_cause:</b> ${esc(f.root_cause || '')}</p>
+      </div>
       <div><b>data_flow:</b> ${renderDataFlow(f.data_flow, ev.data_flow || [])}</div>
       <div><b>breakpoint_plan:</b> ${renderPlan(f.breakpoint_plan)}</div>
       <p><b>Attack scenario:</b> ${(f.attack_scenario || []).map(esc).join(' -> ')}</p>
@@ -164,7 +181,7 @@ function renderManualReviewCandidates(candidates) {
       ${obsPoc.safety ? `<p><b>Safety:</b> ${esc(obsPoc.safety)}</p>` : ''}
       ` : ''}
       ${!isManualPlan && !isObservational && safePocCode ? `<p><b>Capture hint (install common_console_helper first):</b></p>${renderVerificationCode(safePocCode)}` : ''}
-      <p><b>Verification notes:</b> <span style="color:#b91c1c;font-weight:700;">${verificationNotes.map(esc).join(' / ')}</span></p>
+      <p><b>Verification notes:</b> <span class="danger-text">${verificationNotes.map(esc).join(' / ')}</span></p>
       <p><b>Impact:</b> ${esc(f.impact)}</p>
       <p><b>Remediation:</b> ${esc(f.remediation)}</p>
     </div>`;

@@ -4,11 +4,11 @@ Synthetic fixture evaluation tests.
 Each fixture simulates a real project type without using actual customer ZIPs.
 Tests validate finding counts, noise suppression, lifecycle status, and PoC quality
 across 5 representative project shapes:
-  nafal-like   React, business logic, known endpoints
-  loTO-like    React, all endpoints dynamic/unresolvable
-  CIA-like     bundled/minified SPA, no source
-  nls-like     jQuery/ajax, search + payment endpoints
-  ebs-like     HTML/jQuery, heavy disabled-button noise
+  role-alpha   React, business logic, known endpoints
+  dynamic-api    React, all endpoints dynamic/unresolvable
+  bundled-spa     bundled/minified SPA, no source
+  legacy-jquery     jQuery/ajax, search + payment endpoints
+  legacy-portal     HTML/jQuery, heavy disabled-button noise
 """
 import unittest
 from app.models.schemas import FileContent
@@ -32,7 +32,7 @@ def fc(path, content):
 MOCK = MockConsolePocAnalyzer()
 
 
-class NafalLikeFixtureTests(unittest.TestCase):
+class RoleAlphaLikeFixtureTests(unittest.TestCase):
     """React project with business logic, known endpoints, session storage auth."""
 
     @classmethod
@@ -84,7 +84,7 @@ class NafalLikeFixtureTests(unittest.TestCase):
         payment_pbs = [p for p in self.result.verification_playbooks
                        if 'pay' in (p.endpoint or '').lower() or 'Payment' in p.risk_type]
         self.assertGreater(len(payment_pbs), 0,
-            "nafal-like: payment endpoint must produce at least one verification playbook")
+            "role-alpha: payment endpoint must produce at least one verification playbook")
 
     def test_promoted_playbook_code_short_and_safe(self):
         for pb in self.result.verification_playbooks:
@@ -103,10 +103,10 @@ class NafalLikeFixtureTests(unittest.TestCase):
 
     def test_noise_ratio_reasonable(self):
         self.assertLessEqual(self.pp.noise_ratio, 0.5,
-            f"nafal-like noise_ratio {self.pp.noise_ratio} too high (expect <= 0.5)")
+            f"role-alpha noise_ratio {self.pp.noise_ratio} too high (expect <= 0.5)")
 
 
-class LoTOLikeFixtureTests(unittest.TestCase):
+class DynamicApiLikeFixtureTests(unittest.TestCase):
     """React project with all endpoints dynamic/unresolvable — no playbooks expected."""
 
     @classmethod
@@ -126,15 +126,15 @@ class LoTOLikeFixtureTests(unittest.TestCase):
 
     def test_zero_promoted_playbooks(self):
         self.assertEqual(len(self.result.verification_playbooks), 0,
-            "loTO-like: all dynamic endpoints must produce 0 promoted playbooks")
+            "dynamic-api: all dynamic endpoints must produce 0 promoted playbooks")
 
     def test_all_review_candidates_are_manual_plan(self):
         for rc in self.result.review_candidates:
             self.assertEqual(rc.poc_generation_status, 'manual_plan',
-                f"loTO-like: dynamic endpoint must be manual_plan, got {rc.poc_generation_status}")
+                f"dynamic-api: dynamic endpoint must be manual_plan, got {rc.poc_generation_status}")
             poc_code = (rc.console_poc.code or '') if rc.console_poc else ''
             self.assertFalse(poc_code.strip(),
-                "loTO-like: manual_plan candidate must have no runnable console code")
+                "dynamic-api: manual_plan candidate must have no runnable console code")
 
     def test_no_confirmed_findings(self):
         for f in self.result.findings:
@@ -152,10 +152,10 @@ class LoTOLikeFixtureTests(unittest.TestCase):
                 code = (poc.code or '') if poc else ''
                 for sig in HOOK_SIGS:
                     self.assertNotIn(sig, code,
-                        f"loTO-like: review candidate must not contain hook: {sig!r}")
+                        f"dynamic-api: review candidate must not contain hook: {sig!r}")
 
 
-class CIALikeFixtureTests(unittest.TestCase):
+class BundledSpaLikeFixtureTests(unittest.TestCase):
     """Bundled/minified SPA — no source available, should produce no playbooks."""
 
     @classmethod
@@ -177,7 +177,7 @@ class CIALikeFixtureTests(unittest.TestCase):
 
     def test_zero_promoted_playbooks(self):
         self.assertEqual(len(self.result.verification_playbooks), 0,
-            "CIA-like: bundled files must produce 0 promoted playbooks")
+            "bundled-spa: bundled files must produce 0 promoted playbooks")
 
     def test_no_confirmed_findings(self):
         for f in self.result.findings:
@@ -186,10 +186,10 @@ class CIALikeFixtureTests(unittest.TestCase):
     def test_compressed_findings_are_raw_signal_or_absent(self):
         for f in self.result.findings:
             self.assertIn(f.status, {'raw_signal', 'review_candidate'},
-                f"CIA-like: bundled evidence must not reach runtime_verification_candidate")
+                f"bundled-spa: bundled evidence must not reach runtime_verification_candidate")
 
 
-class NLSLikeFixtureTests(unittest.TestCase):
+class LegacyJqueryLikeFixtureTests(unittest.TestCase):
     """jQuery/ajax project with search and payment endpoints."""
 
     @classmethod
@@ -228,7 +228,7 @@ class NLSLikeFixtureTests(unittest.TestCase):
         search_promoted = any('recommend' in (ep or '') or 'search' in (ep or '')
                               for ep in promoted_endpoints)
         self.assertFalse(search_promoted,
-            f"nls-like: search/recommend GET must not be promoted: {promoted_endpoints}")
+            f"legacy-jquery: search/recommend GET must not be promoted: {promoted_endpoints}")
 
     def test_no_confirmed_findings(self):
         for f in self.result.findings:
@@ -248,10 +248,10 @@ class NLSLikeFixtureTests(unittest.TestCase):
             for ep in endpoints
         )
         self.assertTrue(payment_found or len(all_findings) > 0,
-            "nls-like: payment/verify endpoint must appear in findings")
+            "legacy-jquery: payment/verify endpoint must appear in findings")
 
 
-class EBSLikeFixtureTests(unittest.TestCase):
+class LegacyPortalLikeFixtureTests(unittest.TestCase):
     """HTML/jQuery project with disabled-button noise and real endpoints."""
 
     @classmethod
@@ -292,9 +292,9 @@ class EBSLikeFixtureTests(unittest.TestCase):
     def test_mypage_get_not_promoted(self):
         promoted = {p.endpoint for p in self.result.verification_playbooks}
         self.assertNotIn('/user/myPageNewAjax', promoted,
-            "ebs-like: myPage GET must not be promoted to playbook")
+            "legacy-portal: myPage GET must not be promoted to playbook")
         self.assertNotIn('/user/myNotcListAjax', promoted,
-            "ebs-like: notice list GET must not be promoted to playbook")
+            "legacy-portal: notice list GET must not be promoted to playbook")
 
     def test_payment_endpoint_detectable(self):
         all_endpoints = []
@@ -306,7 +306,7 @@ class EBSLikeFixtureTests(unittest.TestCase):
         # At minimum, payment endpoint should appear somewhere
         found = (len(all_endpoints) > 0 or
                  any('payment' in (p.endpoint or '') for p in self.result.verification_playbooks))
-        self.assertTrue(found, "ebs-like: payment endpoint must be detectable")
+        self.assertTrue(found, "legacy-portal: payment endpoint must be detectable")
 
     def test_profile_counts_consistent(self):
         self.assertEqual(self.pp.runtime_verification_candidates, len(self.result.verification_playbooks))
@@ -325,11 +325,11 @@ class CrossFixtureInvariantTests(unittest.TestCase):
     def _run(self, files):
         return analyze_console_exploitability(files, analyzer=MOCK)
 
-    def test_nafal_specific_terms_not_in_core(self):
+    def test_role_alpha_specific_terms_not_in_core(self):
         """Core detection lists must not contain fixture-specific role names."""
         from app.services.console_poc_analysis_service import AUTH_SNIPPET_KEYS
-        self.assertNotIn('NAFAL', AUTH_SNIPPET_KEYS)
-        self.assertNotIn('nafal', [k.lower() for k in AUTH_SNIPPET_KEYS])
+        self.assertNotIn('ROLE_ALPHA', AUTH_SNIPPET_KEYS)
+        self.assertNotIn('role_alpha', [k.lower() for k in AUTH_SNIPPET_KEYS])
 
     def test_confirmed_finding_never_reachable_from_frontend(self):
         """No project type should produce confirmed_finding from frontend-only source."""
