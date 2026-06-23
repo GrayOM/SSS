@@ -96,15 +96,6 @@ curl -X POST http://127.0.0.1:8000/api/analyze \
 curl http://127.0.0.1:8000/api/analysis-runs
 ```
 
-## 시연 증적
-
-시연 증적 PNG는 저장소의 `evidence/` 폴더에 보관합니다. README에서 바로 표시되도록 파일명은 공백 없는 영문 소문자 이름을 사용합니다.
-
-```text
-evidence/run-example.png
-evidence/analysis-result-example.png
-```
-
 ### 1. 서버 실행 증적
 
 아래 화면은 `uvicorn app.main:app --reload`로 서버가 정상 기동되고, 브라우저 접속 및 `/api/analyze` 요청이 처리된 상태를 보여줍니다.
@@ -117,13 +108,6 @@ evidence/analysis-result-example.png
 
 ![분석 결과 증적](evidence/analysis-result-example.png)
 
-추가 증적이 필요할 경우 다음 화면을 더 캡처하면 됩니다.
-
-1. 메인 화면: ZIP 업로드 UI
-2. 분석 이력 API: `/api/analysis-runs` 응답 화면
-3. JSON 다운로드 파일: `analysis_result.json`
-
-실제 고객/업무 소스코드가 보이면 파일명, 도메인, 토큰, 개인정보를 마스킹한 뒤 제출하세요.
 
 ## 테스트
 
@@ -139,13 +123,6 @@ python -m pytest tests/ -v
 
 주요 테스트 범위는 업로드 제한, ZIP 보안 정책, 파일 필터링, 분석 서비스, PoC 생성, API 라우트, UI 렌더링 회귀입니다. 테스트 실패 시 보안 제한을 완화하지 말고 원인을 수정해야 합니다.
 
-## 보안 설정
-
-- 허용 확장자와 MIME/크기 제한을 유지하세요.
-- ZIP Slip, path traversal, 심볼릭 링크 차단 로직을 약화하지 마세요.
-- 외부 URL 요청 기능을 추가할 경우 SSRF 방어를 포함하세요.
-- 로그에 API Key, Token, Cookie, Password가 남지 않게 처리하세요.
-- 분석 대상은 반드시 진단 권한이 있는 소스코드만 사용하세요.
 
 ## 결과 저장
 
